@@ -1,70 +1,41 @@
-# TradingView → Telegram Webhook Bot
+# Binance Monitor → Telegram Bot
 
-A lightweight Flask webhook server that receives POST alerts from TradingView and forwards them to a Telegram chat.
+Polls Binance every 5 minutes and sends Telegram alerts for three signal types across all USDT spot pairs.
+
+## Alerts
+
+| Signal | Trigger |
+|---|---|
+| 🆕 New Listing | A new USDT pair appears on Binance Spot |
+| 📈 New 24h High | A coin sets a new 24h high between checks |
+| 🔥 RSI Overbought | RSI (14, 1h candles) rises above 70 |
 
 ## How it works
 
-1. TradingView fires a webhook POST to your `/webhook` endpoint
-2. The Flask app reads the message from the request body
-3. It sends the message to your Telegram chat via the Bot API
+1. On startup, loads all USDT pairs from Binance and sends a confirmation message to Telegram
+2. Every 5 minutes:
+   - Fetches `/api/v3/exchangeInfo` to detect new listings
+   - Fetches `/api/v3/ticker/24hr` for all pairs to detect new 24h highs
+   - Fetches 1h klines for all pairs in parallel to compute RSI
+3. RSI and 24h high alerts have a 1-hour cooldown per coin to avoid spam
 
-## Setup
+## Environment secrets
 
-### Required environment secrets
-
-| Secret | Description |
+| Secret | Value |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | Your bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | Numeric ID of the target chat/channel |
-
-### TradingView Alert Configuration
-
-In TradingView, when creating an alert:
-
-- **Webhook URL**: `https://<your-replit-domain>/webhook`
-- **Message**: Your alert text, e.g.:
-  ```
-  {{ticker}} — {{strategy.order.action}} at {{close}}
-  ```
-- The message can be plain text or a JSON body with a `"message"` or `"text"` key.
-
-### Accepted request formats
-
-**Plain text body:**
-```
-POST /webhook
-Content-Type: text/plain
-
-BTCUSDT BUY signal at 65000
-```
-
-**JSON body:**
-```json
-POST /webhook
-Content-Type: application/json
-
-{"message": "BTCUSDT BUY signal at 65000"}
-```
-or
-```json
-{"text": "BTCUSDT BUY signal at 65000"}
-```
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `TELEGRAM_CHAT_ID` | `890707423` |
 
 ## Endpoints
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/webhook` | Receive TradingView alert, forward to Telegram |
-| `GET` | `/health` | Health check — confirms secrets are set |
+| `GET` | `/health` | Status, tracked pairs, last run summary |
+| `POST` | `/run-now` | Trigger an immediate check cycle |
 
-## Running locally
+## Running
 
 ```bash
 cd telegram-webhook-bot
-python app.py
-```
-
-Or with gunicorn (production):
-```bash
-gunicorn --bind 0.0.0.0:5000 app:app
+gunicorn --bind 0.0.0.0:5000 app:app --log-level info
 ```
