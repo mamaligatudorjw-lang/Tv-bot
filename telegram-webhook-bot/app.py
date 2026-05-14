@@ -57,8 +57,9 @@ state = {
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-RSI_ALERT_COOLDOWN = 3600
+RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
+CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
 WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
@@ -403,6 +404,9 @@ def check_new_listings(current_pairs: set[str]) -> list[str]:
 
 
 def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float, float]]:
+    """Detect 24h-high breaks. Cooldown is *read* to gate eligibility, but NOT
+    marked here — the confluence dispatcher in run_checks marks cooldowns only
+    for signals that actually contribute to a sent alert."""
     alerts = []
     now = time.time()
     with state_lock:
@@ -425,7 +429,6 @@ def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float, f
                     last_sent = last_alerted.get(symbol, 0)
                     if now - last_sent >= HIGH_ALERT_COOLDOWN:
                         alerts.append((symbol, current_high, last_price, volume_usdt))
-                        last_alerted[symbol] = now
             except (ValueError, KeyError):
                 continue
     return alerts
@@ -456,12 +459,12 @@ def check_weekly_monthly_highs(
                 if w_high and price > w_high:
                     if now - last_w.get(symbol, 0) >= WEEKLY_HIGH_COOLDOWN:
                         weekly.append((symbol, w_high, price, vol))
-                        last_w[symbol] = now
+                        # cooldown marked by confluence dispatcher only on send
 
                 if m_high and price > m_high:
                     if now - last_m.get(symbol, 0) >= MONTHLY_HIGH_COOLDOWN:
                         monthly.append((symbol, m_high, price, vol))
-                        last_m[symbol] = now
+                        # cooldown marked by confluence dispatcher only on send
             except (ValueError, KeyError):
                 continue
     return weekly, monthly
@@ -531,23 +534,19 @@ def check_rsi_and_spikes(
             vol = volume_map[symbol]
 
             with state_lock:
-                # RSI overbought
+                # Cooldowns are READ to gate eligibility, but NOT marked here.
+                # The confluence dispatcher marks them only when an alert is sent.
                 if rsi is not None and rsi >= RSI_OVERBOUGHT:
                     if now - state["last_rsi_alerted"].get(symbol, 0) >= RSI_ALERT_COOLDOWN:
                         overbought.append((symbol, rsi, vol))
-                        state["last_rsi_alerted"][symbol] = now
 
-                # RSI oversold
                 elif rsi is not None and rsi <= RSI_OVERSOLD:
                     if now - state["last_rsi_oversold_alerted"].get(symbol, 0) >= RSI_ALERT_COOLDOWN:
                         oversold.append((symbol, rsi, vol))
-                        state["last_rsi_oversold_alerted"][symbol] = now
 
-                # Volume spike
                 if spike_ratio is not None and spike_ratio >= VOLUME_SPIKE_MULTIPLIER:
                     if now - state["last_vol_spike_alerted"].get(symbol, 0) >= VOLUME_SPIKE_COOLDOWN:
                         spikes.append((symbol, spike_ratio, vol))
-                        state["last_vol_spike_alerted"][symbol] = now
 
     return (
         sorted(overbought, key=lambda x: x[1], reverse=True),
@@ -567,6 +566,8 @@ def run_checks():
         "new_listings": 0, "high_breaks": 0,
         "rsi_overbought": 0, "rsi_oversold": 0,
         "vol_spikes": 0, "weekly_highs": 0, "monthly_highs": 0,
+        "confluence_alerts": 0,        # multi-signal alerts actually sent
+        "single_signals_skipped": 0,   # coins with only 1 signal — suppressed
         "errors": [],
     }
 
@@ -580,17 +581,8 @@ def run_checks():
             current_pairs = None
 
         if current_pairs:
-            # 2. New listings
+            # 2. Detect new listings (no individual alert — must combine with another signal)
             new_listings = check_new_listings(current_pairs)
-            for symbol in new_listings:
-                send_telegram(
-                    f"<b>🆕 НОВЫЙ ЛИСТИНГ НА BINANCE</b>\n"
-                    f"Символ: <code>{symbol}</code>\n"
-                    f"Новая пара USDT только что запущена на Binance Spot!\n"
-                    f"📊 Рекомендация: НЕЙТРАЛЬНО ➡️\n"
-                    f"Причина: новая пара — исторических данных пока недостаточно для анализа"
-                )
-                logger.info("New listing alert: %s", symbol)
             summary["new_listings"] = len(new_listings)
 
             # 3. 24h ticker data
@@ -619,81 +611,29 @@ def run_checks():
 
             liquid_pairs = list(liquid_vol_map.items())
 
-            # 5. 24h high breaks
+            # 5. Detect 24h high breaks (cooldown not yet marked)
+            high_24h: list[tuple[str, float, float, float]] = []
             if tickers:
-                for symbol, high, price, vol in check_24h_highs(tickers):
-                    rsi_v = get_klines_rsi(symbol)
-                    spike_v = get_volume_spike_ratio(symbol)
-                    rec_line, reason_line = make_recommendation(
-                        rsi=rsi_v, spike_ratio=spike_v, near_24h_high=True,
-                    )
-                    send_telegram(
-                        f"<b>📈 НОВЫЙ МАКСИМУМ ЗА 24Ч</b>\n"
-                        f"Символ: <code>{symbol}</code>\n"
-                        f"Новый максимум 24ч: <b>${high:,.6g}</b>\n"
-                        f"Текущая цена: ${price:,.6g}\n"
-                        f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"{rec_line}\n{reason_line}"
-                    )
-                    logger.info("24h high: %s high=%.6g", symbol, high)
-                    summary["high_breaks"] += 1
+                high_24h = check_24h_highs(tickers)
+                summary["high_breaks"] = len(high_24h)
 
             with state_lock:
                 initialized = state["initialized"]
 
+            overbought: list = []
+            oversold: list = []
+            vol_spikes: list = []
+            weekly_alerts: list = []
+            monthly_alerts: list = []
+
             if initialized and liquid_pairs:
-                # 6. RSI + volume spike (combined parallel fetch)
+                # 6. Detect RSI + volume spike signals
                 overbought, oversold, vol_spikes = check_rsi_and_spikes(liquid_pairs)
-
-                for symbol, rsi, vol in overbought:
-                    spike_v = get_volume_spike_ratio(symbol)
-                    near_high = _near_24h_high(tickers.get(symbol))
-                    rec_line, reason_line = make_recommendation(
-                        rsi=rsi, spike_ratio=spike_v, near_24h_high=near_high,
-                    )
-                    send_telegram(
-                        f"<b>🔥 RSI ПЕРЕКУПЛЕННОСТЬ (1Ч)</b>\n"
-                        f"Символ: <code>{symbol}</code>\n"
-                        f"RSI: <b>{rsi:.1f}</b> ≥ {RSI_OVERBOUGHT}\n"
-                        f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"Возможный краткосрочный перегрев.\n"
-                        f"{rec_line}\n{reason_line}"
-                    )
-                    logger.info("RSI overbought: %s rsi=%.1f", symbol, rsi)
                 summary["rsi_overbought"] = len(overbought)
-
-                for symbol, rsi, vol in oversold:
-                    rec_line, reason_line = make_recommendation(rsi=rsi)
-                    send_telegram(
-                        f"<b>🧊 RSI ПЕРЕПРОДАННОСТЬ (1Ч)</b>\n"
-                        f"Символ: <code>{symbol}</code>\n"
-                        f"RSI: <b>{rsi:.1f}</b> ≤ {RSI_OVERSOLD}\n"
-                        f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"Возможное краткосрочное дно / зона разворота.\n"
-                        f"{rec_line}\n{reason_line}"
-                    )
-                    logger.info("RSI oversold: %s rsi=%.1f", symbol, rsi)
                 summary["rsi_oversold"] = len(oversold)
-
-                for symbol, ratio, vol in vol_spikes:
-                    rsi_v = get_klines_rsi(symbol)
-                    near_high = _near_24h_high(tickers.get(symbol))
-                    rec_line, reason_line = make_recommendation(
-                        rsi=rsi_v, spike_ratio=ratio, near_24h_high=near_high,
-                    )
-                    send_telegram(
-                        f"<b>🚀 ВСПЛЕСК ОБЪЁМА</b>\n"
-                        f"Символ: <code>{symbol}</code>\n"
-                        f"Объём за 5м: <b>{ratio:.1f}×</b> выше среднечасового\n"
-                        f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"Обнаружена необычная активность покупок/продаж.\n"
-                        f"{rec_line}\n{reason_line}"
-                    )
-                    logger.info("Volume spike: %s ratio=%.1fx", symbol, ratio)
                 summary["vol_spikes"] = len(vol_spikes)
 
-                # 7. Weekly / monthly highs
-                # Refresh stored 7d/30d highs once per hour
+                # 7. Refresh stored 7d/30d highs once per hour
                 with state_lock:
                     needs_refresh = (
                         time.time() - state["last_weekly_monthly_refresh"]
@@ -708,46 +648,156 @@ def run_checks():
                         logger.error("Weekly/monthly refresh failed: %s", e)
                         summary["errors"].append(f"WM refresh: {e}")
 
+                # 8. Detect 7d / 30d high breaks
                 if tickers:
                     weekly_alerts, monthly_alerts = check_weekly_monthly_highs(tickers, liquid_vol_map)
-
-                    for symbol, prev_high, price, vol in weekly_alerts:
-                        rsi_v = get_klines_rsi(symbol)
-                        spike_v = get_volume_spike_ratio(symbol)
-                        near_high = _near_24h_high(tickers.get(symbol))
-                        rec_line, reason_line = make_recommendation(
-                            rsi=rsi_v, spike_ratio=spike_v,
-                            broke_weekly=True, near_24h_high=near_high,
-                        )
-                        send_telegram(
-                            f"<b>📊 НОВЫЙ МАКСИМУМ ЗА 7 ДНЕЙ</b>\n"
-                            f"Символ: <code>{symbol}</code>\n"
-                            f"Цена: <b>${price:,.6g}</b>\n"
-                            f"Предыдущий макс. 7д: ${prev_high:,.6g}\n"
-                            f"Объём за 24ч: ${vol:,.0f}\n"
-                            f"{rec_line}\n{reason_line}"
-                        )
-                        logger.info("7d high: %s price=%.6g", symbol, price)
                     summary["weekly_highs"] = len(weekly_alerts)
-
-                    for symbol, prev_high, price, vol in monthly_alerts:
-                        rsi_v = get_klines_rsi(symbol)
-                        spike_v = get_volume_spike_ratio(symbol)
-                        near_high = _near_24h_high(tickers.get(symbol))
-                        rec_line, reason_line = make_recommendation(
-                            rsi=rsi_v, spike_ratio=spike_v,
-                            broke_monthly=True, near_24h_high=near_high,
-                        )
-                        send_telegram(
-                            f"<b>📊 НОВЫЙ МАКСИМУМ ЗА 30 ДНЕЙ</b>\n"
-                            f"Символ: <code>{symbol}</code>\n"
-                            f"Цена: <b>${price:,.6g}</b>\n"
-                            f"Предыдущий макс. 30д: ${prev_high:,.6g}\n"
-                            f"Объём за 24ч: ${vol:,.0f}\n"
-                            f"{rec_line}\n{reason_line}"
-                        )
-                        logger.info("30d high: %s price=%.6g", symbol, price)
                     summary["monthly_highs"] = len(monthly_alerts)
+
+            # 9. CONFLUENCE DISPATCH — aggregate per symbol, only alert if ≥2 signals
+            buckets: dict[str, dict] = {}
+
+            def _bucket(symbol: str) -> dict:
+                if symbol not in buckets:
+                    t = tickers.get(symbol) if tickers else None
+                    price = None
+                    quote_vol = None
+                    if t:
+                        try:
+                            price = float(t["lastPrice"])
+                            quote_vol = float(t["quoteVolume"])
+                        except (ValueError, KeyError):
+                            pass
+                    buckets[symbol] = {
+                        "lines": [],
+                        "flags": set(),
+                        "rsi": None,
+                        "spike_ratio": None,
+                        "broke_weekly": False,
+                        "broke_monthly": False,
+                        "near_24h_high": _near_24h_high(t),
+                        "price": price,
+                        "volume": quote_vol,
+                        "cooldowns": [],  # list of (state_key, symbol) to mark on send
+                    }
+                return buckets[symbol]
+
+            # 9a. New listings
+            for sym in new_listings:
+                b = _bucket(sym)
+                if "new_listing" not in b["flags"]:
+                    b["lines"].append("🆕 Новый листинг на Binance Spot")
+                    b["flags"].add("new_listing")
+
+            # 9b. High breaks — count as ONE signal, prefer strongest tier (30d > 7d > 24h)
+            high_24h_map = {s: (h, p, v) for s, h, p, v in high_24h}
+            weekly_map = {s: (h, p, v) for s, h, p, v in weekly_alerts}
+            monthly_map = {s: (h, p, v) for s, h, p, v in monthly_alerts}
+            for sym in set(high_24h_map) | set(weekly_map) | set(monthly_map):
+                b = _bucket(sym)
+                if "high_break" in b["flags"]:
+                    continue
+                if sym in monthly_map:
+                    prev, price, _ = monthly_map[sym]
+                    b["lines"].append(f"📊 Пробой 30д максимума: ${price:,.6g} (был ${prev:,.6g})")
+                    b["broke_monthly"] = True
+                elif sym in weekly_map:
+                    prev, price, _ = weekly_map[sym]
+                    b["lines"].append(f"📊 Пробой 7д максимума: ${price:,.6g} (был ${prev:,.6g})")
+                    b["broke_weekly"] = True
+                else:
+                    high, _price, _ = high_24h_map[sym]
+                    b["lines"].append(f"📈 Новый максимум 24ч: ${high:,.6g}")
+                b["flags"].add("high_break")
+                b["near_24h_high"] = True
+                # When sending, mark all 3 high cooldowns to suppress lower-tier intraday noise
+                b["cooldowns"].extend([
+                    ("last_high_alerted", sym),
+                    ("last_weekly_alerted", sym),
+                    ("last_monthly_alerted", sym),
+                ])
+
+            # 9c. RSI overbought
+            for sym, rsi, _vol in overbought:
+                b = _bucket(sym)
+                if "rsi_overbought" not in b["flags"]:
+                    b["lines"].append(f"🔥 RSI {rsi:.1f} ≥ {RSI_OVERBOUGHT} (перекупленность)")
+                    b["flags"].add("rsi_overbought")
+                    b["rsi"] = rsi
+                    b["cooldowns"].append(("last_rsi_alerted", sym))
+
+            # 9d. RSI oversold
+            for sym, rsi, _vol in oversold:
+                b = _bucket(sym)
+                if "rsi_oversold" not in b["flags"]:
+                    b["lines"].append(f"🧊 RSI {rsi:.1f} ≤ {RSI_OVERSOLD} (перепроданность)")
+                    b["flags"].add("rsi_oversold")
+                    b["rsi"] = rsi
+                    b["cooldowns"].append(("last_rsi_oversold_alerted", sym))
+
+            # 9e. Volume spikes
+            for sym, ratio, _vol in vol_spikes:
+                b = _bucket(sym)
+                if "volume_spike" not in b["flags"]:
+                    b["lines"].append(f"🚀 Всплеск объёма 5м: {ratio:.1f}× от среднечасового")
+                    b["flags"].add("volume_spike")
+                    b["spike_ratio"] = ratio
+                    b["cooldowns"].append(("last_vol_spike_alerted", sym))
+
+            # 9f. Send confluence alerts (≥ CONFLUENCE_MIN_SIGNALS) and mark cooldowns
+            now_ts = time.time()
+            for sym, b in buckets.items():
+                if len(b["lines"]) < CONFLUENCE_MIN_SIGNALS:
+                    summary["single_signals_skipped"] += 1
+                    logger.debug("Skipped single-signal coin %s: %s", sym, sorted(b["flags"]))
+                    continue
+
+                rec_line, reason_line = make_recommendation(
+                    rsi=b["rsi"],
+                    spike_ratio=b["spike_ratio"],
+                    broke_weekly=b["broke_weekly"],
+                    broke_monthly=b["broke_monthly"],
+                    near_24h_high=b["near_24h_high"],
+                )
+                header = [f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>"]
+                if b["price"] is not None:
+                    header.append(f"Цена: <b>${b['price']:,.6g}</b>")
+                if b["volume"] is not None:
+                    header.append(f"Объём за 24ч: ${b['volume']:,.0f}")
+                body = "\n".join(header + [
+                    "",
+                    f"<b>Сработавшие сигналы ({len(b['lines'])}):</b>",
+                    *[f"  • {ln}" for ln in b["lines"]],
+                    "",
+                    rec_line,
+                    reason_line,
+                ])
+                delivered = send_telegram(body)
+                if not delivered:
+                    # Silenced or Telegram error — do NOT consume cooldowns so signals
+                    # remain live for the next cycle.
+                    logger.info(
+                        "Confluence alert %s NOT delivered (silenced/error); cooldowns preserved",
+                        sym,
+                    )
+                    continue
+
+                logger.info(
+                    "Confluence alert %s: %d signals %s",
+                    sym, len(b["lines"]), sorted(b["flags"]),
+                )
+                summary["confluence_alerts"] += 1
+
+                # Mark cooldowns only for signals that actually contributed to a sent alert
+                with state_lock:
+                    for key, s in b["cooldowns"]:
+                        state[key][s] = now_ts
+
+            if summary["single_signals_skipped"]:
+                logger.info(
+                    "Suppressed %d single-signal coins (need ≥%d to alert)",
+                    summary["single_signals_skipped"], CONFLUENCE_MIN_SIGNALS,
+                )
 
         # Mark as initialized after first successful run
         with state_lock:
@@ -758,14 +808,15 @@ def run_checks():
                 send_telegram(
                     f"<b>✅ Монитор Binance запущен</b>\n"
                     f"Отслеживается <b>{len(current_pairs)}</b> пар USDT.\n"
-                    f"Ликвидных пар (&gt;${MIN_VOLUME_USDT:,.0f} объёма за 24ч): <b>{liquid_count}</b>\n"
-                    f"Проверка каждые 5 минут на:\n"
-                    f"• 🆕 Новые листинги монет (все пары)\n"
-                    f"• 📈 Новый максимум за 24ч\n"
-                    f"• 📊 Новый максимум за 7д / 30д\n"
+                    f"Ликвидных пар (&gt;${MIN_VOLUME_USDT:,.0f} объёма за 24ч): <b>{liquid_count}</b>\n\n"
+                    f"<b>Правило конфлюэнции:</b> алерт отправляется только когда "
+                    f"<b>≥ {CONFLUENCE_MIN_SIGNALS} сигнала</b> срабатывают на одной монете в одном цикле.\n\n"
+                    f"Отслеживаемые сигналы:\n"
+                    f"• 🆕 Новый листинг\n"
+                    f"• 📈 Пробой 24ч / 7д / 30д максимума\n"
                     f"• 🚀 Всплеск объёма ≥ {VOLUME_SPIKE_MULTIPLIER}× средн.\n"
-                    f"• 🔥 RSI ≥ {RSI_OVERBOUGHT} перекупленность (1ч)\n"
-                    f"• 🧊 RSI ≤ {RSI_OVERSOLD} перепроданность (1ч)"
+                    f"• 🔥 RSI ≥ {RSI_OVERBOUGHT} перекупленность (1ч, кулдаун 4ч)\n"
+                    f"• 🧊 RSI ≤ {RSI_OVERSOLD} перепроданность (1ч, кулдаун 4ч)"
                 )
 
     except Exception as e:
@@ -813,7 +864,10 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Активный хост:</b> <code>{active_host}</code>\n\n"
         f"<b>Последняя проверка:</b> {last_run}\n"
         f"<b>Время цикла:</b> {elapsed}с\n\n"
-        f"<b>Алерты за последний цикл:</b>\n"
+        f"<b>За последний цикл:</b>\n"
+        f"  🚨 Отправлено конфлюэнция-алертов: <b>{summary.get('confluence_alerts', 0)}</b>\n"
+        f"  💤 Подавлено одиночных сигналов: {summary.get('single_signals_skipped', 0)}\n\n"
+        f"<b>Обнаружено сигналов (до фильтра):</b>\n"
         f"  🆕 Новые листинги: {summary.get('new_listings', 0)}\n"
         f"  📈 Пробои 24ч максимума: {summary.get('high_breaks', 0)}\n"
         f"  📊 Макс. 7д: {summary.get('weekly_highs', 0)}  |  "
@@ -822,11 +876,12 @@ def handle_status_command(chat_id: int) -> None:
         f"  🔥 RSI перекупленность: {summary.get('rsi_overbought', 0)}\n"
         f"  🧊 RSI перепроданность: {summary.get('rsi_oversold', 0)}"
         f"{error_line}\n\n"
-        f"<b>Пороги:</b>\n"
+        f"<b>Правила:</b>\n"
+        f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах на одной монете\n"
         f"  Мин. объём: ${MIN_VOLUME_USDT:,.0f}\n"
         f"  Всплеск объёма: ≥ {VOLUME_SPIKE_MULTIPLIER}× средн. (5м)\n"
-        f"  RSI перекупленность: ≥ {RSI_OVERBOUGHT}\n"
-        f"  RSI перепроданность: ≤ {RSI_OVERSOLD}\n"
+        f"  RSI перекупленность: ≥ {RSI_OVERBOUGHT}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
+        f"  RSI перепроданность: ≤ {RSI_OVERSOLD}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
         f"  Интервал проверки: 5 мин\n\n"
         f"<b>Команды:</b> /status · /top10 · /signal · /silence · /unmute"
     )
