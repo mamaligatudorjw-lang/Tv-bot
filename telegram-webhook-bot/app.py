@@ -502,9 +502,9 @@ def run_checks():
             new_listings = check_new_listings(current_pairs)
             for symbol in new_listings:
                 send_telegram(
-                    f"<b>🆕 NEW BINANCE LISTING</b>\n"
-                    f"Symbol: <code>{symbol}</code>\n"
-                    f"New USDT pair just went live on Binance Spot!"
+                    f"<b>🆕 НОВЫЙ ЛИСТИНГ НА BINANCE</b>\n"
+                    f"Символ: <code>{symbol}</code>\n"
+                    f"Новая пара USDT только что запущена на Binance Spot!"
                 )
                 logger.info("New listing alert: %s", symbol)
             summary["new_listings"] = len(new_listings)
@@ -539,11 +539,11 @@ def run_checks():
             if tickers:
                 for symbol, high, price, vol in check_24h_highs(tickers):
                     send_telegram(
-                        f"<b>📈 NEW 24H HIGH</b>\n"
-                        f"Symbol: <code>{symbol}</code>\n"
-                        f"New 24h High: <b>${high:,.6g}</b>\n"
-                        f"Current Price: ${price:,.6g}\n"
-                        f"24h Volume: ${vol:,.0f}"
+                        f"<b>📈 НОВЫЙ МАКСИМУМ ЗА 24Ч</b>\n"
+                        f"Символ: <code>{symbol}</code>\n"
+                        f"Новый максимум 24ч: <b>${high:,.6g}</b>\n"
+                        f"Текущая цена: ${price:,.6g}\n"
+                        f"Объём за 24ч: ${vol:,.0f}"
                     )
                     logger.info("24h high: %s high=%.6g", symbol, high)
                     summary["high_breaks"] += 1
@@ -557,33 +557,33 @@ def run_checks():
 
                 for symbol, rsi, vol in overbought:
                     send_telegram(
-                        f"<b>🔥 RSI OVERBOUGHT (1H)</b>\n"
-                        f"Symbol: <code>{symbol}</code>\n"
+                        f"<b>🔥 RSI ПЕРЕКУПЛЕННОСТЬ (1Ч)</b>\n"
+                        f"Символ: <code>{symbol}</code>\n"
                         f"RSI: <b>{rsi:.1f}</b> ≥ {RSI_OVERBOUGHT}\n"
-                        f"24h Volume: ${vol:,.0f}\n"
-                        f"Possible short-term overheating."
+                        f"Объём за 24ч: ${vol:,.0f}\n"
+                        f"Возможный краткосрочный перегрев."
                     )
                     logger.info("RSI overbought: %s rsi=%.1f", symbol, rsi)
                 summary["rsi_overbought"] = len(overbought)
 
                 for symbol, rsi, vol in oversold:
                     send_telegram(
-                        f"<b>🧊 RSI OVERSOLD (1H)</b>\n"
-                        f"Symbol: <code>{symbol}</code>\n"
+                        f"<b>🧊 RSI ПЕРЕПРОДАННОСТЬ (1Ч)</b>\n"
+                        f"Символ: <code>{symbol}</code>\n"
                         f"RSI: <b>{rsi:.1f}</b> ≤ {RSI_OVERSOLD}\n"
-                        f"24h Volume: ${vol:,.0f}\n"
-                        f"Possible short-term bottom / reversal zone."
+                        f"Объём за 24ч: ${vol:,.0f}\n"
+                        f"Возможное краткосрочное дно / зона разворота."
                     )
                     logger.info("RSI oversold: %s rsi=%.1f", symbol, rsi)
                 summary["rsi_oversold"] = len(oversold)
 
                 for symbol, ratio, vol in vol_spikes:
                     send_telegram(
-                        f"<b>🚀 VOLUME SPIKE</b>\n"
-                        f"Symbol: <code>{symbol}</code>\n"
-                        f"5m Volume: <b>{ratio:.1f}×</b> above hourly average\n"
-                        f"24h Volume: ${vol:,.0f}\n"
-                        f"Unusual buying/selling activity detected."
+                        f"<b>🚀 ВСПЛЕСК ОБЪЁМА</b>\n"
+                        f"Символ: <code>{symbol}</code>\n"
+                        f"Объём за 5м: <b>{ratio:.1f}×</b> выше среднечасового\n"
+                        f"Объём за 24ч: ${vol:,.0f}\n"
+                        f"Обнаружена необычная активность покупок/продаж."
                     )
                     logger.info("Volume spike: %s ratio=%.1fx", symbol, ratio)
                 summary["vol_spikes"] = len(vol_spikes)
@@ -609,22 +609,22 @@ def run_checks():
 
                     for symbol, prev_high, price, vol in weekly_alerts:
                         send_telegram(
-                            f"<b>📊 NEW 7-DAY HIGH</b>\n"
-                            f"Symbol: <code>{symbol}</code>\n"
-                            f"Price: <b>${price:,.6g}</b>\n"
-                            f"Previous 7d High: ${prev_high:,.6g}\n"
-                            f"24h Volume: ${vol:,.0f}"
+                            f"<b>📊 НОВЫЙ МАКСИМУМ ЗА 7 ДНЕЙ</b>\n"
+                            f"Символ: <code>{symbol}</code>\n"
+                            f"Цена: <b>${price:,.6g}</b>\n"
+                            f"Предыдущий макс. 7д: ${prev_high:,.6g}\n"
+                            f"Объём за 24ч: ${vol:,.0f}"
                         )
                         logger.info("7d high: %s price=%.6g", symbol, price)
                     summary["weekly_highs"] = len(weekly_alerts)
 
                     for symbol, prev_high, price, vol in monthly_alerts:
                         send_telegram(
-                            f"<b>📊 NEW 30-DAY HIGH</b>\n"
-                            f"Symbol: <code>{symbol}</code>\n"
-                            f"Price: <b>${price:,.6g}</b>\n"
-                            f"Previous 30d High: ${prev_high:,.6g}\n"
-                            f"24h Volume: ${vol:,.0f}"
+                            f"<b>📊 НОВЫЙ МАКСИМУМ ЗА 30 ДНЕЙ</b>\n"
+                            f"Символ: <code>{symbol}</code>\n"
+                            f"Цена: <b>${price:,.6g}</b>\n"
+                            f"Предыдущий макс. 30д: ${prev_high:,.6g}\n"
+                            f"Объём за 24ч: ${vol:,.0f}"
                         )
                         logger.info("30d high: %s price=%.6g", symbol, price)
                     summary["monthly_highs"] = len(monthly_alerts)
@@ -636,16 +636,16 @@ def run_checks():
                 liquid_count = len(liquid_vol_map) if tickers else 0
                 logger.info("Initialization complete. Tracking %d USDT pairs.", len(current_pairs))
                 send_telegram(
-                    f"<b>✅ Binance Monitor Online</b>\n"
-                    f"Tracking <b>{len(current_pairs)}</b> USDT pairs.\n"
-                    f"Liquid pairs (&gt;${MIN_VOLUME_USDT:,.0f} 24h vol): <b>{liquid_count}</b>\n"
-                    f"Checking every 5 minutes for:\n"
-                    f"• 🆕 New coin listings (all pairs)\n"
-                    f"• 📈 New 24h high\n"
-                    f"• 📊 New 7d / 30d high\n"
-                    f"• 🚀 Volume spike ≥ {VOLUME_SPIKE_MULTIPLIER}× avg\n"
-                    f"• 🔥 RSI ≥ {RSI_OVERBOUGHT} overbought (1h)\n"
-                    f"• 🧊 RSI ≤ {RSI_OVERSOLD} oversold (1h)"
+                    f"<b>✅ Монитор Binance запущен</b>\n"
+                    f"Отслеживается <b>{len(current_pairs)}</b> пар USDT.\n"
+                    f"Ликвидных пар (&gt;${MIN_VOLUME_USDT:,.0f} объёма за 24ч): <b>{liquid_count}</b>\n"
+                    f"Проверка каждые 5 минут на:\n"
+                    f"• 🆕 Новые листинги монет (все пары)\n"
+                    f"• 📈 Новый максимум за 24ч\n"
+                    f"• 📊 Новый максимум за 7д / 30д\n"
+                    f"• 🚀 Всплеск объёма ≥ {VOLUME_SPIKE_MULTIPLIER}× средн.\n"
+                    f"• 🔥 RSI ≥ {RSI_OVERBOUGHT} перекупленность (1ч)\n"
+                    f"• 🧊 RSI ≤ {RSI_OVERSOLD} перепроданность (1ч)"
                 )
 
     except Exception as e:
@@ -676,39 +676,39 @@ def handle_status_command(chat_id: int) -> None:
         silenced_at = state["silenced_at"]
 
     if not initialized:
-        _telegram_send(chat_id, "<b>⏳ Bot is still initializing...</b>\nCheck back in a moment.")
+        _telegram_send(chat_id, "<b>⏳ Бот ещё инициализируется...</b>\nЗагляните через минуту.")
         return
 
     liquid = summary.get("liquid_pairs", "—")
     elapsed = summary.get("elapsed_seconds", "—")
     errors = summary.get("errors", [])
-    error_line = f"\n⚠️ Errors: {len(errors)}" if errors else ""
-    silence_line = f"\n🔕 <b>Alerts silenced</b> since {silenced_at}" if silenced else "\n🔔 Alerts active"
+    error_line = f"\n⚠️ Ошибок: {len(errors)}" if errors else ""
+    silence_line = f"\n🔕 <b>Алерты заглушены</b> с {silenced_at}" if silenced else "\n🔔 Алерты активны"
 
     msg = (
-        f"<b>📊 Binance Monitor Status</b>"
+        f"<b>📊 Статус монитора Binance</b>"
         f"{silence_line}\n\n"
-        f"<b>Pairs tracked:</b> {tracked} USDT\n"
-        f"<b>Liquid pairs:</b> {liquid} (≥${MIN_VOLUME_USDT:,.0f} vol)\n"
-        f"<b>Active host:</b> <code>{active_host}</code>\n\n"
-        f"<b>Last run:</b> {last_run}\n"
-        f"<b>Cycle time:</b> {elapsed}s\n\n"
-        f"<b>Last cycle alerts:</b>\n"
-        f"  🆕 New listings: {summary.get('new_listings', 0)}\n"
-        f"  📈 24h high breaks: {summary.get('high_breaks', 0)}\n"
-        f"  📊 7d highs: {summary.get('weekly_highs', 0)}  |  "
-        f"30d highs: {summary.get('monthly_highs', 0)}\n"
-        f"  🚀 Volume spikes: {summary.get('vol_spikes', 0)}\n"
-        f"  🔥 RSI overbought: {summary.get('rsi_overbought', 0)}\n"
-        f"  🧊 RSI oversold: {summary.get('rsi_oversold', 0)}"
+        f"<b>Отслеживается пар:</b> {tracked} USDT\n"
+        f"<b>Ликвидных пар:</b> {liquid} (≥${MIN_VOLUME_USDT:,.0f} объёма)\n"
+        f"<b>Активный хост:</b> <code>{active_host}</code>\n\n"
+        f"<b>Последняя проверка:</b> {last_run}\n"
+        f"<b>Время цикла:</b> {elapsed}с\n\n"
+        f"<b>Алерты за последний цикл:</b>\n"
+        f"  🆕 Новые листинги: {summary.get('new_listings', 0)}\n"
+        f"  📈 Пробои 24ч максимума: {summary.get('high_breaks', 0)}\n"
+        f"  📊 Макс. 7д: {summary.get('weekly_highs', 0)}  |  "
+        f"Макс. 30д: {summary.get('monthly_highs', 0)}\n"
+        f"  🚀 Всплески объёма: {summary.get('vol_spikes', 0)}\n"
+        f"  🔥 RSI перекупленность: {summary.get('rsi_overbought', 0)}\n"
+        f"  🧊 RSI перепроданность: {summary.get('rsi_oversold', 0)}"
         f"{error_line}\n\n"
-        f"<b>Thresholds:</b>\n"
-        f"  Volume min: ${MIN_VOLUME_USDT:,.0f}\n"
-        f"  Volume spike: ≥ {VOLUME_SPIKE_MULTIPLIER}× avg (5m)\n"
-        f"  RSI overbought: ≥ {RSI_OVERBOUGHT}\n"
-        f"  RSI oversold: ≤ {RSI_OVERSOLD}\n"
-        f"  Check interval: 5 min\n\n"
-        f"<b>Commands:</b> /status · /top10 · /silence · /unmute"
+        f"<b>Пороги:</b>\n"
+        f"  Мин. объём: ${MIN_VOLUME_USDT:,.0f}\n"
+        f"  Всплеск объёма: ≥ {VOLUME_SPIKE_MULTIPLIER}× средн. (5м)\n"
+        f"  RSI перекупленность: ≥ {RSI_OVERBOUGHT}\n"
+        f"  RSI перепроданность: ≤ {RSI_OVERSOLD}\n"
+        f"  Интервал проверки: 5 мин\n\n"
+        f"<b>Команды:</b> /status · /top10 · /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
@@ -721,8 +721,8 @@ def handle_top10_command(chat_id: int) -> None:
     if not ranking:
         _telegram_send(
             chat_id,
-            "⏳ Volume ranking not ready yet — the bot is still populating its cache. "
-            "Try again in a minute.",
+            "⏳ Рейтинг объёмов ещё не готов — бот пополняет кеш. "
+            "Попробуйте через минуту.",
         )
         return
 
@@ -730,14 +730,14 @@ def handle_top10_command(chat_id: int) -> None:
     top10 = ranking[:10]
 
     lines = [
-        f"<b>🏆 Top 10 by 24h Volume Change (vs Yesterday)</b>",
-        f"<i>Updated {age_min:.0f} min ago</i>\n",
+        f"<b>🏆 Топ-10 по изменению объёма за 24ч (к вчерашнему)</b>",
+        f"<i>Обновлено {age_min:.0f} мин назад</i>\n",
     ]
     for i, (sym, yesterday, today, pct) in enumerate(top10, 1):
         sign = "+" if pct >= 0 else ""
         lines.append(
             f"{i}. <code>{sym}</code>  {sign}{pct:.1f}%\n"
-            f"   Today: ${today:,.0f}  |  Yesterday: ${yesterday:,.0f}"
+            f"   Сегодня: ${today:,.0f}  |  Вчера: ${yesterday:,.0f}"
         )
 
     _telegram_send(chat_id, "\n".join(lines))
@@ -750,9 +750,9 @@ def handle_silence_command(chat_id: int) -> None:
         state["silenced_at"] = now_str
     logger.info("Alerts silenced via /silence from chat_id=%s", chat_id)
     _telegram_send(chat_id, (
-        "<b>🔕 Alerts silenced</b>\n"
-        "Market alerts are now paused.\n"
-        "Send /unmute to resume them."
+        "<b>🔕 Алерты заглушены</b>\n"
+        "Рыночные алерты приостановлены.\n"
+        "Отправьте /unmute для их возобновления."
     ))
 
 
@@ -762,8 +762,8 @@ def handle_unmute_command(chat_id: int) -> None:
         state["silenced_at"] = None
     logger.info("Alerts unmuted via /unmute from chat_id=%s", chat_id)
     _telegram_send(chat_id, (
-        "<b>🔔 Alerts resumed</b>\n"
-        "Market alerts are active again."
+        "<b>🔔 Алерты возобновлены</b>\n"
+        "Рыночные алерты снова активны."
     ))
 
 
