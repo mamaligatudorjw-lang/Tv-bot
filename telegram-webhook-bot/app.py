@@ -39,6 +39,8 @@ state = {
     "weekly_highs": {},                # symbol -> float (7-day high, refreshed hourly)
     "monthly_highs": {},               # symbol -> float (30-day high, refreshed hourly)
     "last_weekly_monthly_refresh": 0,  # unix timestamp of last 7d/30d refresh
+    "volume_ranking": [],              # list[(symbol, yesterday_vol, today_vol, pct_change)] sorted desc by pct
+    "volume_ranking_updated": 0,       # unix timestamp of last volume ranking refresh
     "last_rsi_alerted": {},            # symbol -> timestamp (overbought cooldown)
     "last_rsi_oversold_alerted": {},   # symbol -> timestamp (oversold cooldown)
     "last_high_alerted": {},           # symbol -> timestamp (24h high cooldown)
@@ -244,13 +246,27 @@ def get_volume_spike_ratio(symbol: str) -> float | None:
 
 def get_daily_highs(symbol: str, limit: int = 31) -> list[float] | None:
     """Return list of daily high prices (oldest first) for the last `limit` days."""
+    data = get_daily_data(symbol, limit=limit)
+    return data["highs"] if data else None
+
+
+def get_daily_data(symbol: str, limit: int = 31) -> dict | None:
+    """Return {"highs": [...], "yesterday_vol": float, "today_vol": float} from daily klines.
+    Kline tuple index 2 = high, index 7 = quoteAssetVolume (USDT for USDT pairs).
+    """
     try:
         resp = _binance_get(
             "/api/v3/klines",
             params={"symbol": symbol, "interval": "1d", "limit": limit},
             timeout=10,
         )
-        return [float(k[2]) for k in resp.json()]
+        candles = resp.json()
+        if not candles:
+            return None
+        highs = [float(k[2]) for k in candles]
+        yesterday_vol = float(candles[-2][7]) if len(candles) >= 2 else 0.0
+        today_vol = float(candles[-1][7])
+        return {"highs": highs, "yesterday_vol": yesterday_vol, "today_vol": today_vol}
     except Exception as e:
         logger.warning("Daily klines failed for %s: %s", symbol, e)
         return None
@@ -366,18 +382,21 @@ def check_weekly_monthly_highs(
 
 
 def refresh_weekly_monthly_highs(liquid_symbols: list[str]) -> int:
-    """Fetch 31 daily klines per liquid symbol and store 7d/30d highs. Returns count updated."""
+    """Fetch 31 daily klines per liquid symbol; store 7d/30d highs and volume ranking.
+    Single Binance pass populates both highs cache and the /top10 volume ranking cache.
+    """
     def fetch(symbol):
-        highs = get_daily_highs(symbol, limit=31)
-        return symbol, highs
+        return symbol, get_daily_data(symbol, limit=31)
 
     updated = 0
+    ranking: list[tuple[str, float, float, float]] = []
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, s): s for s in liquid_symbols}
         for future in as_completed(futures):
-            symbol, highs = future.result()
-            if not highs:
+            symbol, data = future.result()
+            if not data:
                 continue
+            highs = data["highs"]
             weekly_high = max(highs[-7:]) if len(highs) >= 7 else max(highs)
             monthly_high = max(highs)
             with state_lock:
@@ -385,9 +404,21 @@ def refresh_weekly_monthly_highs(liquid_symbols: list[str]) -> int:
                 state["monthly_highs"][symbol] = monthly_high
             updated += 1
 
+            yest = data["yesterday_vol"]
+            today = data["today_vol"]
+            if yest > 0:
+                pct = (today - yest) / yest * 100
+                ranking.append((symbol, yest, today, pct))
+
+    ranking.sort(key=lambda x: x[3], reverse=True)
     with state_lock:
         state["last_weekly_monthly_refresh"] = time.time()
-    logger.info("Refreshed 7d/30d highs for %d symbols", updated)
+        state["volume_ranking"] = ranking
+        state["volume_ranking_updated"] = time.time()
+    logger.info(
+        "Refreshed 7d/30d highs for %d symbols; volume ranking cached (%d entries)",
+        updated, len(ranking),
+    )
     return updated
 
 
@@ -679,51 +710,25 @@ def handle_status_command(chat_id: int) -> None:
 
 
 def handle_top10_command(chat_id: int) -> None:
-    _telegram_send(chat_id, "⏳ Fetching volume data for all liquid pairs...")
-
     with state_lock:
-        known = list(state["known_pairs"])
+        ranking = list(state["volume_ranking"])
+        updated_ts = state["volume_ranking_updated"]
 
-    # Get current 24h tickers to find liquid pairs
-    try:
-        tickers = get_24h_tickers(known)
-    except Exception as e:
-        _telegram_send(chat_id, f"❌ Failed to fetch ticker data: {e}")
+    if not ranking:
+        _telegram_send(
+            chat_id,
+            "⏳ Volume ranking not ready yet — the bot is still populating its cache. "
+            "Try again in a minute.",
+        )
         return
 
-    liquid_symbols = [
-        sym for sym, t in tickers.items()
-        if float(t.get("quoteVolume", 0)) >= MIN_VOLUME_USDT
+    age_min = (time.time() - updated_ts) / 60 if updated_ts else 0
+    top10 = ranking[:10]
+
+    lines = [
+        f"<b>🏆 Top 10 by 24h Volume Change (vs Yesterday)</b>",
+        f"<i>Updated {age_min:.0f} min ago</i>\n",
     ]
-
-    if not liquid_symbols:
-        _telegram_send(chat_id, "❌ No liquid pairs found.")
-        return
-
-    # Fetch 2-day volumes in parallel
-    results: list[tuple[str, float, float, float]] = []  # (symbol, yesterday, today, pct_change)
-
-    def fetch(sym):
-        return sym, get_two_day_volumes(sym)
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(fetch, s): s for s in liquid_symbols}
-        for future in as_completed(futures):
-            sym, vols = future.result()
-            if vols is None:
-                continue
-            yesterday, today = vols
-            if yesterday > 0:
-                pct = (today - yesterday) / yesterday * 100
-                results.append((sym, yesterday, today, pct))
-
-    if not results:
-        _telegram_send(chat_id, "❌ Could not retrieve volume history.")
-        return
-
-    top10 = sorted(results, key=lambda x: x[3], reverse=True)[:10]
-
-    lines = ["<b>🏆 Top 10 by Volume Change (vs Yesterday)</b>\n"]
     for i, (sym, yesterday, today, pct) in enumerate(top10, 1):
         sign = "+" if pct >= 0 else ""
         lines.append(
