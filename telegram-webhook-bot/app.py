@@ -118,6 +118,7 @@ def _poll_telegram_commands() -> None:
     COMMANDS = {
         "/status":  handle_status_command,
         "/top10":   handle_top10_command,
+        "/signal":  handle_signal_command,
         "/silence": handle_silence_command,
         "/unmute":  handle_unmute_command,
     }
@@ -305,6 +306,87 @@ def _calculate_rsi(closes: list[float], period: int) -> float:
         return 100.0
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
+
+
+# ---------------------------------------------------------------------------
+# Recommendation engine
+# ---------------------------------------------------------------------------
+
+def _near_24h_high(ticker: dict | None, threshold: float = 0.98) -> bool:
+    """True if last price is within (1 - threshold) of the 24h high."""
+    if not ticker:
+        return False
+    try:
+        high = float(ticker["highPrice"])
+        price = float(ticker["lastPrice"])
+        return high > 0 and price >= high * threshold
+    except (ValueError, KeyError):
+        return False
+
+
+def make_recommendation(
+    *,
+    rsi: float | None = None,
+    spike_ratio: float | None = None,
+    broke_weekly: bool = False,
+    broke_monthly: bool = False,
+    near_24h_high: bool = False,
+) -> tuple[str, str]:
+    """Return (rec_line, reason_line) in Russian for the given signal mix.
+
+    Rules:
+      LONG     — (7d/30d high break + volume spike ≥ multiplier) OR RSI ≤ oversold
+      SHORT    — RSI ≥ overbought AND price near 24h high
+      NEUTRAL  — anything else / mixed
+    """
+    has_break = broke_weekly or broke_monthly
+    has_spike = spike_ratio is not None and spike_ratio >= VOLUME_SPIKE_MULTIPLIER
+    is_oversold = rsi is not None and rsi <= RSI_OVERSOLD
+    is_overbought = rsi is not None and rsi >= RSI_OVERBOUGHT
+
+    long_signal = (has_break and has_spike) or is_oversold
+    short_signal = is_overbought and near_24h_high
+
+    if long_signal and not short_signal:
+        if has_break and has_spike and is_oversold:
+            reason = (
+                f"пробой {'30д' if broke_monthly else '7д'} максимума "
+                f"со всплеском объёма {spike_ratio:.1f}× и RSI {rsi:.1f} в зоне перепроданности"
+            )
+        elif has_break and has_spike:
+            reason = (
+                f"пробой {'30д' if broke_monthly else '7д'} максимума "
+                f"со всплеском объёма {spike_ratio:.1f}× — сильный бычий сигнал"
+            )
+        else:  # oversold only
+            reason = (
+                f"RSI {rsi:.1f} ≤ {RSI_OVERSOLD} — зона перепроданности, возможен отскок"
+            )
+        return "📊 Рекомендация: ЛОНГ 📈", f"Причина: {reason}"
+
+    if short_signal and not long_signal:
+        return (
+            "📊 Рекомендация: ШОРТ 📉",
+            f"Причина: RSI {rsi:.1f} ≥ {RSI_OVERBOUGHT} вблизи 24ч максимума — вероятен перегрев",
+        )
+
+    # NEUTRAL / mixed — describe the partial signals we do see
+    parts = []
+    if rsi is not None:
+        if is_overbought:
+            parts.append(f"RSI {rsi:.1f} перекуплен, но цена не у 24ч максимума")
+        elif is_oversold:
+            parts.append(f"RSI {rsi:.1f} перепродан")
+        else:
+            parts.append(f"RSI {rsi:.1f} в нейтральной зоне")
+    if has_spike:
+        parts.append(f"всплеск объёма {spike_ratio:.1f}×")
+    if has_break and not has_spike:
+        parts.append(f"пробой {'30д' if broke_monthly else '7д'} максимума без подтверждения объёмом")
+    if near_24h_high and not is_overbought:
+        parts.append("цена у 24ч максимума")
+    reason = "; ".join(parts) if parts else "сигналы смешанные, чёткого направления нет"
+    return "📊 Рекомендация: НЕЙТРАЛЬНО ➡️", f"Причина: {reason}"
 
 
 # ---------------------------------------------------------------------------
@@ -504,7 +586,9 @@ def run_checks():
                 send_telegram(
                     f"<b>🆕 НОВЫЙ ЛИСТИНГ НА BINANCE</b>\n"
                     f"Символ: <code>{symbol}</code>\n"
-                    f"Новая пара USDT только что запущена на Binance Spot!"
+                    f"Новая пара USDT только что запущена на Binance Spot!\n"
+                    f"📊 Рекомендация: НЕЙТРАЛЬНО ➡️\n"
+                    f"Причина: новая пара — исторических данных пока недостаточно для анализа"
                 )
                 logger.info("New listing alert: %s", symbol)
             summary["new_listings"] = len(new_listings)
@@ -538,12 +622,18 @@ def run_checks():
             # 5. 24h high breaks
             if tickers:
                 for symbol, high, price, vol in check_24h_highs(tickers):
+                    rsi_v = get_klines_rsi(symbol)
+                    spike_v = get_volume_spike_ratio(symbol)
+                    rec_line, reason_line = make_recommendation(
+                        rsi=rsi_v, spike_ratio=spike_v, near_24h_high=True,
+                    )
                     send_telegram(
                         f"<b>📈 НОВЫЙ МАКСИМУМ ЗА 24Ч</b>\n"
                         f"Символ: <code>{symbol}</code>\n"
                         f"Новый максимум 24ч: <b>${high:,.6g}</b>\n"
                         f"Текущая цена: ${price:,.6g}\n"
-                        f"Объём за 24ч: ${vol:,.0f}"
+                        f"Объём за 24ч: ${vol:,.0f}\n"
+                        f"{rec_line}\n{reason_line}"
                     )
                     logger.info("24h high: %s high=%.6g", symbol, high)
                     summary["high_breaks"] += 1
@@ -556,34 +646,48 @@ def run_checks():
                 overbought, oversold, vol_spikes = check_rsi_and_spikes(liquid_pairs)
 
                 for symbol, rsi, vol in overbought:
+                    spike_v = get_volume_spike_ratio(symbol)
+                    near_high = _near_24h_high(tickers.get(symbol))
+                    rec_line, reason_line = make_recommendation(
+                        rsi=rsi, spike_ratio=spike_v, near_24h_high=near_high,
+                    )
                     send_telegram(
                         f"<b>🔥 RSI ПЕРЕКУПЛЕННОСТЬ (1Ч)</b>\n"
                         f"Символ: <code>{symbol}</code>\n"
                         f"RSI: <b>{rsi:.1f}</b> ≥ {RSI_OVERBOUGHT}\n"
                         f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"Возможный краткосрочный перегрев."
+                        f"Возможный краткосрочный перегрев.\n"
+                        f"{rec_line}\n{reason_line}"
                     )
                     logger.info("RSI overbought: %s rsi=%.1f", symbol, rsi)
                 summary["rsi_overbought"] = len(overbought)
 
                 for symbol, rsi, vol in oversold:
+                    rec_line, reason_line = make_recommendation(rsi=rsi)
                     send_telegram(
                         f"<b>🧊 RSI ПЕРЕПРОДАННОСТЬ (1Ч)</b>\n"
                         f"Символ: <code>{symbol}</code>\n"
                         f"RSI: <b>{rsi:.1f}</b> ≤ {RSI_OVERSOLD}\n"
                         f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"Возможное краткосрочное дно / зона разворота."
+                        f"Возможное краткосрочное дно / зона разворота.\n"
+                        f"{rec_line}\n{reason_line}"
                     )
                     logger.info("RSI oversold: %s rsi=%.1f", symbol, rsi)
                 summary["rsi_oversold"] = len(oversold)
 
                 for symbol, ratio, vol in vol_spikes:
+                    rsi_v = get_klines_rsi(symbol)
+                    near_high = _near_24h_high(tickers.get(symbol))
+                    rec_line, reason_line = make_recommendation(
+                        rsi=rsi_v, spike_ratio=ratio, near_24h_high=near_high,
+                    )
                     send_telegram(
                         f"<b>🚀 ВСПЛЕСК ОБЪЁМА</b>\n"
                         f"Символ: <code>{symbol}</code>\n"
                         f"Объём за 5м: <b>{ratio:.1f}×</b> выше среднечасового\n"
                         f"Объём за 24ч: ${vol:,.0f}\n"
-                        f"Обнаружена необычная активность покупок/продаж."
+                        f"Обнаружена необычная активность покупок/продаж.\n"
+                        f"{rec_line}\n{reason_line}"
                     )
                     logger.info("Volume spike: %s ratio=%.1fx", symbol, ratio)
                 summary["vol_spikes"] = len(vol_spikes)
@@ -608,23 +712,39 @@ def run_checks():
                     weekly_alerts, monthly_alerts = check_weekly_monthly_highs(tickers, liquid_vol_map)
 
                     for symbol, prev_high, price, vol in weekly_alerts:
+                        rsi_v = get_klines_rsi(symbol)
+                        spike_v = get_volume_spike_ratio(symbol)
+                        near_high = _near_24h_high(tickers.get(symbol))
+                        rec_line, reason_line = make_recommendation(
+                            rsi=rsi_v, spike_ratio=spike_v,
+                            broke_weekly=True, near_24h_high=near_high,
+                        )
                         send_telegram(
                             f"<b>📊 НОВЫЙ МАКСИМУМ ЗА 7 ДНЕЙ</b>\n"
                             f"Символ: <code>{symbol}</code>\n"
                             f"Цена: <b>${price:,.6g}</b>\n"
                             f"Предыдущий макс. 7д: ${prev_high:,.6g}\n"
-                            f"Объём за 24ч: ${vol:,.0f}"
+                            f"Объём за 24ч: ${vol:,.0f}\n"
+                            f"{rec_line}\n{reason_line}"
                         )
                         logger.info("7d high: %s price=%.6g", symbol, price)
                     summary["weekly_highs"] = len(weekly_alerts)
 
                     for symbol, prev_high, price, vol in monthly_alerts:
+                        rsi_v = get_klines_rsi(symbol)
+                        spike_v = get_volume_spike_ratio(symbol)
+                        near_high = _near_24h_high(tickers.get(symbol))
+                        rec_line, reason_line = make_recommendation(
+                            rsi=rsi_v, spike_ratio=spike_v,
+                            broke_monthly=True, near_24h_high=near_high,
+                        )
                         send_telegram(
                             f"<b>📊 НОВЫЙ МАКСИМУМ ЗА 30 ДНЕЙ</b>\n"
                             f"Символ: <code>{symbol}</code>\n"
                             f"Цена: <b>${price:,.6g}</b>\n"
                             f"Предыдущий макс. 30д: ${prev_high:,.6g}\n"
-                            f"Объём за 24ч: ${vol:,.0f}"
+                            f"Объём за 24ч: ${vol:,.0f}\n"
+                            f"{rec_line}\n{reason_line}"
                         )
                         logger.info("30d high: %s price=%.6g", symbol, price)
                     summary["monthly_highs"] = len(monthly_alerts)
@@ -708,7 +828,7 @@ def handle_status_command(chat_id: int) -> None:
         f"  RSI перекупленность: ≥ {RSI_OVERBOUGHT}\n"
         f"  RSI перепроданность: ≤ {RSI_OVERSOLD}\n"
         f"  Интервал проверки: 5 мин\n\n"
-        f"<b>Команды:</b> /status · /top10 · /silence · /unmute"
+        f"<b>Команды:</b> /status · /top10 · /signal · /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
@@ -754,6 +874,77 @@ def handle_silence_command(chat_id: int) -> None:
         "Рыночные алерты приостановлены.\n"
         "Отправьте /unmute для их возобновления."
     ))
+
+
+def handle_signal_command(chat_id: int) -> None:
+    """Show current LONG/SHORT/NEUTRAL recommendations for the top-10 symbols
+    by day-over-day volume change (the same ranking used by /top10)."""
+    with state_lock:
+        ranking = list(state["volume_ranking"])
+        weekly_highs = dict(state["weekly_highs"])
+        monthly_highs = dict(state["monthly_highs"])
+
+    if not ranking:
+        _telegram_send(
+            chat_id,
+            "⏳ Данные для сигналов ещё не готовы — бот пополняет кеш. "
+            "Попробуйте через минуту.",
+        )
+        return
+
+    top10 = ranking[:10]
+    symbols = [r[0] for r in top10]
+
+    try:
+        tickers = get_24h_tickers(symbols)
+    except Exception as e:
+        logger.error("Failed to fetch tickers for /signal: %s", e)
+        tickers = {}
+
+    def fetch(symbol: str) -> tuple[str, float | None, float | None]:
+        return symbol, get_klines_rsi(symbol), get_volume_spike_ratio(symbol)
+
+    signals: dict[str, tuple[float | None, float | None]] = {}
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(symbols))) as ex:
+        for sym, rsi_v, spike_v in ex.map(fetch, symbols):
+            signals[sym] = (rsi_v, spike_v)
+
+    lines = [
+        "<b>🎯 Текущие сигналы — топ-10 по росту объёма за 24ч (к вчерашнему)</b>\n",
+    ]
+    for i, (sym, _yest, _today, _pct) in enumerate(top10, 1):
+        rsi_v, spike_v = signals.get(sym, (None, None))
+        ticker = tickers.get(sym)
+        near_high = _near_24h_high(ticker)
+
+        # Use current price + cached 7d/30d highs to detect active breakouts
+        price: float | None = None
+        if ticker:
+            try:
+                price = float(ticker["lastPrice"])
+            except (ValueError, KeyError):
+                price = None
+        w_high = weekly_highs.get(sym)
+        m_high = monthly_highs.get(sym)
+        broke_weekly = bool(price is not None and w_high and price > w_high)
+        broke_monthly = bool(price is not None and m_high and price > m_high)
+
+        rec_line, reason_line = make_recommendation(
+            rsi=rsi_v, spike_ratio=spike_v,
+            broke_weekly=broke_weekly, broke_monthly=broke_monthly,
+            near_24h_high=near_high,
+        )
+        # Compact display: strip the leading "📊 Рекомендация: " prefix for inline use
+        rec_short = rec_line.replace("📊 Рекомендация: ", "")
+        rsi_str = f"{rsi_v:.1f}" if rsi_v is not None else "—"
+        spike_str = f"{spike_v:.1f}×" if spike_v is not None else "—"
+        lines.append(
+            f"{i}. <code>{sym}</code> — <b>{rec_short}</b>\n"
+            f"   RSI: {rsi_str}  |  Объём 5м: {spike_str}\n"
+            f"   {reason_line}"
+        )
+
+    _telegram_send(chat_id, "\n".join(lines))
 
 
 def handle_unmute_command(chat_id: int) -> None:
