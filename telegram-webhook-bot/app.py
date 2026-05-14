@@ -39,6 +39,8 @@ state = {
     "initialized": False,
     "last_run": None,
     "last_run_summary": {},
+    "silenced": False,            # when True, market alerts are suppressed
+    "silenced_at": None,          # ISO timestamp of when silence was activated
 }
 
 RSI_ALERT_COOLDOWN = 3600        # re-alert RSI max once per hour per coin
@@ -55,6 +57,10 @@ MIN_VOLUME_USDT = 50_000         # minimum 24h USDT volume to qualify for RSI/hi
 # ---------------------------------------------------------------------------
 
 def send_telegram(text: str) -> bool:
+    with state_lock:
+        if state["silenced"]:
+            logger.info("Alert suppressed (silenced): %s", text[:60])
+            return False
     return _telegram_send(TELEGRAM_CHAT_ID, text)
 
 
@@ -99,6 +105,10 @@ def handle_status_command(chat_id: int) -> None:
         summary = state["last_run_summary"]
         active_host = BINANCE_BASE
 
+    with state_lock:
+        silenced = state["silenced"]
+        silenced_at = state["silenced_at"]
+
     if not initialized:
         _telegram_send(chat_id, "<b>⏳ Bot is still initializing...</b>\nCheck back in a moment.")
         return
@@ -112,9 +122,11 @@ def handle_status_command(chat_id: int) -> None:
     errors = summary.get("errors", [])
 
     error_line = f"\n⚠️ Errors: {len(errors)}" if errors else ""
+    silence_line = f"\n🔕 <b>Alerts silenced</b> since {silenced_at}" if silenced else "\n🔔 Alerts active"
 
     msg = (
-        f"<b>📊 Binance Monitor Status</b>\n\n"
+        f"<b>📊 Binance Monitor Status</b>\n"
+        f"{silence_line}\n\n"
         f"<b>Pairs tracked:</b> {tracked} USDT\n"
         f"<b>Liquid pairs:</b> {liquid} (≥${MIN_VOLUME_USDT:,.0f} vol)\n"
         f"<b>Active host:</b> <code>{active_host}</code>\n\n"
@@ -130,7 +142,8 @@ def handle_status_command(chat_id: int) -> None:
         f"  Volume min: ${MIN_VOLUME_USDT:,.0f}\n"
         f"  RSI overbought: ≥ {RSI_OVERBOUGHT}\n"
         f"  RSI oversold: ≤ {RSI_OVERSOLD}\n"
-        f"  Check interval: 5 min"
+        f"  Check interval: 5 min\n\n"
+        f"<b>Commands:</b> /status · /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
@@ -440,8 +453,11 @@ def health():
             "status": "ok",
             "initialized": state["initialized"],
             "tracked_pairs": len(state["known_pairs"]),
+            "silenced": state["silenced"],
+            "silenced_at": state["silenced_at"],
             "last_run": state["last_run"],
             "last_run_summary": state["last_run_summary"],
+            "active_binance_host": BINANCE_BASE,
             "telegram_bot_token_set": bool(TELEGRAM_BOT_TOKEN),
             "telegram_chat_id": TELEGRAM_CHAT_ID,
         })
@@ -454,16 +470,49 @@ def trigger_run():
     return jsonify({"ok": True, "message": "Check cycle triggered"}), 202
 
 
+def handle_silence_command(chat_id: int) -> None:
+    now_str = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with state_lock:
+        state["silenced"] = True
+        state["silenced_at"] = now_str
+    logger.info("Alerts silenced via /silence command from chat_id=%s", chat_id)
+    _telegram_send(chat_id, (
+        "<b>🔕 Alerts silenced</b>\n"
+        "Market alerts are now paused.\n"
+        "Send /unmute to resume them."
+    ))
+
+
+def handle_unmute_command(chat_id: int) -> None:
+    with state_lock:
+        state["silenced"] = False
+        state["silenced_at"] = None
+    logger.info("Alerts unmuted via /unmute command from chat_id=%s", chat_id)
+    _telegram_send(chat_id, (
+        "<b>🔔 Alerts resumed</b>\n"
+        "Market alerts are active again."
+    ))
+
+
 @app.route("/telegram-update", methods=["POST"])
 def telegram_update():
     update = request.get_json(silent=True) or {}
     message = update.get("message", {})
     chat_id = message.get("chat", {}).get("id")
-    text = (message.get("text") or "").strip()
+    text = (message.get("text") or "").strip().lower()
 
-    if chat_id and text.startswith("/status"):
-        thread = threading.Thread(target=handle_status_command, args=(chat_id,), daemon=True)
-        thread.start()
+    if not chat_id:
+        return jsonify({"ok": True}), 200
+
+    COMMANDS = {
+        "/status":  handle_status_command,
+        "/silence": handle_silence_command,
+        "/unmute":  handle_unmute_command,
+    }
+    for cmd, handler in COMMANDS.items():
+        if text.startswith(cmd):
+            threading.Thread(target=handler, args=(chat_id,), daemon=True).start()
+            break
 
     return jsonify({"ok": True}), 200
 
