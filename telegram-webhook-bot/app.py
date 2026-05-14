@@ -4,7 +4,7 @@ import logging
 import threading
 import numpy as np
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -55,11 +55,15 @@ MIN_VOLUME_USDT = 50_000         # minimum 24h USDT volume to qualify for RSI/hi
 # ---------------------------------------------------------------------------
 
 def send_telegram(text: str) -> bool:
+    return _telegram_send(TELEGRAM_CHAT_ID, text)
+
+
+def _telegram_send(chat_id: str | int, text: str) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
         resp = requests.post(
             url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
             timeout=10,
         )
         resp.raise_for_status()
@@ -67,6 +71,68 @@ def send_telegram(text: str) -> bool:
     except Exception as e:
         logger.error("Telegram send failed: %s", e)
         return False
+
+
+def register_telegram_webhook() -> None:
+    domain = (os.environ.get("REPLIT_DOMAINS", "").split(",")[0] or "").strip()
+    if not domain:
+        logger.warning("REPLIT_DOMAINS not set — skipping webhook registration")
+        return
+    webhook_url = f"https://{domain}/telegram-update"
+    try:
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            json={"url": webhook_url, "allowed_updates": ["message"]},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info("Telegram webhook registered: %s", webhook_url)
+    except Exception as e:
+        logger.error("Failed to register Telegram webhook: %s", e)
+
+
+def handle_status_command(chat_id: int) -> None:
+    with state_lock:
+        initialized = state["initialized"]
+        tracked = len(state["known_pairs"])
+        last_run = state["last_run"] or "not yet"
+        summary = state["last_run_summary"]
+        active_host = BINANCE_BASE
+
+    if not initialized:
+        _telegram_send(chat_id, "<b>⏳ Bot is still initializing...</b>\nCheck back in a moment.")
+        return
+
+    liquid = summary.get("liquid_pairs", "—")
+    new_l = summary.get("new_listings", 0)
+    highs = summary.get("high_breaks", 0)
+    ob = summary.get("rsi_overbought", 0)
+    os_ = summary.get("rsi_oversold", 0)
+    elapsed = summary.get("elapsed_seconds", "—")
+    errors = summary.get("errors", [])
+
+    error_line = f"\n⚠️ Errors: {len(errors)}" if errors else ""
+
+    msg = (
+        f"<b>📊 Binance Monitor Status</b>\n\n"
+        f"<b>Pairs tracked:</b> {tracked} USDT\n"
+        f"<b>Liquid pairs:</b> {liquid} (≥${MIN_VOLUME_USDT:,.0f} vol)\n"
+        f"<b>Active host:</b> <code>{active_host}</code>\n\n"
+        f"<b>Last run:</b> {last_run}\n"
+        f"<b>Cycle time:</b> {elapsed}s\n\n"
+        f"<b>Last cycle alerts:</b>\n"
+        f"  🆕 New listings: {new_l}\n"
+        f"  📈 24h high breaks: {highs}\n"
+        f"  🔥 RSI overbought: {ob}\n"
+        f"  🧊 RSI oversold: {os_}"
+        f"{error_line}\n\n"
+        f"<b>Thresholds:</b>\n"
+        f"  Volume min: ${MIN_VOLUME_USDT:,.0f}\n"
+        f"  RSI overbought: ≥ {RSI_OVERBOUGHT}\n"
+        f"  RSI oversold: ≤ {RSI_OVERSOLD}\n"
+        f"  Check interval: 5 min"
+    )
+    _telegram_send(chat_id, msg)
 
 
 # ---------------------------------------------------------------------------
@@ -388,6 +454,20 @@ def trigger_run():
     return jsonify({"ok": True, "message": "Check cycle triggered"}), 202
 
 
+@app.route("/telegram-update", methods=["POST"])
+def telegram_update():
+    update = request.get_json(silent=True) or {}
+    message = update.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    text = (message.get("text") or "").strip()
+
+    if chat_id and text.startswith("/status"):
+        thread = threading.Thread(target=handle_status_command, args=(chat_id,), daemon=True)
+        thread.start()
+
+    return jsonify({"ok": True}), 200
+
+
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
@@ -395,6 +475,8 @@ def trigger_run():
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(run_checks, "interval", minutes=5, id="binance_check", next_run_time=__import__("datetime").datetime.utcnow())
 scheduler.start()
+
+register_telegram_webhook()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
