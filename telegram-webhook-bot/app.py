@@ -97,22 +97,64 @@ def _telegram_send(chat_id: str | int, text: str) -> bool:
         return False
 
 
-def register_telegram_webhook() -> None:
-    domain = (os.environ.get("REPLIT_DOMAINS", "").split(",")[0] or "").strip()
-    if not domain:
-        logger.warning("REPLIT_DOMAINS not set — skipping webhook registration")
-        return
-    webhook_url = f"https://{domain}/telegram-update"
+def _delete_telegram_webhook() -> None:
+    """Remove any existing webhook so getUpdates polling works."""
     try:
         resp = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
-            json={"url": webhook_url, "allowed_updates": ["message"]},
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": True},
             timeout=10,
         )
         resp.raise_for_status()
-        logger.info("Telegram webhook registered: %s", webhook_url)
+        logger.info("Telegram webhook deleted — polling mode active")
     except Exception as e:
-        logger.error("Failed to register Telegram webhook: %s", e)
+        logger.error("Failed to delete Telegram webhook: %s", e)
+
+
+def _poll_telegram_commands() -> None:
+    """Long-poll Telegram getUpdates forever; dispatch command handlers."""
+    COMMANDS = {
+        "/status":  handle_status_command,
+        "/top10":   handle_top10_command,
+        "/silence": handle_silence_command,
+        "/unmute":  handle_unmute_command,
+    }
+    offset: int | None = None
+    logger.info("Telegram command polling started")
+    while True:
+        try:
+            params: dict = {"timeout": 30, "allowed_updates": ["message"]}
+            if offset is not None:
+                params["offset"] = offset
+            resp = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                params=params,
+                timeout=35,
+            )
+            resp.raise_for_status()
+            for update in resp.json().get("result", []):
+                offset = update["update_id"] + 1
+                message = update.get("message", {})
+                chat_id = message.get("chat", {}).get("id")
+                text = (message.get("text") or "").strip().lower()
+                if not chat_id or not text:
+                    continue
+                for cmd, handler in COMMANDS.items():
+                    if text.startswith(cmd):
+                        logger.info("Command %s from chat_id=%s", cmd, chat_id)
+                        threading.Thread(
+                            target=handler, args=(chat_id,), daemon=True
+                        ).start()
+                        break
+        except Exception as e:
+            logger.error("Polling error: %s — retrying in 5s", e)
+            time.sleep(5)
+
+
+def start_command_polling() -> None:
+    _delete_telegram_webhook()
+    t = threading.Thread(target=_poll_telegram_commands, daemon=True, name="tg-poll")
+    t.start()
 
 
 # ---------------------------------------------------------------------------
@@ -746,25 +788,8 @@ def trigger_run():
 
 @app.route("/telegram-update", methods=["POST"])
 def telegram_update():
-    update = request.get_json(silent=True) or {}
-    message = update.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    text = (message.get("text") or "").strip().lower()
-
-    if not chat_id:
-        return jsonify({"ok": True}), 200
-
-    COMMANDS = {
-        "/status":  handle_status_command,
-        "/top10":   handle_top10_command,
-        "/silence": handle_silence_command,
-        "/unmute":  handle_unmute_command,
-    }
-    for cmd, handler in COMMANDS.items():
-        if text.startswith(cmd):
-            threading.Thread(target=handler, args=(chat_id,), daemon=True).start()
-            break
-
+    # Commands are handled via long-polling; this endpoint is kept as a no-op
+    # fallback in case a webhook is ever re-configured.
     return jsonify({"ok": True}), 200
 
 
@@ -779,7 +804,7 @@ scheduler.add_job(
 )
 scheduler.start()
 
-register_telegram_webhook()
+start_command_polling()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
