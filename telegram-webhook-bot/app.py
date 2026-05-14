@@ -37,6 +37,7 @@ HIGH_ALERT_COOLDOWN = 3600       # re-alert new 24h high max once per hour
 RSI_PERIOD = 14
 RSI_THRESHOLD = 70.0
 MAX_WORKERS = 20                 # parallel kline fetches
+MIN_VOLUME_USDT = 50_000         # minimum 24h USDT volume to qualify for RSI/high alerts
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +127,7 @@ def check_new_listings(current_pairs: set[str]) -> list[str]:
     return new
 
 
-def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float]]:
+def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float, float]]:
     alerts = []
     now = time.time()
     with state_lock:
@@ -137,6 +138,7 @@ def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float]]:
             try:
                 current_high = float(t["highPrice"])
                 last_price = float(t["lastPrice"])
+                volume_usdt = float(t["quoteVolume"])
                 prev_high = prev_highs.get(symbol)
 
                 # Update stored high
@@ -148,33 +150,38 @@ def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float]]:
                 if prev_high is None:
                     continue
 
-                # Alert when a new 24h high is set AND price is near/at the high
+                # Skip low-liquidity coins
+                if volume_usdt < MIN_VOLUME_USDT:
+                    continue
+
+                # Alert when a new 24h high is set between checks
                 if current_high > prev_high:
                     last_sent = last_alerted.get(symbol, 0)
                     if now - last_sent >= HIGH_ALERT_COOLDOWN:
-                        alerts.append((symbol, current_high, last_price))
+                        alerts.append((symbol, current_high, last_price, volume_usdt))
                         last_alerted[symbol] = now
             except (ValueError, KeyError):
                 continue
     return alerts
 
 
-def check_rsi(symbols: list[str]) -> list[tuple[str, float]]:
+def check_rsi(symbols_volumes: list[tuple[str, float]]) -> list[tuple[str, float, float]]:
     alerts = []
     now = time.time()
+    volume_map = dict(symbols_volumes)
 
     def fetch(symbol):
         return symbol, get_klines_rsi(symbol)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(fetch, s): s for s in symbols}
+        futures = {ex.submit(fetch, s): s for s, _ in symbols_volumes}
         for future in as_completed(futures):
             symbol, rsi = future.result()
             if rsi is not None and rsi >= RSI_THRESHOLD:
                 with state_lock:
                     last_sent = state["last_rsi_alerted"].get(symbol, 0)
                     if now - last_sent >= RSI_ALERT_COOLDOWN:
-                        alerts.append((symbol, rsi))
+                        alerts.append((symbol, rsi, volume_map[symbol]))
                         state["last_rsi_alerted"][symbol] = now
 
     return sorted(alerts, key=lambda x: x[1], reverse=True)
@@ -219,49 +226,73 @@ def run_checks():
                 summary["errors"].append(f"Tickers fetch: {e}")
                 tickers = {}
 
-            # 4. 24h high breaks
+            # 4. Build volume-filtered list once — shared by high-break + RSI checks
+            liquid_pairs: list[tuple[str, float]] = []
+            if tickers:
+                for sym, t in tickers.items():
+                    try:
+                        vol = float(t["quoteVolume"])
+                        if vol >= MIN_VOLUME_USDT:
+                            liquid_pairs.append((sym, vol))
+                    except (ValueError, KeyError):
+                        continue
+                summary["liquid_pairs"] = len(liquid_pairs)
+                logger.info(
+                    "%d / %d pairs pass volume filter ($%s+ 24h USDT volume)",
+                    len(liquid_pairs), len(tickers),
+                    f"{MIN_VOLUME_USDT:,.0f}",
+                )
+
+            # 5. 24h high breaks (volume filter applied inside check)
             if tickers:
                 high_alerts = check_24h_highs(tickers)
-                for symbol, high, price in high_alerts:
+                for symbol, high, price, vol in high_alerts:
                     msg = (
                         f"<b>📈 NEW 24H HIGH</b>\n"
                         f"Symbol: <code>{symbol}</code>\n"
                         f"New 24h High: <b>${high:,.6g}</b>\n"
-                        f"Current Price: ${price:,.6g}"
+                        f"Current Price: ${price:,.6g}\n"
+                        f"24h Volume: ${vol:,.0f}"
                     )
                     send_telegram(msg)
-                    logger.info("24h high alert: %s high=%.6g", symbol, high)
+                    logger.info("24h high alert: %s high=%.6g vol=$%.0f", symbol, high, vol)
                 summary["high_breaks"] = len(high_alerts)
 
-            # 5. RSI check — run on all current pairs
+            # 6. RSI check — only liquid pairs
             with state_lock:
                 initialized = state["initialized"]
 
-            if initialized:
-                rsi_alerts = check_rsi(list(current_pairs))
-                for symbol, rsi in rsi_alerts:
+            if initialized and liquid_pairs:
+                rsi_alerts = check_rsi(liquid_pairs)
+                for symbol, rsi, vol in rsi_alerts:
                     msg = (
                         f"<b>🔥 RSI OVERBOUGHT (1H)</b>\n"
                         f"Symbol: <code>{symbol}</code>\n"
                         f"RSI: <b>{rsi:.1f}</b> (threshold: {RSI_THRESHOLD})\n"
+                        f"24h Volume: ${vol:,.0f}\n"
                         f"Possible short-term overheating."
                     )
                     send_telegram(msg)
-                    logger.info("RSI alert: %s rsi=%.1f", symbol, rsi)
+                    logger.info("RSI alert: %s rsi=%.1f vol=$%.0f", symbol, rsi, vol)
                 summary["rsi_alerts"] = len(rsi_alerts)
 
         # Mark as initialized after first successful full run
         with state_lock:
             if not state["initialized"] and current_pairs:
                 state["initialized"] = True
+                liquid_count = sum(
+                    1 for t in tickers.values()
+                    if float(t.get("quoteVolume", 0)) >= MIN_VOLUME_USDT
+                ) if tickers else 0
                 logger.info("Initialization complete. Tracking %d USDT pairs.", len(current_pairs))
                 send_telegram(
                     f"<b>✅ Binance Monitor Online</b>\n"
                     f"Tracking <b>{len(current_pairs)}</b> USDT pairs.\n"
+                    f"Liquid pairs (&gt;${MIN_VOLUME_USDT:,.0f} 24h vol): <b>{liquid_count}</b>\n"
                     f"Checking every 5 minutes for:\n"
-                    f"• New coin listings\n"
-                    f"• 24h high breaks\n"
-                    f"• RSI &gt; {RSI_THRESHOLD} (1h candles)"
+                    f"• New coin listings (all pairs)\n"
+                    f"• 24h high breaks (liquid pairs only)\n"
+                    f"• RSI &gt; {RSI_THRESHOLD} on 1h candles (liquid pairs only)"
                 )
 
     except Exception as e:
