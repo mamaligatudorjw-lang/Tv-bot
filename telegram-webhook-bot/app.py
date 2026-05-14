@@ -18,7 +18,15 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "890707423")
-BINANCE_BASE = "https://api.binance.us"
+# Global Binance cluster endpoints — tried in order until one succeeds
+BINANCE_HOSTS = [
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://api4.binance.com",
+    "https://data-api.binance.vision",
+]
+BINANCE_BASE = BINANCE_HOSTS[0]  # updated at runtime by _binance_get()
 
 # --- In-memory state ---
 state_lock = threading.Lock()
@@ -63,9 +71,31 @@ def send_telegram(text: str) -> bool:
 # Binance helpers
 # ---------------------------------------------------------------------------
 
+def _binance_get(path: str, params: dict | None = None, timeout: int = 15):
+    """Try each Binance host in turn; persist the last working host."""
+    global BINANCE_BASE
+    hosts_to_try = [BINANCE_BASE] + [h for h in BINANCE_HOSTS if h != BINANCE_BASE]
+    last_err = None
+    for host in hosts_to_try:
+        try:
+            resp = requests.get(f"{host}{path}", params=params, timeout=timeout)
+            if resp.status_code == 451:
+                logger.warning("Host %s returned 451, trying next...", host)
+                last_err = requests.exceptions.HTTPError(f"451 from {host}")
+                continue
+            resp.raise_for_status()
+            if host != BINANCE_BASE:
+                logger.info("Switched active Binance host to %s", host)
+                BINANCE_BASE = host
+            return resp
+        except requests.exceptions.RequestException as e:
+            logger.warning("Host %s failed: %s", host, e)
+            last_err = e
+    raise last_err
+
+
 def get_all_usdt_pairs() -> list[str]:
-    resp = requests.get(f"{BINANCE_BASE}/api/v3/exchangeInfo", timeout=15)
-    resp.raise_for_status()
+    resp = _binance_get("/api/v3/exchangeInfo", timeout=15)
     data = resp.json()
     return [
         s["symbol"]
@@ -77,8 +107,7 @@ def get_all_usdt_pairs() -> list[str]:
 
 
 def get_24h_tickers(symbols: list[str]) -> dict[str, dict]:
-    resp = requests.get(f"{BINANCE_BASE}/api/v3/ticker/24hr", timeout=20)
-    resp.raise_for_status()
+    resp = _binance_get("/api/v3/ticker/24hr", timeout=20)
     all_tickers = resp.json()
     symbol_set = set(symbols)
     return {t["symbol"]: t for t in all_tickers if t["symbol"] in symbol_set}
@@ -86,12 +115,11 @@ def get_24h_tickers(symbols: list[str]) -> dict[str, dict]:
 
 def get_klines_rsi(symbol: str) -> float | None:
     try:
-        resp = requests.get(
-            f"{BINANCE_BASE}/api/v3/klines",
+        resp = _binance_get(
+            "/api/v3/klines",
             params={"symbol": symbol, "interval": "1h", "limit": RSI_PERIOD + 1},
             timeout=10,
         )
-        resp.raise_for_status()
         closes = [float(k[4]) for k in resp.json()]
         if len(closes) < RSI_PERIOD + 1:
             return None
