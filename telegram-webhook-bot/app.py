@@ -32,7 +32,7 @@ BINANCE_BASE = BINANCE_HOSTS[0]  # updated at runtime by _binance_get()
 # ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
-state_lock = threading.Lock()
+state_lock = threading.RLock()  # reentrant: same thread may re-acquire (e.g. send_telegram called from inside a state_lock block)
 state = {
     "known_pairs": set(),              # set of USDT symbol strings
     "previous_highs": {},              # symbol -> float (24h high from last check)
