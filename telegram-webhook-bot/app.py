@@ -144,9 +144,13 @@ def _poll_telegram_commands() -> None:
                 for cmd, handler in COMMANDS.items():
                     if text.startswith(cmd):
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
-                        threading.Thread(
-                            target=handler, args=(chat_id,), daemon=True
-                        ).start()
+                        def _run(h=handler, cid=chat_id, c=cmd):
+                            try:
+                                h(cid)
+                                logger.info("Command %s handler completed", c)
+                            except Exception as exc:
+                                logger.exception("Handler %s crashed: %s", c, exc)
+                        threading.Thread(target=_run, daemon=True).start()
                         break
         except Exception as e:
             logger.error("Polling error: %s — retrying in 5s", e)
