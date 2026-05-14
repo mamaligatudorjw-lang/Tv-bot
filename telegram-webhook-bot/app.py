@@ -33,7 +33,8 @@ state_lock = threading.Lock()
 state = {
     "known_pairs": set(),         # set of USDT symbol strings
     "previous_highs": {},         # symbol -> float (24h high from last check)
-    "last_rsi_alerted": {},       # symbol -> timestamp (avoid spam)
+    "last_rsi_alerted": {},       # symbol -> timestamp for overbought (avoid spam)
+    "last_rsi_oversold_alerted": {},  # symbol -> timestamp for oversold (avoid spam)
     "last_high_alerted": {},      # symbol -> timestamp
     "initialized": False,
     "last_run": None,
@@ -43,7 +44,8 @@ state = {
 RSI_ALERT_COOLDOWN = 3600        # re-alert RSI max once per hour per coin
 HIGH_ALERT_COOLDOWN = 3600       # re-alert new 24h high max once per hour
 RSI_PERIOD = 14
-RSI_THRESHOLD = 70.0
+RSI_OVERBOUGHT = 70.0
+RSI_OVERSOLD = 30.0
 MAX_WORKERS = 20                 # parallel kline fetches
 MIN_VOLUME_USDT = 50_000         # minimum 24h USDT volume to qualify for RSI/high alerts
 
@@ -193,8 +195,10 @@ def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float, f
     return alerts
 
 
-def check_rsi(symbols_volumes: list[tuple[str, float]]) -> list[tuple[str, float, float]]:
-    alerts = []
+def check_rsi(symbols_volumes: list[tuple[str, float]]) -> tuple[
+    list[tuple[str, float, float]], list[tuple[str, float, float]]
+]:
+    overbought, oversold = [], []
     now = time.time()
     volume_map = dict(symbols_volumes)
 
@@ -205,14 +209,25 @@ def check_rsi(symbols_volumes: list[tuple[str, float]]) -> list[tuple[str, float
         futures = {ex.submit(fetch, s): s for s, _ in symbols_volumes}
         for future in as_completed(futures):
             symbol, rsi = future.result()
-            if rsi is not None and rsi >= RSI_THRESHOLD:
-                with state_lock:
+            if rsi is None:
+                continue
+            vol = volume_map[symbol]
+            with state_lock:
+                if rsi >= RSI_OVERBOUGHT:
                     last_sent = state["last_rsi_alerted"].get(symbol, 0)
                     if now - last_sent >= RSI_ALERT_COOLDOWN:
-                        alerts.append((symbol, rsi, volume_map[symbol]))
+                        overbought.append((symbol, rsi, vol))
                         state["last_rsi_alerted"][symbol] = now
+                elif rsi <= RSI_OVERSOLD:
+                    last_sent = state["last_rsi_oversold_alerted"].get(symbol, 0)
+                    if now - last_sent >= RSI_ALERT_COOLDOWN:
+                        oversold.append((symbol, rsi, vol))
+                        state["last_rsi_oversold_alerted"][symbol] = now
 
-    return sorted(alerts, key=lambda x: x[1], reverse=True)
+    return (
+        sorted(overbought, key=lambda x: x[1], reverse=True),
+        sorted(oversold, key=lambda x: x[1]),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -291,18 +306,29 @@ def run_checks():
                 initialized = state["initialized"]
 
             if initialized and liquid_pairs:
-                rsi_alerts = check_rsi(liquid_pairs)
-                for symbol, rsi, vol in rsi_alerts:
+                overbought_alerts, oversold_alerts = check_rsi(liquid_pairs)
+                for symbol, rsi, vol in overbought_alerts:
                     msg = (
                         f"<b>🔥 RSI OVERBOUGHT (1H)</b>\n"
                         f"Symbol: <code>{symbol}</code>\n"
-                        f"RSI: <b>{rsi:.1f}</b> (threshold: {RSI_THRESHOLD})\n"
+                        f"RSI: <b>{rsi:.1f}</b> ≥ {RSI_OVERBOUGHT}\n"
                         f"24h Volume: ${vol:,.0f}\n"
                         f"Possible short-term overheating."
                     )
                     send_telegram(msg)
-                    logger.info("RSI alert: %s rsi=%.1f vol=$%.0f", symbol, rsi, vol)
-                summary["rsi_alerts"] = len(rsi_alerts)
+                    logger.info("RSI overbought: %s rsi=%.1f vol=$%.0f", symbol, rsi, vol)
+                for symbol, rsi, vol in oversold_alerts:
+                    msg = (
+                        f"<b>🧊 RSI OVERSOLD (1H)</b>\n"
+                        f"Symbol: <code>{symbol}</code>\n"
+                        f"RSI: <b>{rsi:.1f}</b> ≤ {RSI_OVERSOLD}\n"
+                        f"24h Volume: ${vol:,.0f}\n"
+                        f"Possible short-term bottom / reversal zone."
+                    )
+                    send_telegram(msg)
+                    logger.info("RSI oversold: %s rsi=%.1f vol=$%.0f", symbol, rsi, vol)
+                summary["rsi_overbought"] = len(overbought_alerts)
+                summary["rsi_oversold"] = len(oversold_alerts)
 
         # Mark as initialized after first successful full run
         with state_lock:
@@ -320,7 +346,8 @@ def run_checks():
                     f"Checking every 5 minutes for:\n"
                     f"• New coin listings (all pairs)\n"
                     f"• 24h high breaks (liquid pairs only)\n"
-                    f"• RSI &gt; {RSI_THRESHOLD} on 1h candles (liquid pairs only)"
+                    f"• RSI &gt; {RSI_OVERBOUGHT} overbought on 1h candles\n"
+                    f"• RSI &lt; {RSI_OVERSOLD} oversold on 1h candles"
                 )
 
     except Exception as e:
