@@ -1,5 +1,6 @@
 import os
 import time
+import html
 import logging
 import threading
 import numpy as np
@@ -35,6 +36,9 @@ BINANCE_BASE = BINANCE_HOSTS[0]  # updated at runtime by _binance_get()
 state_lock = threading.RLock()  # reentrant: same thread may re-acquire (e.g. send_telegram called from inside a state_lock block)
 state = {
     "known_pairs": set(),              # set of USDT symbol strings
+    "known_coingecko_ids": set(),      # set of coingecko coin ids seen on previous fetch
+    "coingecko_initialized": False,    # first run populates the set without alerting
+    "last_coingecko_check": 0,         # unix timestamp of last coingecko fetch
     "previous_highs": {},              # symbol -> float (24h high from last check)
     "weekly_highs": {},                # symbol -> float (7-day high, refreshed hourly)
     "monthly_highs": {},               # symbol -> float (30-day high, refreshed hourly)
@@ -60,6 +64,9 @@ state = {
 RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
 CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
+COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
+COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
+COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
@@ -403,6 +410,142 @@ def check_new_listings(current_pairs: set[str]) -> list[str]:
     return new
 
 
+def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
+    """Send the dedicated eye-catching new-listing alert (always — bypasses the confluence rule)."""
+    price_str = "—"
+    volume_str = "—"
+    rsi_v: float | None = None
+    spike_v: float | None = None
+    near_high = False
+    if ticker:
+        try:
+            price_str = f"${float(ticker['lastPrice']):,.6g}"
+        except (ValueError, KeyError):
+            pass
+        try:
+            volume_str = f"${float(ticker['quoteVolume']):,.0f}"
+        except (ValueError, KeyError):
+            pass
+        near_high = _near_24h_high(ticker)
+
+    # Fresh listings rarely have 14h of klines yet, but try anyway
+    try:
+        rsi_v = get_klines_rsi(symbol)
+    except Exception:
+        pass
+    try:
+        spike_v = get_volume_spike_ratio(symbol)
+    except Exception:
+        pass
+
+    rec_line, _reason = make_recommendation(
+        rsi=rsi_v, spike_ratio=spike_v, near_24h_high=near_high,
+    )
+    # Strip the prefix to fit it onto the template's single recommendation line
+    rec_short = rec_line.replace("📊 Рекомендация: ", "")
+
+    body = (
+        f"🚨🚨🚨 <b>НОВЫЙ ЛИСТИНГ НА BINANCE</b> 🚨🚨🚨\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆕 <code>{symbol}</code> появился на Binance!\n"
+        f"💰 Цена: <b>{price_str}</b>\n"
+        f"📊 Объём 24ч: {volume_str}\n"
+        f"🎯 Рекомендация: <b>{rec_short}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡️ <b>ДЕЙСТВУЙ БЫСТРО — первые минуты самые важные!</b>"
+    )
+    send_telegram(body)
+    logger.info("New-listing alert sent: %s", symbol)
+
+
+def check_coingecko_new_coins() -> None:
+    """Every 30 min: fetch CoinGecko coin list and alert on coins NEWLY appearing
+    on CoinGecko that are NOT yet listed on Binance Spot USDT. First run populates
+    the baseline without alerting. A safety cap prevents alert floods on anomalies."""
+    logger.info("CoinGecko: checking for upcoming listings...")
+    try:
+        resp = requests.get(COINGECKO_LIST_URL, timeout=20)
+        resp.raise_for_status()
+        coins = resp.json()
+    except Exception as e:
+        logger.error("CoinGecko fetch failed: %s", e)
+        return
+
+    if not isinstance(coins, list) or not coins:
+        logger.warning("CoinGecko returned empty/invalid payload — skipping cycle")
+        return
+
+    current_ids = {c["id"] for c in coins if isinstance(c, dict) and c.get("id")}
+    if not current_ids:
+        logger.warning("CoinGecko payload had no usable ids — skipping cycle")
+        return
+
+    with state_lock:
+        known_pairs = set(state["known_pairs"])
+        known_ids = set(state["known_coingecko_ids"])
+        first_run = not state["coingecko_initialized"]
+        state["known_coingecko_ids"] = current_ids
+        state["coingecko_initialized"] = True
+        state["last_coingecko_check"] = time.time()
+
+    if first_run:
+        logger.info(
+            "CoinGecko baseline initialized (%d coins). No alerts on first run.",
+            len(current_ids),
+        )
+        return
+
+    new_ids = current_ids - known_ids
+    if not new_ids:
+        logger.info("CoinGecko: no new coin ids since last cycle")
+        return
+
+    # Build alerts only for coins NOT yet on Binance Spot USDT
+    candidates: list[tuple[str, str]] = []  # (name, symbol_upper)
+    for c in coins:
+        if not isinstance(c, dict) or c.get("id") not in new_ids:
+            continue
+        symbol_upper = (c.get("symbol") or "").upper()
+        if not symbol_upper:
+            continue
+        if f"{symbol_upper}USDT" in known_pairs:
+            continue
+        candidates.append((c.get("name") or "?", symbol_upper))
+
+    logger.info(
+        "CoinGecko: %d new ids total, %d not yet on Binance Spot USDT",
+        len(new_ids), len(candidates),
+    )
+
+    # Safety cap — if CoinGecko returns an abnormally large diff (API anomaly,
+    # first-time bulk imports, etc.) batch the rest into a summary line.
+    to_send = candidates[:COINGECKO_MAX_ALERTS_PER_CYCLE]
+    overflow = len(candidates) - len(to_send)
+
+    for name, symbol in to_send:
+        # CoinGecko name/symbol are free-form user-submitted text — escape HTML
+        # metacharacters before interpolating into a Telegram HTML message.
+        safe_name = html.escape(name)
+        safe_symbol = html.escape(symbol)
+        body = (
+            f"🔭🔭🔭 <b>МОНЕТА ДО BINANCE</b> 🔭🔭🔭\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌕 <b>{safe_name}</b> (<code>{safe_symbol}</code>) есть на CoinGecko но <b>ЕЩЁ НЕТ на Binance</b>!\n"
+            f"🔗 Следи — возможен скорый листинг на Binance\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"👀 Изучи проект заранее!"
+        )
+        send_telegram(body)
+
+    if overflow > 0:
+        send_telegram(
+            f"ℹ️ Ещё <b>{overflow}</b> новых монет на CoinGecko не показаны "
+            f"(превышен лимит {COINGECKO_MAX_ALERTS_PER_CYCLE} за цикл, "
+            f"возможна аномалия API)."
+        )
+        logger.warning("CoinGecko diff exceeded cap (%d extra not sent)", overflow)
+
+
 def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float, float]]:
     """Detect 24h-high breaks. Cooldown is *read* to gate eligibility, but NOT
     marked here — the confluence dispatcher in run_checks marks cooldowns only
@@ -581,9 +724,11 @@ def run_checks():
             current_pairs = None
 
         if current_pairs:
-            # 2. Detect new listings (no individual alert — must combine with another signal)
+            # 2. Detect new listings — these get a dedicated eye-catching alert
+            # (NOT gated by the confluence rule; new listings are too time-sensitive to suppress)
             new_listings = check_new_listings(current_pairs)
             summary["new_listings"] = len(new_listings)
+            # Defer sending until after tickers are fetched so price/volume can be filled in
 
             # 3. 24h ticker data
             try:
@@ -610,6 +755,10 @@ def run_checks():
                 )
 
             liquid_pairs = list(liquid_vol_map.items())
+
+            # 4b. Send eye-catching new-listing alerts now that tickers are available
+            for sym in new_listings:
+                send_new_listing_alert(sym, tickers.get(sym) if tickers else None)
 
             # 5. Detect 24h high breaks (cooldown not yet marked)
             high_24h: list[tuple[str, float, float, float]] = []
@@ -682,12 +831,7 @@ def run_checks():
                     }
                 return buckets[symbol]
 
-            # 9a. New listings
-            for sym in new_listings:
-                b = _bucket(sym)
-                if "new_listing" not in b["flags"]:
-                    b["lines"].append("🆕 Новый листинг на Binance Spot")
-                    b["flags"].add("new_listing")
+            # 9a. (New listings are sent separately above — not part of confluence buckets)
 
             # 9b. High breaks — count as ONE signal, prefer strongest tier (30d > 7d > 24h)
             high_24h_map = {s: (h, p, v) for s, h, p, v in high_24h}
@@ -1055,6 +1199,11 @@ def telegram_update():
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(
     run_checks, "interval", minutes=5, id="binance_check",
+    next_run_time=__import__("datetime").datetime.utcnow(),
+)
+scheduler.add_job(
+    check_coingecko_new_coins, "interval", minutes=COINGECKO_CHECK_INTERVAL_MIN,
+    id="coingecko_check",
     next_run_time=__import__("datetime").datetime.utcnow(),
 )
 scheduler.start()
