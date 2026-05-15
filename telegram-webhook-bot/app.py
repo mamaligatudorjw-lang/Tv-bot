@@ -86,8 +86,8 @@ MAX_WORKERS = 20
 MIN_VOLUME_USDT = 50_000
 
 # Momentum (15-min price change) — visually distinct alerts at each tier
-MOMENTUM_THRESHOLDS_UP = (1.0, 3.0, 5.0, 10.0)
-MOMENTUM_THRESHOLDS_DOWN = (-1.0, -3.0, -5.0, -10.0)
+MOMENTUM_THRESHOLDS_UP = (2.0, 3.0, 5.0, 10.0)
+MOMENTUM_THRESHOLDS_DOWN = (-2.0, -3.0, -5.0, -10.0)
 MOMENTUM_COOLDOWN = 1800           # 30 min per (symbol, threshold-tier)
 
 # Overheated / oversold 24h combo alerts (price + RSI confirmation)
@@ -1021,8 +1021,8 @@ def check_rsi_and_spikes(
 # ---------------------------------------------------------------------------
 
 _MOMENTUM_EMOJI = {
-    1.0: "🟢",    3.0: "🟢🟢",   5.0: "🟢🟢🟢",  10.0: "🚀🚀🚀",
-    -1.0: "🔴",  -3.0: "🔴🔴",  -5.0: "🔴🔴🔴",  -10.0: "💥💥💥",
+    2.0: "🟢",    3.0: "🟢🟢",   5.0: "🟢🟢🟢",  10.0: "🚀🚀🚀",
+    -2.0: "🔴",  -3.0: "🔴🔴",  -5.0: "🔴🔴🔴",  -10.0: "💥💥💥",
 }
 
 
@@ -1450,7 +1450,7 @@ def run_checks():
                     f"• 🧊 RSI ≤ {RSI_OVERSOLD} перепроданность (1ч, кулдаун 4ч)\n\n"
                     f"<b>Отдельные алерты (без конфлюэнции):</b>\n"
                     f"• 🆕 Новый листинг на Binance\n"
-                    f"• 🟢/🔴 Импульс ±1%/3%/5%/10% за 15 минут\n"
+                    f"• 🟢/🔴 Импульс ±2%/3%/5%/10% за 15 минут\n"
                     f"• ⚠️ Перегрета (+20% за 24ч + RSI ≥ 70 — возможен шорт)\n"
                     f"• 💎 Перепродана (-20% за 24ч + RSI ≤ 30 — возможен лонг)\n\n"
                     f"<b>Фильтр тренда:</b> EMA-200 (4ч) — блокирует шорт выше EMA и лонг ниже EMA.\n\n"
