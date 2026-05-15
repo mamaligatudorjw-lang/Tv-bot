@@ -1676,12 +1676,37 @@ def _analyze_trade(
     direction: str, pnl_pct: float,
     rsi: float | None, ema200: float | None, entry: float,
     volume_24h: float | None,
+    has_market_data: bool = True,
 ) -> tuple[list[str], list[str], str]:
     """Return (mistakes, positives, advice) — each in Russian.
     Uses CURRENT indicator snapshot as proxy for trade-time context.
+    If has_market_data is False, the analysis falls back to a price-only
+    review based on the realized PnL.
     """
     mistakes: list[str] = []
     positives: list[str] = []
+
+    # Price-only fallback when market data is unavailable
+    if not has_market_data:
+        if pnl_pct > 0:
+            positives.append(f"сделка закрыта в плюс ({pnl_pct:+.2f}%)")
+            advice = (
+                "Рыночные данные сейчас недоступны — анализ выполнен только по цене. "
+                "Фиксируйте часть прибыли и переносите стоп в безубыток."
+            )
+        elif pnl_pct < 0:
+            if abs(pnl_pct) > 5:
+                mistakes.append(f"крупный убыток {pnl_pct:+.2f}% — стоп-лосс был слишком далеко или его не было")
+            advice = (
+                "Рыночные данные сейчас недоступны — анализ выполнен только по цене. "
+                "Главное правило: всегда ставьте стоп-лосс на 1–2% от входа."
+            )
+        else:
+            advice = (
+                "Рыночные данные сейчас недоступны — анализ выполнен только по цене. "
+                "Безубыток — нейтральный результат."
+            )
+        return mistakes, positives, advice
 
     # Trend alignment vs EMA-200 (4h)
     if ema200 is not None:
@@ -1760,16 +1785,36 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
     rsi = get_klines_rsi(symbol)
     with state_lock:
         ema200 = state["ema200_4h"].get(symbol)
+
+    def _fetch_24h_ticker(sym: str) -> dict | None:
+        try:
+            resp = _binance_get(
+                "/api/v3/ticker/24hr", params={"symbol": sym}, timeout=10,
+            )
+            return resp.json()
+        except Exception as e:
+            logger.warning("Trade /trade: 24h ticker fetch failed for %s: %s", sym, e)
+            return None
+
     volume_24h: float | None = None
-    try:
-        resp = _binance_get("/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10)
-        t = resp.json()
-        volume_24h = float(t.get("quoteVolume", 0)) or None
-    except Exception as e:
-        logger.warning("Trade /trade: 24h ticker fetch failed for %s: %s", symbol, e)
+    ticker = _fetch_24h_ticker(symbol)
+    # Fallback: if the full indicator set came back empty, retry the cheap
+    # 24h-ticker endpoint once more to give the host-rotation logic another
+    # attempt at recovering basic market data.
+    if ticker is None and rsi is None and ema200 is None:
+        time.sleep(0.5)
+        ticker = _fetch_24h_ticker(symbol)
+    if ticker is not None:
+        try:
+            volume_24h = float(ticker.get("quoteVolume", 0)) or None
+        except (TypeError, ValueError):
+            volume_24h = None
+
+    has_market_data = (rsi is not None) or (ema200 is not None) or (volume_24h is not None)
 
     mistakes, positives, advice = _analyze_trade(
         direction, pnl_pct, rsi, ema200, entry, volume_24h,
+        has_market_data=has_market_data,
     )
 
     # Save to DB
@@ -1789,9 +1834,6 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
 
     # Format response
     result_emoji = "🟢" if pnl_pct > 0 else ("🔴" if pnl_pct < 0 else "⚪️")
-    rsi_str = f"{rsi:.1f}" if rsi is not None else "—"
-    ema_str = f"${ema200:,.6g}" if ema200 is not None else "—"
-    vol_str = f"${volume_24h:,.0f}" if volume_24h is not None else "—"
 
     lines = [
         f"📝 <b>Разбор сделки: <code>{symbol}</code> · {direction.upper()}</b>",
@@ -1799,12 +1841,20 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
         f"━━━━━━━━━━━━━━━━━━━━",
         f"{result_emoji} <b>Результат: {pnl_pct:+.2f}%</b>",
         "",
-        f"<b>Контекст рынка (сейчас):</b>",
-        f"  RSI (1ч): {rsi_str}",
-        f"  EMA-200 (4ч): {ema_str}",
-        f"  Объём 24ч: {vol_str}",
-        "",
     ]
+    if not has_market_data:
+        lines.append("📡 <b>Контекст рынка:</b> данные по монете недоступны")
+    else:
+        rsi_str = f"{rsi:.1f}" if rsi is not None else "недоступно"
+        ema_str = f"${ema200:,.6g}" if ema200 is not None else "недоступно"
+        vol_str = f"${volume_24h:,.0f}" if volume_24h is not None else "недоступно"
+        lines.extend([
+            f"<b>Контекст рынка (сейчас):</b>",
+            f"  RSI (1ч): {rsi_str}",
+            f"  EMA-200 (4ч): {ema_str}",
+            f"  Объём 24ч: {vol_str}",
+        ])
+    lines.append("")
     if mistakes:
         lines.append("❌ <b>Ошибки:</b>")
         for m in mistakes:
