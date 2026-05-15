@@ -152,12 +152,14 @@ def _delete_telegram_webhook() -> None:
 def _poll_telegram_commands() -> None:
     """Long-poll Telegram getUpdates forever; dispatch command handlers."""
     COMMANDS = {
-        "/status":  handle_status_command,
-        "/top10":   handle_top10_command,
-        "/signal":  handle_signal_command,
-        "/stats":   handle_stats_command,
-        "/silence": handle_silence_command,
-        "/unmute":  handle_unmute_command,
+        "/status":   handle_status_command,
+        "/top10":    handle_top10_command,
+        "/signal":   handle_signal_command,
+        "/stats":    handle_stats_command,
+        "/trade":    handle_trade_command,
+        "/mytrades": handle_mytrades_command,
+        "/silence":  handle_silence_command,
+        "/unmute":   handle_unmute_command,
     }
     offset: int | None = None
     logger.info("Telegram command polling started")
@@ -176,15 +178,24 @@ def _poll_telegram_commands() -> None:
                 offset = update["update_id"] + 1
                 message = update.get("message", {})
                 chat_id = message.get("chat", {}).get("id")
-                text = (message.get("text") or "").strip().lower()
+                raw_text = (message.get("text") or "").strip()
+                text = raw_text.lower()
                 if not chat_id or not text:
                     continue
                 for cmd, handler in COMMANDS.items():
-                    if text.startswith(cmd):
+                    # Exact match — the command must be the whole word, optionally
+                    # followed by whitespace + args. Prevents '/trader' matching '/trade'.
+                    if text == cmd or text.startswith(cmd + " "):
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
-                        def _run(h=handler, cid=chat_id, c=cmd):
+                        # Commands that take args receive the full raw text;
+                        # the rest are called with just chat_id (backwards-compat).
+                        takes_args = cmd in ("/trade",)
+                        def _run(h=handler, cid=chat_id, c=cmd, rt=raw_text, ta=takes_args):
                             try:
-                                h(cid)
+                                if ta:
+                                    h(cid, rt)
+                                else:
+                                    h(cid)
                                 logger.info("Command %s handler completed", c)
                             except Exception as exc:
                                 logger.exception("Handler %s crashed: %s", c, exc)
@@ -582,6 +593,22 @@ def _get_db() -> sqlite3.Connection:
             )
         """)
         _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                entry REAL NOT NULL,
+                exit REAL NOT NULL,
+                pnl_pct REAL NOT NULL,
+                rsi REAL,
+                ema200_4h REAL,
+                volume_usdt_24h REAL
+            )
+        """)
+        _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_chat_ts ON trades(chat_id, ts DESC)")
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -1454,7 +1481,7 @@ def run_checks():
                     f"• ⚠️ Перегрета (+20% за 24ч + RSI ≥ 70 — возможен шорт)\n"
                     f"• 💎 Перепродана (-20% за 24ч + RSI ≤ 30 — возможен лонг)\n\n"
                     f"<b>Фильтр тренда:</b> EMA-200 (4ч) — блокирует шорт выше EMA и лонг ниже EMA.\n\n"
-                    f"<b>Команды:</b> /status /top10 /signal /stats /silence /unmute"
+                    f"<b>Команды:</b> /status /top10 /signal /stats /trade /mytrades /silence /unmute"
                 )
 
     except Exception as e:
@@ -1526,7 +1553,7 @@ def handle_status_command(chat_id: int) -> None:
         f"  RSI перепроданность: ≤ {RSI_OVERSOLD}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
         f"  EMA-200 (4ч): тренд-фильтр для шорт/лонг\n"
         f"  Интервал проверки: 5 мин\n\n"
-        f"<b>Команды:</b> /status · /top10 · /signal · /stats · /silence · /unmute"
+        f"<b>Команды:</b> /status · /top10 · /signal · /stats · /trade · /mytrades · /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
@@ -1600,6 +1627,257 @@ def handle_stats_command(chat_id: int) -> None:
         )
     lines.append("")
     lines.append(f"<i>Успех = движение ≥ {HIT_RATE_WIN_PCT:.0f}% в нужную сторону</i>")
+    _telegram_send(chat_id, "\n".join(lines))
+
+
+# ---------------------------------------------------------------------------
+# Trade journal — /trade and /mytrades
+# ---------------------------------------------------------------------------
+
+_TRADE_USAGE = (
+    "📝 <b>Журнал сделок</b>\n\n"
+    "Формат: <code>/trade SYMBOL направление ENTRY EXIT</code>\n"
+    "Пример: <code>/trade BTCUSDT лонг 82000 80500</code>\n\n"
+    "Направление: <b>лонг</b> или <b>шорт</b>\n"
+    "Цены — числа, точка как разделитель."
+)
+
+
+def _parse_trade_args(text: str) -> tuple[str, str, float, float] | None:
+    """Return (symbol, direction, entry, exit) or None if parsing fails.
+    Direction normalized to 'лонг'/'шорт'."""
+    parts = text.split()
+    if len(parts) < 5:
+        return None
+    _cmd, sym, direction, entry_s, exit_s = parts[:5]
+    sym = sym.upper().strip()
+    if not sym.endswith("USDT") or not sym.replace("USDT", "").isalnum():
+        return None
+
+    dir_l = direction.lower().strip()
+    if dir_l in ("лонг", "long", "buy", "📈"):
+        direction_norm = "лонг"
+    elif dir_l in ("шорт", "short", "sell", "📉"):
+        direction_norm = "шорт"
+    else:
+        return None
+
+    try:
+        entry = float(entry_s.replace(",", "."))
+        exit_ = float(exit_s.replace(",", "."))
+    except ValueError:
+        return None
+    if entry <= 0 or exit_ <= 0:
+        return None
+    return sym, direction_norm, entry, exit_
+
+
+def _analyze_trade(
+    direction: str, pnl_pct: float,
+    rsi: float | None, ema200: float | None, entry: float,
+    volume_24h: float | None,
+) -> tuple[list[str], list[str], str]:
+    """Return (mistakes, positives, advice) — each in Russian.
+    Uses CURRENT indicator snapshot as proxy for trade-time context.
+    """
+    mistakes: list[str] = []
+    positives: list[str] = []
+
+    # Trend alignment vs EMA-200 (4h)
+    if ema200 is not None:
+        above = entry > ema200
+        if direction == "лонг" and not above:
+            mistakes.append("вход в лонг ниже EMA-200 (4ч) — против основного тренда")
+        elif direction == "шорт" and above:
+            mistakes.append("вход в шорт выше EMA-200 (4ч) — против основного тренда")
+        else:
+            positives.append("вход по тренду EMA-200 (4ч)")
+
+    # RSI extremes at entry-direction
+    if rsi is not None:
+        if direction == "лонг" and rsi >= RSI_OVERBOUGHT:
+            mistakes.append(f"лонг при RSI {rsi:.0f} ≥ {RSI_OVERBOUGHT:.0f} — зона перекупленности")
+        elif direction == "шорт" and rsi <= RSI_OVERSOLD:
+            mistakes.append(f"шорт при RSI {rsi:.0f} ≤ {RSI_OVERSOLD:.0f} — зона перепроданности")
+        elif direction == "лонг" and rsi <= RSI_OVERSOLD:
+            positives.append(f"лонг из зоны перепроданности (RSI {rsi:.0f})")
+        elif direction == "шорт" and rsi >= RSI_OVERBOUGHT:
+            positives.append(f"шорт из зоны перекупленности (RSI {rsi:.0f})")
+        else:
+            positives.append(f"RSI {rsi:.0f} — нейтральная зона, без экстремумов")
+
+    # Liquidity check
+    if volume_24h is not None:
+        if volume_24h < MIN_VOLUME_USDT:
+            mistakes.append(
+                f"низкая ликвидность: объём 24ч ${volume_24h:,.0f} < ${MIN_VOLUME_USDT:,.0f}"
+            )
+        elif volume_24h >= MIN_VOLUME_USDT * 10:
+            positives.append(f"высокая ликвидность: объём 24ч ${volume_24h:,.0f}")
+
+    # Result-based notes
+    if pnl_pct > 0:
+        positives.append(f"сделка закрыта в плюс ({pnl_pct:+.2f}%)")
+    else:
+        if abs(pnl_pct) > 5:
+            mistakes.append(f"крупный убыток {pnl_pct:+.2f}% — стоп-лосс был слишком далеко или его не было")
+
+    # Advice
+    if mistakes:
+        advice = (
+            "Перед входом проверяйте: тренд EMA-200 (4ч), RSI на 1ч, "
+            "объём ≥ ликвидного минимума. Не входите против всех трёх сразу."
+        )
+        if pnl_pct < 0 and abs(pnl_pct) > 3:
+            advice += " Установите стоп-лосс на 1–2% от входа."
+    elif pnl_pct > 0:
+        advice = (
+            "Отличный сетап — фиксируйте часть прибыли и переносите стоп "
+            "в безубыток, чтобы защитить плюс."
+        )
+    else:
+        advice = (
+            "Сетап был корректен, но движение пошло не туда — это нормально. "
+            "Главное — управление риском и быстрая фиксация убытка."
+        )
+    return mistakes, positives, advice
+
+
+def handle_trade_command(chat_id: int, raw_text: str) -> None:
+    parsed = _parse_trade_args(raw_text)
+    if parsed is None:
+        _telegram_send(chat_id, _TRADE_USAGE)
+        return
+    symbol, direction, entry, exit_ = parsed
+
+    # PnL
+    if direction == "лонг":
+        pnl_pct = (exit_ - entry) / entry * 100.0
+    else:  # шорт
+        pnl_pct = (entry - exit_) / entry * 100.0
+
+    # Snapshot current indicators (concept of "trade-time context")
+    rsi = get_klines_rsi(symbol)
+    with state_lock:
+        ema200 = state["ema200_4h"].get(symbol)
+    volume_24h: float | None = None
+    try:
+        resp = _binance_get("/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10)
+        t = resp.json()
+        volume_24h = float(t.get("quoteVolume", 0)) or None
+    except Exception as e:
+        logger.warning("Trade /trade: 24h ticker fetch failed for %s: %s", symbol, e)
+
+    mistakes, positives, advice = _analyze_trade(
+        direction, pnl_pct, rsi, ema200, entry, volume_24h,
+    )
+
+    # Save to DB
+    try:
+        with _db_lock:
+            conn = _get_db()
+            conn.execute(
+                "INSERT INTO trades (ts, chat_id, symbol, direction, entry, exit, "
+                "pnl_pct, rsi, ema200_4h, volume_usdt_24h) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(time.time()), int(chat_id), symbol, direction,
+                 entry, exit_, pnl_pct, rsi, ema200, volume_24h),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.exception("Failed to save trade: %s", e)
+
+    # Format response
+    result_emoji = "🟢" if pnl_pct > 0 else ("🔴" if pnl_pct < 0 else "⚪️")
+    rsi_str = f"{rsi:.1f}" if rsi is not None else "—"
+    ema_str = f"${ema200:,.6g}" if ema200 is not None else "—"
+    vol_str = f"${volume_24h:,.0f}" if volume_24h is not None else "—"
+
+    lines = [
+        f"📝 <b>Разбор сделки: <code>{symbol}</code> · {direction.upper()}</b>",
+        f"Вход: ${entry:,.6g}  →  Выход: ${exit_:,.6g}",
+        f"━━━━━━━━━━━━━━━━━━━━",
+        f"{result_emoji} <b>Результат: {pnl_pct:+.2f}%</b>",
+        "",
+        f"<b>Контекст рынка (сейчас):</b>",
+        f"  RSI (1ч): {rsi_str}",
+        f"  EMA-200 (4ч): {ema_str}",
+        f"  Объём 24ч: {vol_str}",
+        "",
+    ]
+    if mistakes:
+        lines.append("❌ <b>Ошибки:</b>")
+        for m in mistakes:
+            lines.append(f"  • {m}")
+    else:
+        lines.append("❌ <b>Ошибки:</b> явных ошибок не обнаружено")
+    lines.append("")
+    if positives:
+        lines.append("✅ <b>Правильно:</b>")
+        for p in positives:
+            lines.append(f"  • {p}")
+    else:
+        lines.append("✅ <b>Правильно:</b> сильных плюсов не выделено")
+    lines.append("")
+    lines.append(f"💡 <b>Совет:</b> {advice}")
+    _telegram_send(chat_id, "\n".join(lines))
+
+
+def handle_mytrades_command(chat_id: int) -> None:
+    """Show the user's last 10 trades + W/L statistics."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT ts, symbol, direction, entry, exit, pnl_pct "
+                "FROM trades WHERE chat_id = ? ORDER BY ts DESC LIMIT 10",
+                (int(chat_id),),
+            ).fetchall()
+            stats = conn.execute(
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN pnl_pct > 0 THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN pnl_pct < 0 THEN 1 ELSE 0 END), "
+                "COALESCE(SUM(pnl_pct), 0), COALESCE(AVG(pnl_pct), 0) "
+                "FROM trades WHERE chat_id = ?",
+                (int(chat_id),),
+            ).fetchone()
+    except Exception as e:
+        logger.exception("/mytrades failed: %s", e)
+        _telegram_send(chat_id, "⚠️ Не удалось получить журнал сделок.")
+        return
+
+    total, wins, losses, sum_pnl, avg_pnl = stats or (0, 0, 0, 0.0, 0.0)
+    wins = wins or 0
+    losses = losses or 0
+    if not rows:
+        _telegram_send(
+            chat_id,
+            "📒 <b>Ваш журнал сделок пуст</b>\n\n"
+            "Добавьте сделку командой:\n"
+            "<code>/trade BTCUSDT лонг 82000 80500</code>",
+        )
+        return
+
+    win_rate = (wins / total * 100.0) if total > 0 else 0.0
+
+    lines = [
+        f"📒 <b>Последние {len(rows)} сделок</b>",
+        "",
+    ]
+    import datetime as _dt
+    for ts, sym, direction, entry, exit_, pnl in rows:
+        when = _dt.datetime.utcfromtimestamp(int(ts)).strftime("%d.%m %H:%M")
+        emoji = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪️")
+        lines.append(
+            f"{emoji} <code>{sym}</code> {direction} · "
+            f"{pnl:+.2f}% · {when}"
+        )
+        lines.append(f"   ${entry:,.6g} → ${exit_:,.6g}")
+    lines.append("")
+    lines.append(f"<b>📊 Статистика (всего: {total}):</b>")
+    lines.append(f"  ✅ Прибыльных: {wins}  |  ❌ Убыточных: {losses}")
+    lines.append(f"  🎯 Win rate: <b>{win_rate:.1f}%</b>")
+    lines.append(f"  Σ PnL: <b>{sum_pnl:+.2f}%</b>  |  средн.: {avg_pnl:+.2f}%")
     _telegram_send(chat_id, "\n".join(lines))
 
 
