@@ -2,6 +2,7 @@ import os
 import time
 import html
 import logging
+import sqlite3
 import threading
 import numpy as np
 import requests
@@ -51,6 +52,11 @@ state = {
     "last_weekly_alerted": {},         # symbol -> timestamp
     "last_monthly_alerted": {},        # symbol -> timestamp
     "last_vol_spike_alerted": {},      # symbol -> timestamp
+    "ema200_4h": {},                   # symbol -> float (EMA-200 on 4h, refreshed hourly)
+    "last_ema200_refresh": 0,          # unix ts of last EMA-200 refresh
+    "last_momentum_alerted": {},       # symbol -> {threshold: ts}
+    "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
+    "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
     "initialized": False,
     "last_run": None,
     "last_run_summary": {},
@@ -78,6 +84,28 @@ RSI_OVERSOLD = 30.0
 VOLUME_SPIKE_MULTIPLIER = 3.0
 MAX_WORKERS = 20
 MIN_VOLUME_USDT = 50_000
+
+# Momentum (15-min price change) — visually distinct alerts at each tier
+MOMENTUM_THRESHOLDS_UP = (1.0, 3.0, 5.0, 10.0)
+MOMENTUM_THRESHOLDS_DOWN = (-1.0, -3.0, -5.0, -10.0)
+MOMENTUM_COOLDOWN = 1800           # 30 min per (symbol, threshold-tier)
+
+# Overheated / oversold 24h combo alerts (price + RSI confirmation)
+OVERHEATED_24H_PCT = 20.0
+OVERSOLD_24H_PCT = -20.0
+OVERHEATED_COOLDOWN = 14400        # 4h
+OVERSOLD_COOLDOWN = 14400          # 4h
+
+# EMA-200 (4h) trend filter
+EMA200_PERIOD = 200
+EMA200_FETCH_LIMIT = 250
+EMA200_REFRESH_INTERVAL = 3600     # hourly
+
+# Hit-rate tracking
+HIT_RATE_DB_PATH = os.path.join(os.path.dirname(__file__) or ".", "alerts.db")
+HIT_RATE_INTERVALS = ((900, "15м"), (3600, "1ч"), (14400, "4ч"))
+HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win
+HIT_RATE_RETENTION_DAYS = 7
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +155,7 @@ def _poll_telegram_commands() -> None:
         "/status":  handle_status_command,
         "/top10":   handle_top10_command,
         "/signal":  handle_signal_command,
+        "/stats":   handle_stats_command,
         "/silence": handle_silence_command,
         "/unmute":  handle_unmute_command,
     }
@@ -234,8 +263,12 @@ def get_klines_rsi(symbol: str) -> float | None:
         return None
 
 
-def get_volume_spike_ratio(symbol: str) -> float | None:
-    """Return ratio of last complete 5m candle base-volume vs 12-candle avg."""
+def get_5m_signals(symbol: str) -> tuple[float | None, float | None]:
+    """Return (spike_ratio, pct_change_15m) from a single 5m kline fetch.
+    - spike_ratio: latest-complete 5m base-volume vs 12-candle avg
+    - pct_change_15m: pct change between close of latest-complete candle and
+      the candle 3 slots earlier (~15-minute window).
+    """
     try:
         resp = _binance_get(
             "/api/v3/klines",
@@ -244,17 +277,25 @@ def get_volume_spike_ratio(symbol: str) -> float | None:
         )
         candles = resp.json()
         if len(candles) < 13:
-            return None
-        volumes = [float(k[5]) for k in candles]
+            return None, None
+
         # candles[-1] may be incomplete; use candles[-2] as latest complete
+        volumes = [float(k[5]) for k in candles]
         last_vol = volumes[-2]
-        avg_vol = float(np.mean(volumes[:-2]))  # average of all complete candles
-        if avg_vol == 0:
-            return None
-        return last_vol / avg_vol
+        avg_vol = float(np.mean(volumes[:-2]))
+        spike: float | None = (last_vol / avg_vol) if avg_vol > 0 else None
+
+        closes = [float(k[4]) for k in candles]
+        price_now = closes[-2]
+        price_15m = closes[-5] if len(closes) >= 5 else None
+        if price_15m is not None and price_15m > 0:
+            pct = (price_now - price_15m) / price_15m * 100.0
+        else:
+            pct = None
+        return spike, pct
     except Exception as e:
-        logger.warning("Spike kline fetch failed for %s: %s", symbol, e)
-        return None
+        logger.warning("5m signal fetch failed for %s: %s", symbol, e)
+        return None, None
 
 
 def get_daily_highs(symbol: str, limit: int = 31) -> list[float] | None:
@@ -316,6 +357,53 @@ def _calculate_rsi(closes: list[float], period: int) -> float:
     return 100.0 - (100.0 / (1.0 + rs))
 
 
+def _calculate_ema(values: list[float], period: int) -> float | None:
+    if len(values) < period:
+        return None
+    arr = np.asarray(values, dtype=float)
+    ema = float(arr[:period].mean())  # SMA seed
+    multiplier = 2.0 / (period + 1)
+    for v in arr[period:]:
+        ema = (float(v) - ema) * multiplier + ema
+    return float(ema)
+
+
+def get_ema200_4h(symbol: str) -> float | None:
+    try:
+        resp = _binance_get(
+            "/api/v3/klines",
+            params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
+            timeout=10,
+        )
+        closes = [float(k[4]) for k in resp.json()]
+        if len(closes) < EMA200_PERIOD:
+            return None
+        return _calculate_ema(closes, EMA200_PERIOD)
+    except Exception as e:
+        logger.warning("EMA-200 4h fetch failed for %s: %s", symbol, e)
+        return None
+
+
+def refresh_ema200_4h(symbols: list[str]) -> int:
+    updated = 0
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {ex.submit(get_ema200_4h, s): s for s in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                ema = future.result()
+            except Exception:
+                ema = None
+            if ema is not None:
+                with state_lock:
+                    state["ema200_4h"][symbol] = ema
+                updated += 1
+    with state_lock:
+        state["last_ema200_refresh"] = time.time()
+    logger.info("Refreshed EMA-200 (4h) for %d/%d symbols", updated, len(symbols))
+    return updated
+
+
 # ---------------------------------------------------------------------------
 # Recommendation engine
 # ---------------------------------------------------------------------------
@@ -339,13 +427,19 @@ def make_recommendation(
     broke_weekly: bool = False,
     broke_monthly: bool = False,
     near_24h_high: bool = False,
+    above_ema200: bool | None = None,
 ) -> tuple[str, str]:
     """Return (rec_line, reason_line) in Russian for the given signal mix.
 
     Rules:
-      LONG     — (7d/30d high break + volume spike ≥ multiplier) OR RSI ≤ oversold
-      SHORT    — RSI ≥ overbought AND price near 24h high
+      LONG     — (7d/30d high break + volume spike >= multiplier) OR RSI <= oversold
+      SHORT    — RSI >= overbought AND price near 24h high
       NEUTRAL  — anything else / mixed
+
+    EMA-200 (4h) trend filter:
+      - above_ema200 True  -> suppress SHORT (we're in an uptrend)
+      - above_ema200 False -> suppress LONG  (we're in a downtrend)
+      - above_ema200 None  -> no filter (data unavailable)
     """
     has_break = broke_weekly or broke_monthly
     has_spike = spike_ratio is not None and spike_ratio >= VOLUME_SPIKE_MULTIPLIER
@@ -354,6 +448,14 @@ def make_recommendation(
 
     long_signal = (has_break and has_spike) or is_oversold
     short_signal = is_overbought and near_24h_high
+
+    # EMA-200 4h trend filter — don't fight the dominant trend
+    short_blocked_by_ema = above_ema200 is True and short_signal
+    long_blocked_by_ema = above_ema200 is False and long_signal
+    if above_ema200 is True:
+        short_signal = False
+    if above_ema200 is False:
+        long_signal = False
 
     if long_signal and not short_signal:
         if has_break and has_spike and is_oversold:
@@ -393,8 +495,154 @@ def make_recommendation(
         parts.append(f"пробой {'30д' if broke_monthly else '7д'} максимума без подтверждения объёмом")
     if near_24h_high and not is_overbought:
         parts.append("цена у 24ч максимума")
+    if short_blocked_by_ema:
+        parts.append("шорт отклонён — цена выше EMA-200 (4ч)")
+    if long_blocked_by_ema:
+        parts.append("лонг отклонён — цена ниже EMA-200 (4ч)")
     reason = "; ".join(parts) if parts else "сигналы смешанные, чёткого направления нет"
     return "📊 Рекомендация: НЕЙТРАЛЬНО ➡️", f"Причина: {reason}"
+
+
+# ---------------------------------------------------------------------------
+# Hit-rate tracking (SQLite)
+# ---------------------------------------------------------------------------
+
+_db_lock = threading.Lock()
+_db_conn: sqlite3.Connection | None = None
+
+
+def _get_db() -> sqlite3.Connection:
+    global _db_conn
+    if _db_conn is None:
+        _db_conn = sqlite3.connect(HIT_RATE_DB_PATH, check_same_thread=False)
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts INTEGER NOT NULL,
+                symbol TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                recommendation TEXT,
+                price_at_alert REAL NOT NULL,
+                price_15m REAL,
+                price_1h REAL,
+                price_4h REAL
+            )
+        """)
+        _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
+        _db_conn.commit()
+        logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
+    return _db_conn
+
+
+def _rec_label(rec_line: str) -> str:
+    if "ЛОНГ" in rec_line:
+        return "LONG"
+    if "ШОРТ" in rec_line:
+        return "SHORT"
+    return "NEUTRAL"
+
+
+def log_alert(symbol: str, alert_type: str, recommendation: str | None, price: float | None) -> None:
+    """Log an alert send for later hit-rate measurement. No-op if price missing."""
+    if price is None or price <= 0:
+        return
+    try:
+        with _db_lock:
+            conn = _get_db()
+            conn.execute(
+                "INSERT INTO alerts (ts, symbol, alert_type, recommendation, price_at_alert) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (int(time.time()), symbol, alert_type, recommendation, float(price)),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning("log_alert failed for %s/%s: %s", symbol, alert_type, e)
+
+
+def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
+    """Back-fill follow-up prices for past alerts whose 15m/1h/4h windows have
+    elapsed, using the just-fetched tickers map. Cheap to call every cycle.
+    """
+    if not tickers:
+        return
+    now_ts = int(time.time())
+    c15 = now_ts - HIT_RATE_INTERVALS[0][0]
+    c1h = now_ts - HIT_RATE_INTERVALS[1][0]
+    c4h = now_ts - HIT_RATE_INTERVALS[2][0]
+    retain_cutoff = now_ts - HIT_RATE_RETENTION_DAYS * 86400
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT id, symbol, price_15m, price_1h, price_4h, ts FROM alerts "
+                "WHERE (price_15m IS NULL AND ts <= ?) "
+                "   OR (price_1h  IS NULL AND ts <= ?) "
+                "   OR (price_4h  IS NULL AND ts <= ?)",
+                (c15, c1h, c4h),
+            ).fetchall()
+            updates: list[tuple] = []
+            for row_id, symbol, p15, p1h, p4h, ts in rows:
+                t = tickers.get(symbol)
+                if not t:
+                    continue
+                try:
+                    cur = float(t["lastPrice"])
+                except (ValueError, KeyError):
+                    continue
+                new_p15 = cur if (p15 is None and ts <= c15) else p15
+                new_p1h = cur if (p1h is None and ts <= c1h) else p1h
+                new_p4h = cur if (p4h is None and ts <= c4h) else p4h
+                updates.append((new_p15, new_p1h, new_p4h, row_id))
+            if updates:
+                conn.executemany(
+                    "UPDATE alerts SET price_15m=?, price_1h=?, price_4h=? WHERE id=?",
+                    updates,
+                )
+            conn.execute("DELETE FROM alerts WHERE ts < ?", (retain_cutoff,))
+            conn.commit()
+        if updates:
+            logger.info("Hit-rate: filled %d follow-up prices", len(updates))
+    except Exception as e:
+        logger.warning("fill_alert_followups failed: %s", e)
+
+
+def compute_hit_rate_stats(days: int = 7) -> list[dict]:
+    """Aggregate wins per (alert_type, recommendation) over the last `days` days.
+    A win = price moved >= HIT_RATE_WIN_PCT in the recommended direction.
+    """
+    cutoff = int(time.time()) - days * 86400
+    out: list[dict] = []
+    try:
+        with _db_lock:
+            conn = _get_db()
+            cursor = conn.execute(
+                "SELECT alert_type, recommendation, price_at_alert, price_15m, price_1h, price_4h "
+                "FROM alerts WHERE ts >= ?",
+                (cutoff,),
+            )
+            agg: dict[tuple, dict] = {}
+            for atype, rec, p0, p15, p1h, p4h in cursor:
+                key = (atype, rec or "—")
+                a = agg.setdefault(key, {"total": 0, "w15": [0, 0], "w1h": [0, 0], "w4h": [0, 0]})
+                a["total"] += 1
+                for col, future in (("w15", p15), ("w1h", p1h), ("w4h", p4h)):
+                    if future is None or p0 is None or p0 <= 0:
+                        continue
+                    pct = (future - p0) / p0 * 100.0
+                    a[col][1] += 1
+                    if rec == "LONG" and pct >= HIT_RATE_WIN_PCT:
+                        a[col][0] += 1
+                    elif rec == "SHORT" and pct <= -HIT_RATE_WIN_PCT:
+                        a[col][0] += 1
+        for (atype, rec), a in agg.items():
+            out.append({
+                "alert_type": atype, "recommendation": rec, "total": a["total"],
+                "w15": a["w15"], "w1h": a["w1h"], "w4h": a["w4h"],
+            })
+        out.sort(key=lambda r: (-r["total"], r["alert_type"]))
+    except Exception as e:
+        logger.warning("compute_hit_rate_stats failed: %s", e)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +682,7 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
     except Exception:
         pass
     try:
-        spike_v = get_volume_spike_ratio(symbol)
+        spike_v, _pct_unused = get_5m_signals(symbol)
     except Exception:
         pass
 
@@ -454,7 +702,14 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡️ <b>ДЕЙСТВУЙ БЫСТРО — первые минуты самые важные!</b>"
     )
-    send_telegram(body)
+    if send_telegram(body):
+        price_for_log: float | None = None
+        if ticker:
+            try:
+                price_for_log = float(ticker["lastPrice"])
+            except (ValueError, KeyError):
+                pass
+        log_alert(symbol, "new_listing", _rec_label(rec_line), price_for_log)
     logger.info("New-listing alert sent: %s", symbol)
 
 
@@ -660,21 +915,29 @@ def check_rsi_and_spikes(
     list[tuple[str, float, float]],  # overbought (symbol, rsi, vol)
     list[tuple[str, float, float]],  # oversold
     list[tuple[str, float, float]],  # volume spikes (symbol, ratio, vol)
+    dict[str, float],                # rsi_map: symbol -> rsi
+    dict[str, float],                # pct_15m_map: symbol -> 15-min pct change
 ]:
     overbought, oversold, spikes = [], [], []
+    rsi_map: dict[str, float] = {}
+    pct_15m_map: dict[str, float] = {}
     now = time.time()
     volume_map = dict(symbols_volumes)
 
     def fetch(symbol):
         rsi = get_klines_rsi(symbol)
-        spike = get_volume_spike_ratio(symbol)
-        return symbol, rsi, spike
+        spike, pct = get_5m_signals(symbol)
+        return symbol, rsi, spike, pct
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(fetch, s): s for s, _ in symbols_volumes}
         for future in as_completed(futures):
-            symbol, rsi, spike_ratio = future.result()
+            symbol, rsi, spike_ratio, pct_15m = future.result()
             vol = volume_map[symbol]
+            if rsi is not None:
+                rsi_map[symbol] = rsi
+            if pct_15m is not None:
+                pct_15m_map[symbol] = pct_15m
 
             with state_lock:
                 # Cooldowns are READ to gate eligibility, but NOT marked here.
@@ -695,7 +958,144 @@ def check_rsi_and_spikes(
         sorted(overbought, key=lambda x: x[1], reverse=True),
         sorted(oversold, key=lambda x: x[1]),
         sorted(spikes, key=lambda x: x[1], reverse=True),
+        rsi_map,
+        pct_15m_map,
     )
+
+
+# ---------------------------------------------------------------------------
+# Momentum & overheated/oversold alerts (standalone — bypass confluence)
+# ---------------------------------------------------------------------------
+
+_MOMENTUM_EMOJI = {
+    1.0: "🟢",    3.0: "🟢🟢",   5.0: "🟢🟢🟢",  10.0: "🚀🚀🚀",
+    -1.0: "🔴",  -3.0: "🔴🔴",  -5.0: "🔴🔴🔴",  -10.0: "💥💥💥",
+}
+
+
+def check_momentum(
+    pct_15m_map: dict[str, float],
+    tickers: dict[str, dict] | None,
+) -> int:
+    """For each symbol with a 15-min pct change, send a single alert at the
+    highest tier crossed (e.g. +12% triggers only the +10% alert, not all 4).
+    Cooldown is per (symbol, threshold-tier).
+    """
+    sent = 0
+    now = time.time()
+    for symbol, pct in pct_15m_map.items():
+        if pct is None:
+            continue
+
+        threshold: float | None = None
+        if pct > 0:
+            for t in sorted(MOMENTUM_THRESHOLDS_UP, reverse=True):
+                if pct >= t:
+                    threshold = t
+                    break
+        elif pct < 0:
+            for t in sorted(MOMENTUM_THRESHOLDS_DOWN):  # ascending: -10, -5, -2
+                if pct <= t:
+                    threshold = t
+                    break
+
+        if threshold is None:
+            continue
+
+        with state_lock:
+            sym_map = state["last_momentum_alerted"].get(symbol, {})
+            last_ts = sym_map.get(threshold, 0)
+        if now - last_ts < MOMENTUM_COOLDOWN:
+            continue
+
+        t = tickers.get(symbol) if tickers else None
+        price: float | None = None
+        price_str = "—"
+        if t:
+            try:
+                price = float(t["lastPrice"])
+                price_str = f"${price:,.6g}"
+            except (ValueError, KeyError):
+                pass
+
+        emoji = _MOMENTUM_EMOJI.get(threshold, "📊")
+        sign = "+" if pct > 0 else ""
+        body = (
+            f"{emoji} <b><code>{symbol}</code> {sign}{pct:.1f}% за 15 минут</b>\n"
+            f"💰 Цена: {price_str}"
+        )
+        if not send_telegram(body):
+            continue
+
+        with state_lock:
+            state["last_momentum_alerted"].setdefault(symbol, {})[threshold] = now
+
+        rec = "LONG" if pct > 0 else "SHORT"
+        kind = f"momentum_{'up' if pct > 0 else 'down'}_{int(abs(threshold))}"
+        log_alert(symbol, kind, rec, price)
+        sent += 1
+    return sent
+
+
+def check_overheated_oversold(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> tuple[int, int]:
+    """Standalone "overheated" (24h >= +20% AND RSI >= 70) and "oversold"
+    (24h <= -20% AND RSI <= 30) alerts. Bypass confluence.
+    """
+    if not tickers:
+        return 0, 0
+    sent_oh, sent_os = 0, 0
+    now = time.time()
+    for symbol, t in tickers.items():
+        rsi = rsi_map.get(symbol)
+        if rsi is None:
+            continue
+        try:
+            pct24 = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+        except (ValueError, KeyError):
+            continue
+
+        if pct24 >= OVERHEATED_24H_PCT and rsi >= RSI_OVERBOUGHT:
+            with state_lock:
+                last = state["last_overheated_alerted"].get(symbol, 0)
+            if now - last >= OVERHEATED_COOLDOWN:
+                body = (
+                    f"⚠️ <b>ПЕРЕГРЕТА — возможен шорт</b>\n"
+                    f"Монета выросла слишком быстро\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<code>{symbol}</code>\n"
+                    f"📈 24ч: <b>+{pct24:.1f}%</b>\n"
+                    f"🔥 RSI: <b>{rsi:.1f}</b>\n"
+                    f"💰 Цена: ${price:,.6g}"
+                )
+                if send_telegram(body):
+                    with state_lock:
+                        state["last_overheated_alerted"][symbol] = now
+                    log_alert(symbol, "overheated_24h", "SHORT", price)
+                    sent_oh += 1
+
+        elif pct24 <= OVERSOLD_24H_PCT and rsi <= RSI_OVERSOLD:
+            with state_lock:
+                last = state["last_oversold_alerted"].get(symbol, 0)
+            if now - last >= OVERSOLD_COOLDOWN:
+                body = (
+                    f"💎 <b>ПЕРЕПРОДАНА — возможен лонг</b>\n"
+                    f"Монета упала слишком сильно\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<code>{symbol}</code>\n"
+                    f"📉 24ч: <b>{pct24:.1f}%</b>\n"
+                    f"🧊 RSI: <b>{rsi:.1f}</b>\n"
+                    f"💰 Цена: ${price:,.6g}"
+                )
+                if send_telegram(body):
+                    with state_lock:
+                        state["last_oversold_alerted"][symbol] = now
+                    log_alert(symbol, "oversold_24h", "LONG", price)
+                    sent_os += 1
+    return sent_oh, sent_os
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +1111,9 @@ def run_checks():
         "vol_spikes": 0, "weekly_highs": 0, "monthly_highs": 0,
         "confluence_alerts": 0,        # multi-signal alerts actually sent
         "single_signals_skipped": 0,   # coins with only 1 signal — suppressed
+        "momentum_alerts": 0,          # standalone 15-min price-momentum alerts
+        "overheated_alerts": 0,        # standalone +20% & RSI>=70
+        "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "errors": [],
     }
 
@@ -776,17 +1179,29 @@ def run_checks():
             monthly_alerts: list = []
 
             if initialized and liquid_pairs:
-                # 6. Detect RSI + volume spike signals
-                overbought, oversold, vol_spikes = check_rsi_and_spikes(liquid_pairs)
+                # 6. Detect RSI + volume spike signals (also returns rsi_map + pct_15m_map)
+                overbought, oversold, vol_spikes, rsi_map, pct_15m_map = check_rsi_and_spikes(liquid_pairs)
                 summary["rsi_overbought"] = len(overbought)
                 summary["rsi_oversold"] = len(oversold)
                 summary["vol_spikes"] = len(vol_spikes)
 
-                # 7. Refresh stored 7d/30d highs once per hour
+                # 6a. Standalone momentum alerts (15-min price change tiers)
+                summary["momentum_alerts"] = check_momentum(pct_15m_map, tickers)
+
+                # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
+                oh_n, os_n = check_overheated_oversold(tickers, rsi_map)
+                summary["overheated_alerts"] = oh_n
+                summary["oversold_alerts"] = os_n
+
+                # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 with state_lock:
                     needs_refresh = (
                         time.time() - state["last_weekly_monthly_refresh"]
                         >= WEEKLY_MONTHLY_REFRESH_INTERVAL
+                    )
+                    needs_ema = (
+                        time.time() - state["last_ema200_refresh"]
+                        >= EMA200_REFRESH_INTERVAL
                     )
 
                 if needs_refresh:
@@ -796,6 +1211,14 @@ def run_checks():
                     except Exception as e:
                         logger.error("Weekly/monthly refresh failed: %s", e)
                         summary["errors"].append(f"WM refresh: {e}")
+
+                if needs_ema:
+                    logger.info("Refreshing EMA-200 (4h) for %d liquid pairs...", len(liquid_pairs))
+                    try:
+                        refresh_ema200_4h([s for s, _ in liquid_pairs])
+                    except Exception as e:
+                        logger.error("EMA-200 refresh failed: %s", e)
+                        summary["errors"].append(f"EMA refresh: {e}")
 
                 # 8. Detect 7d / 30d high breaks
                 if tickers:
@@ -890,11 +1313,18 @@ def run_checks():
 
             # 9f. Send confluence alerts (≥ CONFLUENCE_MIN_SIGNALS) and mark cooldowns
             now_ts = time.time()
+            with state_lock:
+                ema_map = dict(state["ema200_4h"])
             for sym, b in buckets.items():
                 if len(b["lines"]) < CONFLUENCE_MIN_SIGNALS:
                     summary["single_signals_skipped"] += 1
                     logger.debug("Skipped single-signal coin %s: %s", sym, sorted(b["flags"]))
                     continue
+
+                ema = ema_map.get(sym)
+                above_ema: bool | None = None
+                if ema is not None and b["price"] is not None:
+                    above_ema = b["price"] > ema
 
                 rec_line, reason_line = make_recommendation(
                     rsi=b["rsi"],
@@ -902,6 +1332,7 @@ def run_checks():
                     broke_weekly=b["broke_weekly"],
                     broke_monthly=b["broke_monthly"],
                     near_24h_high=b["near_24h_high"],
+                    above_ema200=above_ema,
                 )
                 header = [f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>"]
                 if b["price"] is not None:
@@ -931,6 +1362,7 @@ def run_checks():
                     sym, len(b["lines"]), sorted(b["flags"]),
                 )
                 summary["confluence_alerts"] += 1
+                log_alert(sym, "confluence", _rec_label(rec_line), b["price"])
 
                 # Mark cooldowns only for signals that actually contributed to a sent alert
                 with state_lock:
@@ -942,6 +1374,9 @@ def run_checks():
                     "Suppressed %d single-signal coins (need ≥%d to alert)",
                     summary["single_signals_skipped"], CONFLUENCE_MIN_SIGNALS,
                 )
+
+            # 10. Hit-rate: back-fill follow-up prices for past alerts (15м / 1ч / 4ч)
+            fill_alert_followups(tickers)
 
         # Mark as initialized after first successful run
         with state_lock:
@@ -955,12 +1390,18 @@ def run_checks():
                     f"Ликвидных пар (&gt;${MIN_VOLUME_USDT:,.0f} объёма за 24ч): <b>{liquid_count}</b>\n\n"
                     f"<b>Правило конфлюэнции:</b> алерт отправляется только когда "
                     f"<b>≥ {CONFLUENCE_MIN_SIGNALS} сигнала</b> срабатывают на одной монете в одном цикле.\n\n"
-                    f"Отслеживаемые сигналы:\n"
-                    f"• 🆕 Новый листинг\n"
+                    f"<b>Сигналы конфлюэнции:</b>\n"
                     f"• 📈 Пробой 24ч / 7д / 30д максимума\n"
                     f"• 🚀 Всплеск объёма ≥ {VOLUME_SPIKE_MULTIPLIER}× средн.\n"
                     f"• 🔥 RSI ≥ {RSI_OVERBOUGHT} перекупленность (1ч, кулдаун 4ч)\n"
-                    f"• 🧊 RSI ≤ {RSI_OVERSOLD} перепроданность (1ч, кулдаун 4ч)"
+                    f"• 🧊 RSI ≤ {RSI_OVERSOLD} перепроданность (1ч, кулдаун 4ч)\n\n"
+                    f"<b>Отдельные алерты (без конфлюэнции):</b>\n"
+                    f"• 🆕 Новый листинг на Binance\n"
+                    f"• 🟢/🔴 Импульс ±1%/3%/5%/10% за 15 минут\n"
+                    f"• ⚠️ Перегрета (+20% за 24ч + RSI ≥ 70 — возможен шорт)\n"
+                    f"• 💎 Перепродана (-20% за 24ч + RSI ≤ 30 — возможен лонг)\n\n"
+                    f"<b>Фильтр тренда:</b> EMA-200 (4ч) — блокирует шорт выше EMA и лонг ниже EMA.\n\n"
+                    f"<b>Команды:</b> /status /top10 /signal /stats /silence /unmute"
                 )
 
     except Exception as e:
@@ -1018,7 +1459,11 @@ def handle_status_command(chat_id: int) -> None:
         f"Макс. 30д: {summary.get('monthly_highs', 0)}\n"
         f"  🚀 Всплески объёма: {summary.get('vol_spikes', 0)}\n"
         f"  🔥 RSI перекупленность: {summary.get('rsi_overbought', 0)}\n"
-        f"  🧊 RSI перепроданность: {summary.get('rsi_oversold', 0)}"
+        f"  🧊 RSI перепроданность: {summary.get('rsi_oversold', 0)}\n\n"
+        f"<b>Отдельные алерты (без конфлюэнции):</b>\n"
+        f"  🟢/🔴 Импульс 15м: <b>{summary.get('momentum_alerts', 0)}</b>\n"
+        f"  ⚠️ Перегрета (+20% + RSI≥70): <b>{summary.get('overheated_alerts', 0)}</b>\n"
+        f"  💎 Перепродана (-20% + RSI≤30): <b>{summary.get('oversold_alerts', 0)}</b>"
         f"{error_line}\n\n"
         f"<b>Правила:</b>\n"
         f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах на одной монете\n"
@@ -1026,8 +1471,9 @@ def handle_status_command(chat_id: int) -> None:
         f"  Всплеск объёма: ≥ {VOLUME_SPIKE_MULTIPLIER}× средн. (5м)\n"
         f"  RSI перекупленность: ≥ {RSI_OVERBOUGHT}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
         f"  RSI перепроданность: ≤ {RSI_OVERSOLD}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
+        f"  EMA-200 (4ч): тренд-фильтр для шорт/лонг\n"
         f"  Интервал проверки: 5 мин\n\n"
-        f"<b>Команды:</b> /status · /top10 · /signal · /silence · /unmute"
+        f"<b>Команды:</b> /status · /top10 · /signal · /stats · /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
@@ -1075,6 +1521,35 @@ def handle_silence_command(chat_id: int) -> None:
     ))
 
 
+def handle_stats_command(chat_id: int) -> None:
+    """Show win rates per alert type for the last HIT_RATE_RETENTION_DAYS days."""
+    stats = compute_hit_rate_stats(days=HIT_RATE_RETENTION_DAYS)
+    if not stats:
+        _telegram_send(
+            chat_id,
+            f"📊 <b>Статистика за {HIT_RATE_RETENTION_DAYS} дней</b>\n\n"
+            f"Пока нет данных — алерты ещё не накоплены.",
+        )
+        return
+
+    def fmt(arr: list) -> str:
+        wins, n = arr
+        if n == 0:
+            return "—"
+        return f"{wins/n*100:.0f}% ({n})"
+
+    lines = [f"📊 <b>Статистика за {HIT_RATE_RETENTION_DAYS} дней</b>", ""]
+    for r in stats:
+        lines.append(
+            f"<b>{r['alert_type']}</b> · {r['recommendation']} · "
+            f"{r['total']} алертов\n"
+            f"  15м: {fmt(r['w15'])}  |  1ч: {fmt(r['w1h'])}  |  4ч: {fmt(r['w4h'])}"
+        )
+    lines.append("")
+    lines.append(f"<i>Успех = движение ≥ {HIT_RATE_WIN_PCT:.0f}% в нужную сторону</i>")
+    _telegram_send(chat_id, "\n".join(lines))
+
+
 def handle_signal_command(chat_id: int) -> None:
     """Show current LONG/SHORT/NEUTRAL recommendations for the top-10 symbols
     by day-over-day volume change (the same ranking used by /top10)."""
@@ -1082,6 +1557,7 @@ def handle_signal_command(chat_id: int) -> None:
         ranking = list(state["volume_ranking"])
         weekly_highs = dict(state["weekly_highs"])
         monthly_highs = dict(state["monthly_highs"])
+        ema_map = dict(state["ema200_4h"])
 
     if not ranking:
         _telegram_send(
@@ -1101,7 +1577,9 @@ def handle_signal_command(chat_id: int) -> None:
         tickers = {}
 
     def fetch(symbol: str) -> tuple[str, float | None, float | None]:
-        return symbol, get_klines_rsi(symbol), get_volume_spike_ratio(symbol)
+        rsi_v = get_klines_rsi(symbol)
+        spike_v, _pct = get_5m_signals(symbol)
+        return symbol, rsi_v, spike_v
 
     signals: dict[str, tuple[float | None, float | None]] = {}
     with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(symbols))) as ex:
@@ -1128,10 +1606,15 @@ def handle_signal_command(chat_id: int) -> None:
         broke_weekly = bool(price is not None and w_high and price > w_high)
         broke_monthly = bool(price is not None and m_high and price > m_high)
 
+        ema = ema_map.get(sym)
+        above_ema: bool | None = None
+        if ema is not None and price is not None:
+            above_ema = price > ema
         rec_line, reason_line = make_recommendation(
             rsi=rsi_v, spike_ratio=spike_v,
             broke_weekly=broke_weekly, broke_monthly=broke_monthly,
             near_24h_high=near_high,
+            above_ema200=above_ema,
         )
         # Compact display: strip the leading "📊 Рекомендация: " prefix for inline use
         rec_short = rec_line.replace("📊 Рекомендация: ", "")
@@ -1195,6 +1678,24 @@ def telegram_update():
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+
+_run_checks_lock = threading.Lock()
+_original_run_checks = run_checks
+
+
+def run_checks():  # type: ignore[no-redef]
+    """Single-flight wrapper: skip if a previous cycle is still in progress.
+    Prevents overlapping cycles (scheduled vs /run-now) from racing on
+    cooldown read/write and producing duplicate alerts.
+    """
+    if not _run_checks_lock.acquire(blocking=False):
+        logger.warning("run_checks skipped — previous cycle still in progress")
+        return
+    try:
+        _original_run_checks()
+    finally:
+        _run_checks_lock.release()
+
 
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(
