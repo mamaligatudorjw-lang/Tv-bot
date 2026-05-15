@@ -31,6 +31,13 @@ BINANCE_HOSTS = [
 ]
 BINANCE_BASE = BINANCE_HOSTS[0]  # updated at runtime by _binance_get()
 
+# USDⓈ-M Futures endpoints — used as a fallback for symbols like NVDAUSDT
+# that exist on futures but not on spot.
+BINANCE_FUTURES_HOSTS = [
+    "https://fapi.binance.com",
+]
+BINANCE_FUTURES_BASE = BINANCE_FUTURES_HOSTS[0]
+
 # ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
@@ -292,6 +299,33 @@ def _binance_get(path: str, params: dict | None = None, timeout: int = 15):
     raise last_err
 
 
+def _binance_futures_get(path: str, params: dict | None = None, timeout: int = 15):
+    """Same shape as _binance_get but targets USDⓈ-M Futures hosts.
+    Used as a fallback when a symbol isn't listed on spot (e.g. NVDAUSDT).
+    """
+    global BINANCE_FUTURES_BASE
+    hosts_to_try = [BINANCE_FUTURES_BASE] + [
+        h for h in BINANCE_FUTURES_HOSTS if h != BINANCE_FUTURES_BASE
+    ]
+    last_err = None
+    for host in hosts_to_try:
+        try:
+            resp = requests.get(f"{host}{path}", params=params, timeout=timeout)
+            if resp.status_code == 451:
+                logger.warning("Futures host %s returned 451, trying next...", host)
+                last_err = requests.exceptions.HTTPError(f"451 from {host}")
+                continue
+            resp.raise_for_status()
+            if host != BINANCE_FUTURES_BASE:
+                logger.info("Switched active Binance futures host to %s", host)
+                BINANCE_FUTURES_BASE = host
+            return resp
+        except requests.exceptions.RequestException as e:
+            logger.warning("Futures host %s failed: %s", host, e)
+            last_err = e
+    raise last_err
+
+
 def get_all_usdt_pairs() -> list[str]:
     resp = _binance_get("/api/v3/exchangeInfo", timeout=15)
     data = resp.json()
@@ -445,6 +479,51 @@ def get_ema200_4h(symbol: str) -> float | None:
         return _calculate_ema(closes, EMA200_PERIOD)
     except Exception as e:
         logger.warning("EMA-200 4h fetch failed for %s: %s", symbol, e)
+        return None
+
+
+# --- Futures fallbacks (used by /trade when a symbol isn't on spot) ---
+
+def get_klines_rsi_futures(symbol: str) -> float | None:
+    try:
+        resp = _binance_futures_get(
+            "/fapi/v1/klines",
+            params={"symbol": symbol, "interval": "1h", "limit": RSI_PERIOD + 1},
+            timeout=10,
+        )
+        closes = [float(k[4]) for k in resp.json()]
+        if len(closes) < RSI_PERIOD + 1:
+            return None
+        return _calculate_rsi(closes, RSI_PERIOD)
+    except Exception as e:
+        logger.warning("Futures RSI kline fetch failed for %s: %s", symbol, e)
+        return None
+
+
+def get_ema200_4h_futures(symbol: str) -> float | None:
+    try:
+        resp = _binance_futures_get(
+            "/fapi/v1/klines",
+            params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
+            timeout=10,
+        )
+        closes = [float(k[4]) for k in resp.json()]
+        if len(closes) < EMA200_PERIOD:
+            return None
+        return _calculate_ema(closes, EMA200_PERIOD)
+    except Exception as e:
+        logger.warning("Futures EMA-200 4h fetch failed for %s: %s", symbol, e)
+        return None
+
+
+def get_24h_ticker_futures(symbol: str) -> dict | None:
+    try:
+        resp = _binance_futures_get(
+            "/fapi/v1/ticker/24hr", params={"symbol": symbol}, timeout=10,
+        )
+        return resp.json()
+    except Exception as e:
+        logger.warning("Futures 24h ticker fetch failed for %s: %s", symbol, e)
         return None
 
 
@@ -1781,34 +1860,46 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
     else:  # шорт
         pnl_pct = (entry - exit_) / entry * 100.0
 
-    # Snapshot current indicators (concept of "trade-time context")
+    # Snapshot current indicators (concept of "trade-time context"). Try spot
+    # first, then fall back to USDⓈ-M futures for symbols like NVDAUSDT that
+    # only exist on the futures market.
     rsi = get_klines_rsi(symbol)
     with state_lock:
         ema200 = state["ema200_4h"].get(symbol)
 
-    def _fetch_24h_ticker(sym: str) -> dict | None:
+    def _fetch_24h_ticker_spot(sym: str) -> dict | None:
         try:
             resp = _binance_get(
                 "/api/v3/ticker/24hr", params={"symbol": sym}, timeout=10,
             )
             return resp.json()
         except Exception as e:
-            logger.warning("Trade /trade: 24h ticker fetch failed for %s: %s", sym, e)
+            logger.warning("Trade /trade: spot 24h ticker fetch failed for %s: %s", sym, e)
             return None
 
     volume_24h: float | None = None
-    ticker = _fetch_24h_ticker(symbol)
-    # Fallback: if the full indicator set came back empty, retry the cheap
-    # 24h-ticker endpoint once more to give the host-rotation logic another
-    # attempt at recovering basic market data.
-    if ticker is None and rsi is None and ema200 is None:
-        time.sleep(0.5)
-        ticker = _fetch_24h_ticker(symbol)
+    ticker = _fetch_24h_ticker_spot(symbol)
     if ticker is not None:
         try:
             volume_24h = float(ticker.get("quoteVolume", 0)) or None
         except (TypeError, ValueError):
             volume_24h = None
+
+    data_source = "spot"
+    # Futures fallback: if NOTHING came back from spot (the symbol probably
+    # isn't listed there), try the USDⓈ-M futures endpoints.
+    if rsi is None and ema200 is None and volume_24h is None:
+        logger.info("Trade /trade: no spot data for %s, trying futures fallback", symbol)
+        rsi = get_klines_rsi_futures(symbol)
+        ema200 = get_ema200_4h_futures(symbol)
+        f_ticker = get_24h_ticker_futures(symbol)
+        if f_ticker is not None:
+            try:
+                volume_24h = float(f_ticker.get("quoteVolume", 0)) or None
+            except (TypeError, ValueError):
+                volume_24h = None
+        if rsi is not None or ema200 is not None or volume_24h is not None:
+            data_source = "futures"
 
     has_market_data = (rsi is not None) or (ema200 is not None) or (volume_24h is not None)
 
@@ -1848,8 +1939,9 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
         rsi_str = f"{rsi:.1f}" if rsi is not None else "недоступно"
         ema_str = f"${ema200:,.6g}" if ema200 is not None else "недоступно"
         vol_str = f"${volume_24h:,.0f}" if volume_24h is not None else "недоступно"
+        source_label = "спот" if data_source == "spot" else "фьючерсы"
         lines.extend([
-            f"<b>Контекст рынка (сейчас):</b>",
+            f"<b>Контекст рынка (сейчас, {source_label}):</b>",
             f"  RSI (1ч): {rsi_str}",
             f"  EMA-200 (4ч): {ema_str}",
             f"  Объём 24ч: {vol_str}",
