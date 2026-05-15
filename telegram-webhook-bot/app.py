@@ -688,6 +688,11 @@ def _get_db() -> sqlite3.Connection:
             )
         """)
         _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_chat_ts ON trades(chat_id, ts DESC)")
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS coingecko_baseline (
+                coin_id TEXT PRIMARY KEY
+            )
+        """)
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -894,6 +899,29 @@ def check_coingecko_new_coins() -> None:
         logger.warning("CoinGecko payload had no usable ids — skipping cycle")
         return
 
+    # If this process hasn't loaded the baseline yet, try to hydrate it from
+    # the SQLite store so restarts don't keep wiping the known-IDs set.
+    with state_lock:
+        already_initialized = state["coingecko_initialized"]
+
+    if not already_initialized:
+        try:
+            with _db_lock:
+                conn = _get_db()
+                rows = conn.execute("SELECT coin_id FROM coingecko_baseline").fetchall()
+            persisted = {r[0] for r in rows}
+        except Exception as e:
+            logger.warning("CoinGecko: failed to load persisted baseline: %s", e)
+            persisted = set()
+        if persisted:
+            with state_lock:
+                state["known_coingecko_ids"] = persisted
+                state["coingecko_initialized"] = True
+            logger.info(
+                "CoinGecko: hydrated baseline from DB (%d coins) — alerts active",
+                len(persisted),
+            )
+
     with state_lock:
         known_pairs = set(state["known_pairs"])
         known_ids = set(state["known_coingecko_ids"])
@@ -901,6 +929,21 @@ def check_coingecko_new_coins() -> None:
         state["known_coingecko_ids"] = current_ids
         state["coingecko_initialized"] = True
         state["last_coingecko_check"] = time.time()
+
+    # Persist the freshly-fetched id set (always — keeps DB in sync with reality).
+    # Use `with conn:` so a failure mid-rewrite auto-rollbacks instead of leaving
+    # a dangling transaction that could later commit partial state.
+    try:
+        with _db_lock:
+            conn = _get_db()
+            with conn:
+                conn.execute("DELETE FROM coingecko_baseline")
+                conn.executemany(
+                    "INSERT INTO coingecko_baseline (coin_id) VALUES (?)",
+                    [(cid,) for cid in current_ids],
+                )
+    except Exception as e:
+        logger.warning("CoinGecko: failed to persist baseline: %s", e)
 
     if first_run:
         logger.info(
