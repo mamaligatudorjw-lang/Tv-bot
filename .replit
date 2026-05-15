@@ -24,13 +24,13 @@ args = "Telegram Webhook Bot"
 name = "Telegram Webhook Bot"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd telegram-webhook-bot && gunicorn --bind 0.0.0.0:5000 app:app --log-level info"
-waitForPort = 5000
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd telegram-webhook-bot && gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 120 --keep-alive 5"
+waitForPort = 5000
 
 [agent]
 stack = "PNPM_WORKSPACE"

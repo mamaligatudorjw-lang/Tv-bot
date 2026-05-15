@@ -195,10 +195,63 @@ def _poll_telegram_commands() -> None:
             time.sleep(5)
 
 
+_tg_poll_thread: threading.Thread | None = None
+
+
 def start_command_polling() -> None:
+    global _tg_poll_thread
     _delete_telegram_webhook()
-    t = threading.Thread(target=_poll_telegram_commands, daemon=True, name="tg-poll")
-    t.start()
+    _tg_poll_thread = threading.Thread(
+        target=_poll_telegram_commands, daemon=True, name="tg-poll"
+    )
+    _tg_poll_thread.start()
+
+
+# ---------------------------------------------------------------------------
+# Watchdog — auto-restart background workers if they die
+# ---------------------------------------------------------------------------
+
+WATCHDOG_INTERVAL = 30   # seconds between health checks
+WATCHDOG_BACKOFF = 5     # seconds to wait after a restart attempt fails
+
+
+def _watchdog_loop() -> None:
+    """Every WATCHDOG_INTERVAL seconds, verify the Telegram polling thread
+    and APScheduler are still alive. If either has died, restart it within
+    ~30s of the failure. Gunicorn itself supervises the HTTP worker; this
+    watchdog covers the background workers that gunicorn does not manage.
+    """
+    global _tg_poll_thread
+    logger.info("Watchdog started (interval=%ds)", WATCHDOG_INTERVAL)
+    while True:
+        try:
+            # 1. Telegram polling thread
+            if _tg_poll_thread is None or not _tg_poll_thread.is_alive():
+                logger.error("Watchdog: Telegram polling thread died — restarting")
+                try:
+                    _tg_poll_thread = threading.Thread(
+                        target=_poll_telegram_commands, daemon=True, name="tg-poll"
+                    )
+                    _tg_poll_thread.start()
+                except Exception as e:
+                    logger.exception("Watchdog: failed to restart tg-poll: %s", e)
+                    time.sleep(WATCHDOG_BACKOFF)
+
+            # 2. APScheduler background thread
+            if not scheduler.running:
+                logger.error("Watchdog: APScheduler stopped — restarting")
+                try:
+                    scheduler.start()
+                except Exception as e:
+                    logger.exception("Watchdog: failed to restart scheduler: %s", e)
+                    time.sleep(WATCHDOG_BACKOFF)
+        except Exception as e:
+            logger.exception("Watchdog loop error: %s", e)
+        time.sleep(WATCHDOG_INTERVAL)
+
+
+def start_watchdog() -> None:
+    threading.Thread(target=_watchdog_loop, daemon=True, name="watchdog").start()
 
 
 # ---------------------------------------------------------------------------
@@ -1710,6 +1763,7 @@ scheduler.add_job(
 scheduler.start()
 
 start_command_polling()
+start_watchdog()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
