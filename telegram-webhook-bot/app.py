@@ -61,7 +61,9 @@ state = {
     "last_monthly_alerted": {},        # symbol -> timestamp
     "last_vol_spike_alerted": {},      # symbol -> timestamp
     "ema200_4h": {},                   # symbol -> float (EMA-200 on 4h, refreshed hourly)
-    "last_ema200_refresh": 0,          # unix ts of last EMA-200 refresh
+    "atr_4h": {},                      # symbol -> float (ATR-14 on 4h, refreshed hourly)
+    "sigma_daily": {},                 # symbol -> float (std of daily % returns over ~30d)
+    "last_ema200_refresh": 0,          # unix ts of last 4h-stats refresh
     "last_momentum_alerted": {},       # symbol -> {threshold: ts}
     "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
@@ -509,20 +511,86 @@ def _calculate_ema(values: list[float], period: int) -> float | None:
     return float(ema)
 
 
-def get_ema200_4h(symbol: str) -> float | None:
+def _calculate_atr(
+    highs: list[float], lows: list[float], closes: list[float], period: int = 14,
+) -> float | None:
+    """Wilder's ATR. Returns absolute price units (same as price)."""
+    n = len(closes)
+    if n < period + 1 or len(highs) != n or len(lows) != n:
+        return None
+    trs: list[float] = []
+    for i in range(1, n):
+        h, l, pc = highs[i], lows[i], closes[i - 1]
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+    if len(trs) < period:
+        return None
+    arr = np.asarray(trs, dtype=float)
+    atr = float(arr[:period].mean())
+    for v in arr[period:]:
+        atr = (atr * (period - 1) + float(v)) / period
+    if not math.isfinite(atr) or atr <= 0:
+        return None
+    return atr
+
+
+def _calculate_daily_sigma(closes: list[float]) -> float | None:
+    """Std of daily % returns derived from 4h closes (every 6 candles = 1 day).
+    Returns a unitless fraction (e.g. 0.045 = 4.5% daily σ).
+    Sampling is anchored on the LATEST close so the most recent regime is
+    represented; we stride backward by 6 and reverse to get chronological order."""
+    if len(closes) < 13:
+        return None
+    # Reverse-stride keeps the final close as the anchor; cap at 30 daily samples.
+    sampled = closes[::-6][::-1]
+    if len(sampled) > 30:
+        sampled = sampled[-30:]
+    if len(sampled) < 8:
+        return None
+    rets: list[float] = []
+    for i in range(1, len(sampled)):
+        prev = sampled[i - 1]
+        if prev <= 0:
+            continue
+        r = (sampled[i] - prev) / prev
+        if math.isfinite(r):
+            rets.append(r)
+    if len(rets) < 7:
+        return None
+    sigma = float(np.std(rets, ddof=1))
+    if not math.isfinite(sigma) or sigma <= 0:
+        return None
+    return sigma
+
+
+def get_4h_stats(symbol: str) -> dict | None:
+    """Fetch 4h klines once; derive EMA-200, ATR-14, and approximate daily σ
+    from the same data. Returns a dict or None on failure."""
     try:
         resp = _binance_get(
             "/api/v3/klines",
             params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
             timeout=10,
         )
-        closes = [float(k[4]) for k in resp.json()]
-        if len(closes) < EMA200_PERIOD:
+        raw = resp.json()
+        if len(raw) < EMA200_PERIOD:
             return None
-        return _calculate_ema(closes, EMA200_PERIOD)
+        highs = [float(k[2]) for k in raw]
+        lows = [float(k[3]) for k in raw]
+        closes = [float(k[4]) for k in raw]
+        ema = _calculate_ema(closes, EMA200_PERIOD)
+        if ema is None:
+            return None
+        atr = _calculate_atr(highs, lows, closes, 14)
+        sigma = _calculate_daily_sigma(closes)
+        return {"ema200": ema, "atr": atr, "sigma_daily": sigma}
     except Exception as e:
-        logger.warning("EMA-200 4h fetch failed for %s: %s", symbol, e)
+        logger.warning("4h stats fetch failed for %s: %s", symbol, e)
         return None
+
+
+def get_ema200_4h(symbol: str) -> float | None:
+    stats = get_4h_stats(symbol)
+    return stats["ema200"] if stats else None
 
 
 # --- Futures fallbacks (used by /trade when a symbol isn't on spot) ---
@@ -571,22 +639,30 @@ def get_24h_ticker_futures(symbol: str) -> dict | None:
 
 
 def refresh_ema200_4h(symbols: list[str]) -> int:
+    """Refresh EMA-200, ATR-14, and daily σ for the given symbols (single
+    kline fetch per symbol). Kept under the historical name to preserve call
+    sites."""
     updated = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(get_ema200_4h, s): s for s in symbols}
+        futures = {ex.submit(get_4h_stats, s): s for s in symbols}
         for future in as_completed(futures):
             symbol = futures[future]
             try:
-                ema = future.result()
+                stats = future.result()
             except Exception:
-                ema = None
-            if ema is not None:
-                with state_lock:
-                    state["ema200_4h"][symbol] = ema
-                updated += 1
+                stats = None
+            if not stats:
+                continue
+            with state_lock:
+                state["ema200_4h"][symbol] = stats["ema200"]
+                if stats.get("atr") is not None:
+                    state["atr_4h"][symbol] = stats["atr"]
+                if stats.get("sigma_daily") is not None:
+                    state["sigma_daily"][symbol] = stats["sigma_daily"]
+            updated += 1
     with state_lock:
         state["last_ema200_refresh"] = time.time()
-    logger.info("Refreshed EMA-200 (4h) for %d/%d symbols", updated, len(symbols))
+    logger.info("Refreshed 4h stats (EMA/ATR/σ) for %d/%d symbols", updated, len(symbols))
     return updated
 
 
@@ -982,6 +1058,48 @@ def _winrate_for(alert_type: str, side: str) -> float | None:
     return wr
 
 
+_FEEDBACK_CACHE: dict[tuple[str, str], tuple[float, float | None, int]] = {}
+_FEEDBACK_CACHE_TTL = 300
+
+
+def _feedback_score(alert_type: str, side: str) -> tuple[float | None, int]:
+    """Net user-feedback score in [-1, +1] for this (alert_type, side) over
+    the last 30d, plus the number of votes. Side-aware so that votes on LONG
+    setups don't bias SHORT scores for mixed-direction types (e.g. confluence).
+    Returns (None, n) if fewer than 5 votes."""
+    now = time.time()
+    key = (alert_type, side)
+    cached = _FEEDBACK_CACHE.get(key)
+    if cached and now - cached[0] < _FEEDBACK_CACHE_TTL:
+        return (cached[1], cached[2])
+    # Map our internal 'side' to the recommendation strings persisted in `alerts`.
+    rec_for_side = {"buy": "LONG", "sell": "SHORT"}.get(side)
+    if rec_for_side is None:
+        _FEEDBACK_CACHE[key] = (now, None, 0)
+        return (None, 0)
+    try:
+        with _db_lock:
+            conn = _get_db()
+            since = int(now) - 30 * 86400
+            rows = conn.execute(
+                "SELECT f.vote FROM alert_feedback f "
+                "JOIN alerts a ON a.id = f.alert_id "
+                "WHERE a.alert_type=? AND a.recommendation=? AND f.ts >= ?",
+                (alert_type, rec_for_side, since),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("_feedback_score failed: %s", e)
+        return (None, 0)
+    n = len(rows)
+    if n < 5:
+        result: float | None = None
+    else:
+        votes = [1 if int(r[0]) > 0 else -1 for r in rows]
+        result = sum(votes) / n
+    _FEEDBACK_CACHE[key] = (now, result, n)
+    return (result, n)
+
+
 def compute_signal_score(
     alert_type: str,
     side: str,
@@ -999,6 +1117,13 @@ def compute_signal_score(
     wr = _winrate_for(alert_type, side)
     if wr is not None:
         score += (wr - 0.5) * 60  # ±30 pts
+    # User-feedback adjustment: thumbs-up / thumbs-down on this (alert_type, side)
+    fb, fb_n = _feedback_score(alert_type, side)
+    if fb is not None:
+        # Cap influence so a streak of votes can't fully override fundamentals
+        # Effective weight grows with vote count up to 20 votes.
+        weight = min(1.0, fb_n / 20.0)
+        score += fb * 15.0 * weight  # up to ±15 pts
     if rsi is not None:
         if side == "buy":
             score += max(-10.0, min(10.0, (50.0 - rsi) * 0.5))
@@ -1018,6 +1143,45 @@ def compute_signal_score(
         # extreme one-day pumps are more likely to mean-revert
         score += min(5.0, (pct24 - 30) * 0.2)
     return max(0, min(100, int(round(score))))
+
+
+def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
+    """Return a 'Стоп / Цель' line based on ATR. Empty string if not applicable.
+    side: 'buy'/'long' or 'sell'/'short'. SL=1.5×ATR, TP=3×ATR, R/R 1:2."""
+    if entry is None or atr is None or atr <= 0:
+        return ""
+    if not (math.isfinite(entry) and math.isfinite(atr) and entry > 0):
+        return ""
+    s = side.lower()
+    if s in ("buy", "long"):
+        sl = entry - 1.5 * atr
+        tp = entry + 3.0 * atr
+    elif s in ("sell", "short"):
+        sl = entry + 1.5 * atr
+        tp = entry - 3.0 * atr
+    else:
+        return ""
+    if sl <= 0 or tp <= 0:
+        return ""
+    return (
+        f"🛡️ Стоп: <code>${sl:,.6g}</code>  •  "
+        f"🎯 Цель: <code>${tp:,.6g}</code>  •  R/R 1:2"
+    )
+
+
+def _vol_threshold(symbol: str, base_pct: float, k_sigma: float) -> float:
+    """Volatility-adjusted percentage threshold: max(base, k·σ·100) where σ is
+    the symbol's recent daily-return std. Falls back to `base_pct` when σ is
+    unknown. `base_pct` may be negative (e.g. -20 for oversold) — in that case
+    the returned value is also negative with the same |·| semantics."""
+    with state_lock:
+        sigma = state["sigma_daily"].get(symbol)
+    if sigma is None or sigma <= 0:
+        return base_pct
+    sigma_pct = sigma * 100.0 * k_sigma
+    if base_pct >= 0:
+        return max(base_pct, sigma_pct)
+    return min(base_pct, -sigma_pct)
 
 
 def _strength_label(score: int) -> str:
@@ -1650,10 +1814,14 @@ def check_momentum(
             except (ValueError, KeyError, TypeError):
                 btc_pct24 = None
         score = compute_signal_score(kind, side, btc_pct24=btc_pct24)
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+        sl_tp = _format_sl_tp(side, price, atr)
         body = (
             f"{emoji} <b><code>{symbol}</code> {sign}{pct:.1f}% за 15 минут</b>\n"
             f"💰 Цена: {price_str}\n"
             f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
         )
         delivered, _aid = send_alert_with_log(symbol, kind, rec, price, body, score)
         if not delivered:
@@ -1694,7 +1862,12 @@ def check_overheated_oversold(
             except (ValueError, KeyError, TypeError):
                 btc_pct24 = None
 
-        if pct24 >= OVERHEATED_24H_PCT and rsi >= RSI_OVERBOUGHT:
+        oh_threshold = _vol_threshold(symbol, OVERHEATED_24H_PCT, 2.5)
+        os_threshold = _vol_threshold(symbol, OVERSOLD_24H_PCT, 2.5)
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+
+        if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
             if now - last >= OVERHEATED_COOLDOWN:
@@ -1702,15 +1875,17 @@ def check_overheated_oversold(
                     "overheated_24h", "sell",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
+                sl_tp = _format_sl_tp("sell", price, atr)
                 body = (
                     f"⚠️ <b>ПЕРЕГРЕТА — возможен шорт</b>\n"
                     f"Монета выросла слишком быстро\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
-                    f"📈 24ч: <b>+{pct24:.1f}%</b>\n"
+                    f"📈 24ч: <b>+{pct24:.1f}%</b> (порог <b>+{oh_threshold:.1f}%</b>)\n"
                     f"🔥 RSI: <b>{rsi:.1f}</b>\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+                    + (f"\n{sl_tp}" if sl_tp else "")
                 )
                 delivered, _aid = send_alert_with_log(symbol, "overheated_24h", "SHORT", price, body, score)
                 if delivered:
@@ -1718,7 +1893,7 @@ def check_overheated_oversold(
                         state["last_overheated_alerted"][symbol] = now
                     sent_oh += 1
 
-        elif pct24 <= OVERSOLD_24H_PCT and rsi <= RSI_OVERSOLD:
+        elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
@@ -1726,15 +1901,17 @@ def check_overheated_oversold(
                     "oversold_24h", "buy",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
+                sl_tp = _format_sl_tp("buy", price, atr)
                 body = (
                     f"💎 <b>ПЕРЕПРОДАНА — возможен лонг</b>\n"
                     f"Монета упала слишком сильно\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
-                    f"📉 24ч: <b>{pct24:.1f}%</b>\n"
+                    f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
                     f"🧊 RSI: <b>{rsi:.1f}</b>\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+                    + (f"\n{sl_tp}" if sl_tp else "")
                 )
                 delivered, _aid = send_alert_with_log(symbol, "oversold_24h", "LONG", price, body, score)
                 if delivered:
@@ -1764,10 +1941,12 @@ def check_24h_pumps(tickers: dict[str, dict]) -> int:
             continue
         if volume <= 0 or price <= 0:
             continue
-        if pct24 < PUMP_24H_PCT:
+        pump_threshold = _vol_threshold(symbol, PUMP_24H_PCT, 3.0)
+        if pct24 < pump_threshold:
             continue
         with state_lock:
             last = state["last_pump_alerted"].get(symbol, 0)
+            atr = state["atr_4h"].get(symbol)
         if now - last < PUMP_24H_COOLDOWN:
             continue
         btc_t = tickers.get("BTCUSDT")
@@ -1780,13 +1959,15 @@ def check_24h_pumps(tickers: dict[str, dict]) -> int:
         score = compute_signal_score(
             "pump_24h", "sell", pct24=pct24, btc_pct24=btc_pct24,
         )
+        sl_tp = _format_sl_tp("sell", price, atr)
         body = (
             f"🚀🚀🚀 <b>ТОП РОСТ ЗА 24Ч</b> 🚀🚀🚀\n"
-            f"📈 <code>{symbol}</code> <b>+{pct24:.1f}%</b> за 24 часа\n"
+            f"📈 <code>{symbol}</code> <b>+{pct24:.1f}%</b> за 24 часа (порог <b>+{pump_threshold:.1f}%</b>)\n"
             f"💰 Цена: ${price:,.6g}\n"
             f"📊 Объём 24ч: ${volume:,.0f}\n"
             f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})\n"
             f"⚠️ Внимание: возможна коррекция после сильного роста"
+            + (f"\n{sl_tp} (для возможного шорта)" if sl_tp else "")
         )
         delivered, _aid = send_alert_with_log(symbol, "pump_24h", "WATCH", price, body, score)
         if delivered:
@@ -2061,7 +2242,10 @@ def run_checks():
                     header.append(f"Цена: <b>${b['price']:,.6g}</b>")
                 if b["volume"] is not None:
                     header.append(f"Объём за 24ч: ${b['volume']:,.0f}")
-                body = "\n".join(header + [
+                with state_lock:
+                    atr = state["atr_4h"].get(sym)
+                sl_tp = _format_sl_tp(side_for_score, b["price"], atr)
+                body_lines = header + [
                     "",
                     f"<b>Сработавшие сигналы ({len(b['lines'])}):</b>",
                     *[f"  • {ln}" for ln in b["lines"]],
@@ -2069,7 +2253,10 @@ def run_checks():
                     rec_line,
                     reason_line,
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})",
-                ])
+                ]
+                if sl_tp:
+                    body_lines.append(sl_tp)
+                body = "\n".join(body_lines)
                 delivered, _aid = send_alert_with_log(
                     sym, "confluence", rec_label, b["price"], body, score
                 )
