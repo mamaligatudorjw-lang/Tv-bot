@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "4zl1HulGwtM_cyir2yqeM"
+uri = "file://exports/app.py.txt"
+type = "text"
+title = "app.py — полный код (2360 строк)"
