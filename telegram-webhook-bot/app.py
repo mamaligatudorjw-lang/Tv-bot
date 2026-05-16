@@ -2050,6 +2050,25 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     now = time.time()
     with state_lock:
         ranking_snapshot = list(state["volume_ranking"])
+        ranking_updated = state["volume_ranking_updated"]
+    age_min = (now - ranking_updated) / 60.0 if ranking_updated else float("inf")
+    logger.info(
+        "Volume-surge scan: ranking size=%d, age=%.1f min",
+        len(ranking_snapshot), age_min,
+    )
+    # Defensive: refresh sorts desc by pct, but if a future change ever broke
+    # that invariant we'd silently skip valid surge candidates after the first
+    # below-threshold row. Re-sort locally so the `break` stays correct.
+    if len(ranking_snapshot) >= 2:
+        for a, b in zip(ranking_snapshot, ranking_snapshot[1:]):
+            if a[3] < b[3]:
+                logger.warning(
+                    "volume_ranking not sorted desc by pct (%.2f < %.2f); "
+                    "re-sorting locally for the scan",
+                    a[3], b[3],
+                )
+                ranking_snapshot.sort(key=lambda r: r[3], reverse=True)
+                break
     btc_t = tickers.get("BTCUSDT")
     btc_pct24 = None
     if btc_t:
@@ -2124,60 +2143,12 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     return sent
 
 
-def check_24h_pumps(tickers: dict[str, dict]) -> int:
-    """Standalone pump alert: any coin up ≥ PUMP_24H_PCT over 24h.
-    Independent of RSI/confluence — fires once per coin per PUMP_24H_COOLDOWN."""
-    if not tickers:
-        return 0
-    sent = 0
-    now = time.time()
-    for symbol, t in tickers.items():
-        try:
-            pct24 = float(t["priceChangePercent"])
-            price = float(t["lastPrice"])
-            volume = float(t["quoteVolume"])
-        except (ValueError, KeyError, TypeError):
-            continue
-        # Reject NaN/inf — comparisons against NaN are always False, so a
-        # malformed ticker could otherwise produce a "+nan%" alert.
-        if not (math.isfinite(pct24) and math.isfinite(price) and math.isfinite(volume)):
-            continue
-        if volume <= 0 or price <= 0:
-            continue
-        pump_threshold = _vol_threshold(symbol, PUMP_24H_PCT, 3.0)
-        if pct24 < pump_threshold:
-            continue
-        with state_lock:
-            last = state["last_pump_alerted"].get(symbol, 0)
-            atr = state["atr_4h"].get(symbol)
-        if now - last < PUMP_24H_COOLDOWN:
-            continue
-        btc_t = tickers.get("BTCUSDT")
-        btc_pct24 = None
-        if btc_t:
-            try:
-                btc_pct24 = float(btc_t["priceChangePercent"])
-            except (ValueError, KeyError, TypeError):
-                btc_pct24 = None
-        score = compute_signal_score(
-            "pump_24h", "sell", pct24=pct24, btc_pct24=btc_pct24,
-        )
-        sl_tp = _format_sl_tp("sell", price, atr)
-        body = (
-            f"🚀🚀🚀 <b>ТОП РОСТ ЗА 24Ч</b> 🚀🚀🚀\n"
-            f"📈 <code>{symbol}</code> <b>+{pct24:.1f}%</b> за 24 часа (порог <b>+{pump_threshold:.1f}%</b>)\n"
-            f"💰 Цена: ${price:,.6g}\n"
-            f"📊 Объём 24ч: ${volume:,.0f}\n"
-            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})\n"
-            f"⚠️ Внимание: возможна коррекция после сильного роста"
-            + (f"\n{sl_tp} (для возможного шорта)" if sl_tp else "")
-        )
-        delivered, _aid = send_alert_with_log(symbol, "pump_24h", "WATCH", price, body, score)
-        if delivered:
-            with state_lock:
-                state["last_pump_alerted"][symbol] = now
-            sent += 1
-    return sent
+# NOTE: `check_24h_pumps` was removed — it was a pure "WATCH" alert (no
+# directional bias), so the LONG/SHORT-only filter in `send_alert_with_log`
+# would have suppressed every fire. The same coins now surface through
+# `volume_surge_short` (when volume + CRSI overbought confirm), which is the
+# replacement directional pump signal. State key `last_pump_alerted` is left
+# in place for backward compatibility with restored snapshots.
 
 
 # ---------------------------------------------------------------------------
@@ -2196,7 +2167,6 @@ def run_checks():
         "momentum_alerts": 0,          # standalone 15-min price-momentum alerts
         "overheated_alerts": 0,        # standalone +20% & RSI>=70
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
-        "pump_alerts": 0,              # standalone +30% 24h top-gainer
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
         "errors": [],
     }
@@ -2282,10 +2252,8 @@ def run_checks():
                 summary["overheated_alerts"] = oh_n
                 summary["oversold_alerts"] = os_n
 
-                # 6c. Top-gainers pump alert (24h ≥ +30%, no RSI gate)
-                summary["pump_alerts"] = check_24h_pumps(tickers)
-
-                # 6d. Volume surge (+300% daily vol) + CRSI extreme combo
+                # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
+                # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
                 summary["vol_surge_alerts"] = check_volume_surge_crsi(tickers)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
@@ -2314,6 +2282,16 @@ def run_checks():
                     except Exception as e:
                         logger.error("Weekly/monthly refresh failed: %s", e)
                         summary["errors"].append(f"WM refresh: {e}")
+                    else:
+                        # Re-scan against the freshly rebuilt ranking so a brand
+                        # new ≥300% surge doesn't wait another 5-min cycle. The
+                        # 4h per-symbol cooldown prevents duplicates with the
+                        # pre-refresh pass above.
+                        try:
+                            summary["vol_surge_alerts"] += check_volume_surge_crsi(tickers)
+                        except Exception as e:
+                            logger.error("Post-refresh volume-surge scan failed: %s", e)
+                            summary["errors"].append(f"vol_surge rescan: {e}")
 
                 if needs_ema:
                     logger.info("Refreshing EMA-200 (4h) for %d liquid pairs...", len(liquid_pairs))
@@ -2594,7 +2572,7 @@ def handle_status_command(chat_id: int) -> None:
         f"  🟢/🔴 Импульс 15м: <b>{summary.get('momentum_alerts', 0)}</b>\n"
         f"  ⚠️ Перегрета (+20% + RSI≥70): <b>{summary.get('overheated_alerts', 0)}</b>\n"
         f"  💎 Перепродана (-20% + RSI≤30): <b>{summary.get('oversold_alerts', 0)}</b>\n"
-        f"  🚀 Топ рост 24ч (≥+{PUMP_24H_PCT:.0f}%): <b>{summary.get('pump_alerts', 0)}</b>"
+        f"  🌋 Объём+CRSI: <b>{summary.get('vol_surge_alerts', 0)}</b>"
         f"{error_line}\n\n"
         f"<b>Правила:</b>\n"
         f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах на одной монете\n"
@@ -3106,8 +3084,12 @@ def handle_signal_command(chat_id: int) -> None:
             signals[sym] = (rsi_v, spike_v)
 
     lines = [
-        "<b>🎯 Текущие сигналы — топ-10 по росту объёма за 24ч (к вчерашнему)</b>\n",
+        "<b>🎯 Текущие сигналы — топ-10 по росту объёма за 24ч (к вчерашнему)</b>",
+        "<i>Показываются только направленные сигналы (LONG / SHORT). "
+        "Нейтральные пары скрыты — они не рассылаются в канал.</i>\n",
     ]
+    shown = 0
+    skipped_neutral = 0
     for i, (sym, _yest, _today, _pct) in enumerate(top10, 1):
         rsi_v, spike_v = signals.get(sym, (None, None))
         ticker = tickers.get(sym)
@@ -3137,13 +3119,28 @@ def handle_signal_command(chat_id: int) -> None:
         )
         # Compact display: strip the leading "📊 Рекомендация: " prefix for inline use
         rec_short = rec_line.replace("📊 Рекомендация: ", "")
+        # Skip NEUTRAL/мixed — channel filter drops them anyway, no point
+        # listing them here. Use the same side classifier as everywhere else.
+        side = _classify_side("", rec_short)
+        if side == "neutral":
+            skipped_neutral += 1
+            continue
+        shown += 1
         rsi_str = f"{rsi_v:.1f}" if rsi_v is not None else "—"
         spike_str = f"{spike_v:.1f}×" if spike_v is not None else "—"
         lines.append(
-            f"{i}. <code>{sym}</code> — <b>{rec_short}</b>\n"
+            f"{shown}. <code>{sym}</code> — <b>{rec_short}</b>\n"
             f"   RSI: {rsi_str}  |  Объём 5м: {spike_str}\n"
             f"   {reason_line}"
         )
+
+    if shown == 0:
+        lines.append(
+            "Сейчас среди топ-10 по объёму нет направленных сигналов "
+            "(все нейтральны)."
+        )
+    elif skipped_neutral:
+        lines.append(f"\n<i>Скрыто нейтральных: {skipped_neutral}</i>")
 
     _telegram_send(chat_id, "\n".join(lines))
 
@@ -3211,8 +3208,10 @@ def _classify_side(alert_type: str, recommendation: str | None) -> str:
                      "new_listing", "new_coin", "rsi_oversold")):
         return "buy"
     if a.startswith(("overheated", "momentum_down", "pump_24h",
-                     "rsi_overbought")):
+                     "rsi_overbought", "volume_surge_short")):
         return "sell"
+    if a.startswith("volume_surge_long"):
+        return "buy"
     return "neutral"
 
 
@@ -3220,6 +3219,8 @@ def _label_alert_type(alert_type: str) -> str:
     a = (alert_type or "")
     base = {
         "pump_24h": "Перегрев +30% за 24ч",
+        "volume_surge_short": "Объёмный взрыв + CRSI (SHORT)",
+        "volume_surge_long": "Объёмный взрыв + CRSI (LONG)",
         "overheated_24h": "Перегрев 24ч",
         "overheated": "Перегрев",
         "oversold_24h": "Перепродан 24ч",
