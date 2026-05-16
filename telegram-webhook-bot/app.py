@@ -68,6 +68,7 @@ state = {
     "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
+    "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "initialized": False,
     "last_run": None,
     "last_run_summary": {},
@@ -87,6 +88,14 @@ COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
+
+# Volume-surge + CRSI combo alert (calendar-day vol vs yesterday)
+MIN_VOLUME_USDT_BROAD = 10_000     # lower floor so pairs like ORCAUSDT enter the daily refresh
+VOLUME_SURGE_PCT = 300.0           # today's USDT vol must be ≥ +300% over yesterday's
+CRSI_OVERBOUGHT = 75.0
+CRSI_OVERSOLD = 25.0
+VOLUME_SURGE_COOLDOWN = 14400      # 4h per coin so a multi-hour pump doesn't re-fire each cycle
+CRSI_KLINES_LIMIT = 110            # needs ≥104 closes (RSI_3 + streak_RSI_2 + 100-day rank)
 WEEKLY_MONTHLY_REFRESH_INTERVAL = 3600  # refresh 7d/30d highs hourly
 
 RSI_PERIOD = 14
@@ -487,6 +496,34 @@ def get_two_day_volumes(symbol: str) -> tuple[float, float] | None:
         return None
 
 
+_CRSI_KLINES_CACHE: dict[str, tuple[float, list[float]]] = {}
+_CRSI_KLINES_CACHE_TTL = 1800  # 30 min — daily closes don't change intraday
+
+
+def _fetch_daily_closes_for_crsi(symbol: str) -> list[float] | None:
+    """Cached daily-close fetcher for CRSI. Returns None on error or
+    insufficient candles."""
+    now = time.time()
+    cached = _CRSI_KLINES_CACHE.get(symbol)
+    if cached and now - cached[0] < _CRSI_KLINES_CACHE_TTL:
+        return cached[1]
+    try:
+        resp = _binance_get(
+            "/api/v3/klines",
+            params={"symbol": symbol, "interval": "1d", "limit": CRSI_KLINES_LIMIT},
+            timeout=10,
+        )
+        candles = resp.json()
+    except Exception as e:
+        logger.warning("CRSI daily klines fetch failed for %s: %s", symbol, e)
+        return None
+    if not candles or len(candles) < 30:
+        return None
+    closes = [float(k[4]) for k in candles]
+    _CRSI_KLINES_CACHE[symbol] = (now, closes)
+    return closes
+
+
 def _calculate_rsi(closes: list[float], period: int) -> float:
     closes = np.array(closes)
     deltas = np.diff(closes)
@@ -498,6 +535,69 @@ def _calculate_rsi(closes: list[float], period: int) -> float:
         return 100.0
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1.0 + rs))
+
+
+def _wilder_rsi(values: list[float], period: int) -> float | None:
+    """Wilder-smoothed RSI returning the latest value. Used for CRSI's short
+    sub-periods (3 and 2) where the simple `_calculate_rsi` (which only uses
+    the first `period` deltas) would be too coarse."""
+    n = len(values)
+    if n < period + 1:
+        return None
+    arr = np.asarray(values, dtype=float)
+    deltas = np.diff(arr)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
+    avg_gain = float(np.mean(gains[:period]))
+    avg_loss = float(np.mean(losses[:period]))
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + float(gains[i])) / period
+        avg_loss = (avg_loss * (period - 1) + float(losses[i])) / period
+    if avg_loss == 0:
+        return 100.0
+    if avg_gain == 0:
+        return 0.0
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi if math.isfinite(rsi) else None
+
+
+def _calculate_crsi(
+    closes: list[float], rsi_p: int = 3, streak_p: int = 2, rank_p: int = 100,
+) -> float | None:
+    """Connors RSI = mean of three components: RSI(close, 3), RSI(streak, 2),
+    and PercentRank of today's 1-day return over the prior 100 days.
+    Returns None if there are not enough candles."""
+    n = len(closes)
+    if n < rank_p + 2:
+        return None
+    rsi_close = _wilder_rsi(closes, rsi_p)
+    # Up/down streak series (signed run length).
+    streaks: list[float] = [0.0]
+    for i in range(1, n):
+        prev = streaks[-1]
+        if closes[i] > closes[i - 1]:
+            streaks.append(prev + 1.0 if prev > 0 else 1.0)
+        elif closes[i] < closes[i - 1]:
+            streaks.append(prev - 1.0 if prev < 0 else -1.0)
+        else:
+            streaks.append(0.0)
+    rsi_streak = _wilder_rsi(streaks, streak_p)
+    # PercentRank of today's 1-day return over the previous `rank_p` days.
+    arr = np.asarray(closes, dtype=float)
+    prevs = arr[:-1]
+    if np.any(prevs <= 0):
+        return None
+    returns = (arr[1:] - prevs) / prevs
+    today = float(returns[-1])
+    window = returns[-(rank_p + 1):-1]
+    if len(window) < rank_p:
+        return None
+    rank_pct = float(np.sum(window < today)) / len(window) * 100.0
+    if rsi_close is None or rsi_streak is None:
+        return None
+    crsi = (rsi_close + rsi_streak + rank_pct) / 3.0
+    return crsi if math.isfinite(crsi) else None
 
 
 def _calculate_ema(values: list[float], period: int) -> float | None:
@@ -1921,6 +2021,96 @@ def check_overheated_oversold(
     return sent_oh, sent_os
 
 
+def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
+    """Volume-spike + CRSI combo. For any pair in the cached
+    state['volume_ranking'] (which is built from the broadened daily refresh,
+    so coins like ORCAUSDT are eligible) where today's USDT volume is
+    ≥ +VOLUME_SURGE_PCT vs yesterday's AND the daily Connors-RSI is in an
+    extreme zone, fire a directional alert:
+      • CRSI ≥ CRSI_OVERBOUGHT (75) → SHORT
+      • CRSI ≤ CRSI_OVERSOLD   (25) → LONG
+    The CRSI calc fetches daily closes lazily and caches them for 30 min, so
+    only actual surge candidates pay the API cost."""
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+    with state_lock:
+        ranking_snapshot = list(state["volume_ranking"])
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24 = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            btc_pct24 = None
+
+    for symbol, yest_vol, today_vol, pct in ranking_snapshot:
+        # ranking is sorted desc by pct, so we can stop at the first miss.
+        if pct < VOLUME_SURGE_PCT:
+            break
+        if yest_vol <= 0 or today_vol <= 0:
+            continue
+        with state_lock:
+            last = state["last_vol_surge_alerted"].get(symbol, 0)
+        if now - last < VOLUME_SURGE_COOLDOWN:
+            continue
+        t = tickers.get(symbol)
+        if not t:
+            continue
+        try:
+            price = float(t["lastPrice"])
+            pct24 = float(t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not (math.isfinite(price) and math.isfinite(pct24)) or price <= 0:
+            continue
+
+        closes = _fetch_daily_closes_for_crsi(symbol)
+        if not closes:
+            continue
+        crsi = _calculate_crsi(closes)
+        if crsi is None:
+            continue
+
+        if crsi >= CRSI_OVERBOUGHT:
+            side, rec, kind = "sell", "SHORT", "volume_surge_short"
+            zone_label = "перекуплен"
+            dir_word = "ШОРТ"
+        elif crsi <= CRSI_OVERSOLD:
+            side, rec, kind = "buy", "LONG", "volume_surge_long"
+            zone_label = "перепродан"
+            dir_word = "ЛОНГ"
+        else:
+            continue
+
+        score = compute_signal_score(
+            kind, side, pct24=pct24, btc_pct24=btc_pct24,
+        )
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+        sl_tp = _format_sl_tp(side, price, atr)
+        body = (
+            f"🌋 <b>ОБЪЁМНЫЙ ВЗРЫВ + CRSI — {dir_word}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"📊 Объём сегодня: <b>${today_vol:,.0f}</b> "
+            f"(<b>+{pct:.0f}%</b> к вчера)\n"
+            f"   Вчера: ${yest_vol:,.0f}\n"
+            f"⚡ CRSI (дневной): <b>{crsi:.1f}</b> — {zone_label}\n"
+            f"📈 24ч: {pct24:+.1f}%\n"
+            f"💰 Цена: ${price:,.6g}\n"
+            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
+        )
+        delivered, _aid = send_alert_with_log(symbol, kind, rec, price, body, score)
+        if delivered:
+            with state_lock:
+                state["last_vol_surge_alerted"][symbol] = now
+            sent += 1
+    return sent
+
+
 def check_24h_pumps(tickers: dict[str, dict]) -> int:
     """Standalone pump alert: any coin up ≥ PUMP_24H_PCT over 24h.
     Independent of RSI/confluence — fires once per coin per PUMP_24H_COOLDOWN."""
@@ -1994,6 +2184,7 @@ def run_checks():
         "overheated_alerts": 0,        # standalone +20% & RSI>=70
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "pump_alerts": 0,              # standalone +30% 24h top-gainer
+        "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
         "errors": [],
     }
 
@@ -2023,18 +2214,23 @@ def run_checks():
 
             # 4. Build volume-filtered map once — shared by all checks
             liquid_vol_map: dict[str, float] = {}
+            broad_pairs: list[str] = []
             if tickers:
                 for sym, t in tickers.items():
                     try:
                         vol = float(t["quoteVolume"])
-                        if vol >= MIN_VOLUME_USDT:
-                            liquid_vol_map[sym] = vol
                     except (ValueError, KeyError):
                         continue
+                    if vol >= MIN_VOLUME_USDT:
+                        liquid_vol_map[sym] = vol
+                    if vol >= MIN_VOLUME_USDT_BROAD:
+                        broad_pairs.append(sym)
                 summary["liquid_pairs"] = len(liquid_vol_map)
                 logger.info(
-                    "%d / %d pairs pass volume filter ($%s+ 24h USDT vol)",
+                    "%d / %d pairs pass volume filter ($%s+ 24h USDT vol); "
+                    "broad pool for volume-surge scan: %d (≥$%s)",
                     len(liquid_vol_map), len(tickers), f"{MIN_VOLUME_USDT:,.0f}",
+                    len(broad_pairs), f"{MIN_VOLUME_USDT_BROAD:,.0f}",
                 )
 
             liquid_pairs = list(liquid_vol_map.items())
@@ -2076,6 +2272,9 @@ def run_checks():
                 # 6c. Top-gainers pump alert (24h ≥ +30%, no RSI gate)
                 summary["pump_alerts"] = check_24h_pumps(tickers)
 
+                # 6d. Volume surge (+300% daily vol) + CRSI extreme combo
+                summary["vol_surge_alerts"] = check_volume_surge_crsi(tickers)
+
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 with state_lock:
                     needs_refresh = (
@@ -2088,9 +2287,17 @@ def run_checks():
                     )
 
                 if needs_refresh:
-                    logger.info("Refreshing 7d/30d highs for %d liquid pairs...", len(liquid_pairs))
+                    # Use the broader pool so the volume-surge scanner can see
+                    # coins like ORCAUSDT that sometimes dip below the standard
+                    # $50k liquidity floor. Existing alerts still gate on
+                    # `liquid_pairs` themselves.
+                    refresh_pool = broad_pairs or [s for s, _ in liquid_pairs]
+                    logger.info(
+                        "Refreshing 7d/30d highs + volume ranking for %d pairs...",
+                        len(refresh_pool),
+                    )
                     try:
-                        refresh_weekly_monthly_highs([s for s, _ in liquid_pairs])
+                        refresh_weekly_monthly_highs(refresh_pool)
                     except Exception as e:
                         logger.error("Weekly/monthly refresh failed: %s", e)
                         summary["errors"].append(f"WM refresh: {e}")
