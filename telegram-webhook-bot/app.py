@@ -1,4 +1,5 @@
 import os
+import math
 import time
 import html
 import logging
@@ -64,6 +65,7 @@ state = {
     "last_momentum_alerted": {},       # symbol -> {threshold: ts}
     "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
+    "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "initialized": False,
     "last_run": None,
     "last_run_summary": {},
@@ -102,6 +104,10 @@ OVERHEATED_24H_PCT = 20.0
 OVERSOLD_24H_PCT = -20.0
 OVERHEATED_COOLDOWN = 14400        # 4h
 OVERSOLD_COOLDOWN = 14400          # 4h
+
+# Top-gainers (24h pump) alert — no RSI confirmation, pure +X% mover
+PUMP_24H_PCT = 30.0
+PUMP_24H_COOLDOWN = 14400          # 4h per coin so a sustained pump doesn't spam every 5 min
 
 # EMA-200 (4h) trend filter
 EMA200_PERIOD = 200
@@ -161,6 +167,7 @@ def _poll_telegram_commands() -> None:
     COMMANDS = {
         "/status":   handle_status_command,
         "/top10":    handle_top10_command,
+        "/top30":    handle_top30_command,
         "/signal":   handle_signal_command,
         "/stats":    handle_stats_command,
         "/trade":    handle_trade_command,
@@ -1300,6 +1307,47 @@ def check_overheated_oversold(
     return sent_oh, sent_os
 
 
+def check_24h_pumps(tickers: dict[str, dict]) -> int:
+    """Standalone pump alert: any coin up ≥ PUMP_24H_PCT over 24h.
+    Independent of RSI/confluence — fires once per coin per PUMP_24H_COOLDOWN."""
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+    for symbol, t in tickers.items():
+        try:
+            pct24 = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+            volume = float(t["quoteVolume"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        # Reject NaN/inf — comparisons against NaN are always False, so a
+        # malformed ticker could otherwise produce a "+nan%" alert.
+        if not (math.isfinite(pct24) and math.isfinite(price) and math.isfinite(volume)):
+            continue
+        if volume <= 0 or price <= 0:
+            continue
+        if pct24 < PUMP_24H_PCT:
+            continue
+        with state_lock:
+            last = state["last_pump_alerted"].get(symbol, 0)
+        if now - last < PUMP_24H_COOLDOWN:
+            continue
+        body = (
+            f"🚀🚀🚀 <b>ТОП РОСТ ЗА 24Ч</b> 🚀🚀🚀\n"
+            f"📈 <code>{symbol}</code> <b>+{pct24:.1f}%</b> за 24 часа\n"
+            f"💰 Цена: ${price:,.6g}\n"
+            f"📊 Объём 24ч: ${volume:,.0f}\n"
+            f"⚠️ Внимание: возможна коррекция после сильного роста"
+        )
+        if send_telegram(body):
+            with state_lock:
+                state["last_pump_alerted"][symbol] = now
+            log_alert(symbol, "pump_24h", "WATCH", price)
+            sent += 1
+    return sent
+
+
 # ---------------------------------------------------------------------------
 # Main job
 # ---------------------------------------------------------------------------
@@ -1316,6 +1364,7 @@ def run_checks():
         "momentum_alerts": 0,          # standalone 15-min price-momentum alerts
         "overheated_alerts": 0,        # standalone +20% & RSI>=70
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
+        "pump_alerts": 0,              # standalone +30% 24h top-gainer
         "errors": [],
     }
 
@@ -1394,6 +1443,9 @@ def run_checks():
                 oh_n, os_n = check_overheated_oversold(tickers, rsi_map)
                 summary["overheated_alerts"] = oh_n
                 summary["oversold_alerts"] = os_n
+
+                # 6c. Top-gainers pump alert (24h ≥ +30%, no RSI gate)
+                summary["pump_alerts"] = check_24h_pumps(tickers)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 with state_lock:
@@ -1665,7 +1717,8 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Отдельные алерты (без конфлюэнции):</b>\n"
         f"  🟢/🔴 Импульс 15м: <b>{summary.get('momentum_alerts', 0)}</b>\n"
         f"  ⚠️ Перегрета (+20% + RSI≥70): <b>{summary.get('overheated_alerts', 0)}</b>\n"
-        f"  💎 Перепродана (-20% + RSI≤30): <b>{summary.get('oversold_alerts', 0)}</b>"
+        f"  💎 Перепродана (-20% + RSI≤30): <b>{summary.get('oversold_alerts', 0)}</b>\n"
+        f"  🚀 Топ рост 24ч (≥+{PUMP_24H_PCT:.0f}%): <b>{summary.get('pump_alerts', 0)}</b>"
         f"{error_line}\n\n"
         f"<b>Правила:</b>\n"
         f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах на одной монете\n"
@@ -1675,7 +1728,7 @@ def handle_status_command(chat_id: int) -> None:
         f"  RSI перепроданность: ≤ {RSI_OVERSOLD}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
         f"  EMA-200 (4ч): тренд-фильтр для шорт/лонг\n"
         f"  Интервал проверки: 5 мин\n\n"
-        f"<b>Команды:</b> /status · /top10 · /signal · /stats · /trade · /mytrades · /silence · /unmute"
+        f"<b>Команды:</b> /status · /top10 · /top30 · /signal · /stats · /trade · /mytrades · /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
@@ -1707,6 +1760,80 @@ def handle_top10_command(chat_id: int) -> None:
             f"   Сегодня: ${today:,.0f}  |  Вчера: ${yesterday:,.0f}"
         )
 
+    _telegram_send(chat_id, "\n".join(lines))
+
+
+_top30_cache: dict = {"ts": 0.0, "tickers": None}
+_top30_lock = threading.Lock()
+TOP30_CACHE_TTL = 30  # seconds — coalesce command spam into one Binance fetch
+
+
+def handle_top30_command(chat_id: int) -> None:
+    """List every USDT pair currently up ≥ PUMP_24H_PCT in 24h, sorted desc."""
+    with state_lock:
+        initialized = state["initialized"]
+
+    if not initialized:
+        _telegram_send(chat_id, "<b>⏳ Бот ещё инициализируется...</b>\nЗагляните через минуту.")
+        return
+
+    # Use a 30s shared snapshot so concurrent /top30 calls share one Binance fetch.
+    tickers: dict[str, dict] | None = None
+    try:
+        with _top30_lock:
+            now = time.time()
+            cached = _top30_cache["tickers"]
+            if cached is not None and (now - _top30_cache["ts"]) < TOP30_CACHE_TTL:
+                tickers = cached
+            else:
+                with state_lock:
+                    symbols = list(state["known_pairs"])
+                if not symbols:
+                    _telegram_send(chat_id, "⏳ Список пар ещё не загружен. Попробуйте через минуту.")
+                    return
+                tickers = get_24h_tickers(symbols)
+                _top30_cache["tickers"] = tickers
+                _top30_cache["ts"] = now
+    except Exception as e:
+        logger.exception("/top30: failed to fetch 24h tickers: %s", e)
+        _telegram_send(chat_id, "⚠️ Не удалось получить данные с Binance. Попробуйте позже.")
+        return
+
+    movers: list[tuple[str, float, float, float]] = []  # (sym, pct, price, volume)
+    for sym, t in tickers.items():
+        try:
+            pct = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+            volume = float(t["quoteVolume"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not (math.isfinite(pct) and math.isfinite(price) and math.isfinite(volume)):
+            continue
+        if volume <= 0 or price <= 0:
+            continue
+        if pct >= PUMP_24H_PCT:
+            movers.append((sym, pct, price, volume))
+
+    movers.sort(key=lambda x: x[1], reverse=True)
+
+    if not movers:
+        _telegram_send(
+            chat_id,
+            f"📊 <b>Топ рост 24ч</b>\n\n"
+            f"Сейчас нет монет с ростом ≥ <b>+{PUMP_24H_PCT:.0f}%</b> за 24 часа.",
+        )
+        return
+
+    lines = [
+        f"🚀 <b>Топ рост 24ч (≥ +{PUMP_24H_PCT:.0f}%)</b>",
+        f"<i>Всего монет: {len(movers)}</i>\n",
+    ]
+    for i, (sym, pct, price, volume) in enumerate(movers, 1):
+        lines.append(
+            f"{i}. <code>{sym}</code>  <b>+{pct:.1f}%</b>\n"
+            f"   💰 ${price:,.6g}  |  📊 ${volume:,.0f}"
+        )
+    lines.append("\n⚠️ Внимание: возможна коррекция после сильного роста")
     _telegram_send(chat_id, "\n".join(lines))
 
 
