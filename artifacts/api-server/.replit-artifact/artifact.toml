@@ -29,22 +29,3 @@ NODE_ENV = "production"
 
 [services.production.health.startup]
 path = "/api/healthz"
-
-[[services]]
-localPort = 5000
-name = "Telegram Bot"
-paths = ["/health", "/run-now", "/telegram-update", "/bot-api"]
-
-[services.development]
-run = "cd telegram-webhook-bot && gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 120 --keep-alive 5"
-
-[services.production]
-
-[services.production.build]
-args = ["sh", "-c", "pip install --user -r telegram-webhook-bot/requirements.txt"]
-
-[services.production.run]
-args = ["sh", "-c", "cd telegram-webhook-bot && python -m gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 120 --keep-alive 5 --workers 1"]
-
-[services.production.health.startup]
-path = "/health"
