@@ -1,5 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import type { BotStatus, SignalsResponse, StatsResponse } from "../types/api";
+import type {
+  BotStatus,
+  PerformanceResponse,
+  SignalsResponse,
+  StatsResponse,
+} from "../types/api";
 
 const API_BASE = "/bot-api";
 
@@ -41,5 +46,19 @@ export function useStats() {
       return res.json();
     },
     refetchInterval: 120000, // 2m
+  });
+}
+
+export function usePerformance(windowDays: number) {
+  return useQuery<PerformanceResponse>({
+    queryKey: ["performance", windowDays],
+    queryFn: async () => {
+      const url = new URL(`${API_BASE}/signals/performance`, window.location.origin);
+      url.searchParams.set("window", `${windowDays}d`);
+      const res = await fetch(url.toString());
+      if (!res.ok) throw new Error("Failed to fetch performance");
+      return res.json();
+    },
+    refetchInterval: 5 * 60_000, // 5m — backtest changes slowly
   });
 }

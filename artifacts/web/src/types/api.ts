@@ -36,3 +36,27 @@ export interface StatsResponse {
     side: "buy" | "sell" | "neutral";
   }[];
 }
+
+export type Horizon = "15m" | "1h" | "4h";
+
+export interface HorizonStat {
+  followups: number;
+  winRate: number | null;
+  avgReturn: number | null;
+}
+
+export interface PerformanceBucket {
+  alertType: string;
+  label: string;
+  side: "buy" | "sell";
+  count: number;
+  horizons: Record<Horizon, HorizonStat>;
+}
+
+export interface PerformanceResponse {
+  windowDays: number;
+  since: number;
+  until: number;
+  totalSignals: number;
+  byType: PerformanceBucket[];
+}

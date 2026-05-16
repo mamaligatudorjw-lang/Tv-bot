@@ -118,7 +118,7 @@ EMA200_REFRESH_INTERVAL = 3600     # hourly
 HIT_RATE_DB_PATH = os.path.join(os.path.dirname(__file__) or ".", "alerts.db")
 HIT_RATE_INTERVALS = ((900, "15м"), (3600, "1ч"), (14400, "4ч"))
 HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win
-HIT_RATE_RETENTION_DAYS = 7
+HIT_RATE_RETENTION_DAYS = 120
 
 
 # ---------------------------------------------------------------------------
@@ -2480,14 +2480,123 @@ def api_signals_stats():
     })
 
 
+@app.route("/bot-api/signals/performance", methods=["GET"])
+def api_signals_performance():
+    """Backtest-style performance per alert type.
+
+    For each (alert_type, side) bucket within the window, compute how many
+    follow-up prices we have at 15m/1h/4h, the win-rate (price moved in the
+    expected direction), and the average signed return aligned with that
+    direction. Buy signals expect price to go up; sell signals expect it to
+    go down. Neutral signals are excluded since they have no expected side.
+    """
+    try:
+        window_arg = (request.args.get("window") or "30d").strip().lower()
+        if window_arg.endswith("d"):
+            window_days = max(1, min(int(window_arg[:-1]), 365))
+        else:
+            window_days = max(1, min(int(window_arg), 365))
+    except (TypeError, ValueError):
+        window_days = 30
+
+    now_ts = int(time.time())
+    since = now_ts - 86400 * window_days
+    # require at least 4h of settle time so the 4h follow-up could be filled
+    settled_before = now_ts - 4 * 3600
+
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT alert_type, recommendation, price_at_alert, "
+                "price_15m, price_1h, price_4h "
+                "FROM alerts WHERE ts >= ? AND ts <= ?",
+                (since, settled_before),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("api_signals_performance failed: %s", e)
+        return jsonify({"error": "db_error"}), 500
+
+    buckets: dict[tuple[str, str], dict] = {}
+    for alert_type, rec, p0, p15, p1h, p4h in rows:
+        side = _classify_side(alert_type, rec)
+        if side == "neutral":
+            continue
+        if not p0 or p0 <= 0:
+            continue
+        key = (alert_type, side)
+        b = buckets.setdefault(key, {
+            "alertType": alert_type,
+            "label": _label_alert_type(alert_type),
+            "side": side,
+            "count": 0,
+            "horizons": {
+                h: {"followups": 0, "wins": 0, "sumReturn": 0.0}
+                for h in ("15m", "1h", "4h")
+            },
+        })
+        b["count"] += 1
+        for horizon, pf in (("15m", p15), ("1h", p1h), ("4h", p4h)):
+            if pf is None or pf <= 0:
+                continue
+            change = (pf - p0) / p0
+            signed = change if side == "buy" else -change
+            stat = b["horizons"][horizon]
+            stat["followups"] += 1
+            stat["sumReturn"] += signed
+            if signed > 0:
+                stat["wins"] += 1
+
+    out = []
+    for b in buckets.values():
+        horizons_out = {}
+        for h, stat in b["horizons"].items():
+            f = stat["followups"]
+            horizons_out[h] = {
+                "followups": f,
+                "winRate": (stat["wins"] / f) if f else None,
+                "avgReturn": (stat["sumReturn"] / f) if f else None,
+            }
+        out.append({
+            "alertType": b["alertType"],
+            "label": b["label"],
+            "side": b["side"],
+            "count": b["count"],
+            "horizons": horizons_out,
+        })
+    out.sort(key=lambda e: e["count"], reverse=True)
+
+    return jsonify({
+        "windowDays": window_days,
+        "since": since,
+        "until": settled_before,
+        "totalSignals": sum(e["count"] for e in out),
+        "byType": out,
+    })
+
+
 @app.route("/bot-api/status", methods=["GET"])
 def api_status():
+    with state_lock:
+        last_run_raw = state["last_run"]
+    last_run_ts: int | None = None
+    if isinstance(last_run_raw, (int, float)):
+        last_run_ts = int(last_run_raw)
+    elif isinstance(last_run_raw, str) and last_run_raw:
+        try:
+            from datetime import datetime, timezone
+            dt = datetime.fromisoformat(last_run_raw.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            last_run_ts = int(dt.timestamp())
+        except (ValueError, TypeError):
+            last_run_ts = None
     with state_lock:
         return jsonify({
             "initialized": state["initialized"],
             "trackedPairs": len(state["known_pairs"]),
             "silenced": state["silenced"],
-            "lastRun": state["last_run"],
+            "lastRun": last_run_ts,
             "lastRunSummary": state["last_run_summary"],
             "activeBinanceHost": BINANCE_BASE,
         })

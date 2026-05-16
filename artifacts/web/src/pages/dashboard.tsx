@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "wouter";
 import { useBotStatus, useSignals, useStats } from "@/hooks/use-api";
 import type { Signal } from "@/types/api";
 import {
@@ -317,6 +318,18 @@ export default function Dashboard() {
             <p className="mt-1 text-sm text-muted-foreground">
               Живая лента сигналов на покупку и продажу по USDT-парам.
             </p>
+            <nav className="mt-3 flex items-center gap-1 text-sm">
+              <span className="rounded-md bg-primary/10 px-3 py-1.5 font-medium text-primary">
+                Лента
+              </span>
+              <Link
+                href="/performance"
+                className="rounded-md px-3 py-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                data-testid="link-performance"
+              >
+                Производительность
+              </Link>
+            </nav>
           </div>
           <StatusPill />
         </header>
