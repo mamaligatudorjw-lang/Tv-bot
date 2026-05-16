@@ -1,5 +1,5 @@
 kind = "api"
-previewPath = "/api" # TODO - should be excluded from preview in the first place
+previewPath = "/api"
 title = "API Server"
 version = "1.0.0"
 id = "3B4_FFSkEVBkAeYMFRJ2e"
@@ -21,7 +21,6 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-# we don't run through pnpm to make startup faster in production
 args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
 
 [services.production.run.env]
@@ -30,3 +29,22 @@ NODE_ENV = "production"
 
 [services.production.health.startup]
 path = "/api/healthz"
+
+[[services]]
+localPort = 5000
+name = "Telegram Bot"
+paths = ["/health", "/run-now", "/telegram-update"]
+
+[services.development]
+run = "cd telegram-webhook-bot && gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 120 --keep-alive 5"
+
+[services.production]
+
+[services.production.build]
+args = ["sh", "-c", "pip install --user -r telegram-webhook-bot/requirements.txt"]
+
+[services.production.run]
+args = ["sh", "-c", "cd telegram-webhook-bot && python -m gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 120 --keep-alive 5 --workers 1"]
+
+[services.production.health.startup]
+path = "/health"
