@@ -1298,7 +1298,7 @@ def _strength_label(score: int) -> str:
 # Alert send with inline buttons
 # ---------------------------------------------------------------------------
 
-MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "0"))
+MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "60"))
 
 
 def _tv_url(symbol: str) -> str:
@@ -1356,8 +1356,21 @@ def send_alert_with_log(
         if state["silenced"]:
             logger.info("Suppressed %s/%s (silenced): %s", symbol, alert_type, body_text[:60])
             return (False, None)
-    if score is not None and score < MIN_ALERT_SCORE:
-        logger.info("Suppressed %s/%s (score %d < min %d)", symbol, alert_type, score, MIN_ALERT_SCORE)
+    # Only directional signals — drop NEUTRAL/WATCH so the channel stays
+    # actionable. New-listing alerts use a separate sender and are unaffected.
+    if recommendation not in ("LONG", "SHORT"):
+        logger.info(
+            "Suppressed %s/%s (recommendation=%r, only LONG/SHORT delivered)",
+            symbol, alert_type, recommendation,
+        )
+        return (False, None)
+    # Score gate. Treat missing scores as below-min — every actionable alert
+    # must carry a strength rating.
+    if score is None or score < MIN_ALERT_SCORE:
+        logger.info(
+            "Suppressed %s/%s (score=%s < min %d)",
+            symbol, alert_type, score, MIN_ALERT_SCORE,
+        )
         return (False, None)
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
