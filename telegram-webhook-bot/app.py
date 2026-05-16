@@ -116,9 +116,9 @@ OVERSOLD_24H_PCT = -20.0
 OVERHEATED_COOLDOWN = 14400        # 4h
 OVERSOLD_COOLDOWN = 14400          # 4h
 
-# Top-gainers (24h pump) alert — no RSI confirmation, pure +X% mover
+# Top-gainers list threshold (used by /top30 — pure +X% mover, no alert).
+# The pump_24h *alert* itself was removed in favor of volume_surge_{short,long}.
 PUMP_24H_PCT = 30.0
-PUMP_24H_COOLDOWN = 14400          # 4h per coin so a sustained pump doesn't spam every 5 min
 
 # EMA-200 (4h) trend filter
 EMA200_PERIOD = 200
@@ -3512,10 +3512,13 @@ scheduler.add_job(
     id="coingecko_check",
     next_run_time=__import__("datetime").datetime.utcnow(),
 )
-scheduler.start()
-
-start_command_polling()
-start_watchdog()
+# Skip background threads when imported under tests (pytest's conftest sets
+# TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
+# does NOT silently disable the workers.
+if os.environ.get("TESTING", "").strip().lower() not in {"1", "true", "yes"}:
+    scheduler.start()
+    start_command_polling()
+    start_watchdog()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
