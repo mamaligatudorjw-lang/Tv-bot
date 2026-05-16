@@ -19,6 +19,7 @@ export interface Signal {
   price15m: number | null;
   price1h: number | null;
   price4h: number | null;
+  score: number | null;
 }
 
 export interface SignalsResponse {

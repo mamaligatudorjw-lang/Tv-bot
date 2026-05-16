@@ -149,6 +149,26 @@ function SideBadge({ side }: { side: Signal["side"] }) {
   );
 }
 
+function ScoreBadge({ score }: { score: number | null }) {
+  if (score == null || !Number.isFinite(score)) return null;
+  const cls =
+    score >= 75
+      ? "bg-success/15 text-success border-success/30"
+      : score >= 60
+      ? "bg-primary/15 text-primary border-primary/30"
+      : score >= 45
+      ? "bg-muted text-foreground border-card-border"
+      : "bg-destructive/10 text-destructive border-destructive/30";
+  return (
+    <span
+      title="Сила сигнала (0–100): историческая точность типа, RSI, тренд, объём, согласованность с BTC"
+      className={`inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${cls}`}
+    >
+      {score}/100
+    </span>
+  );
+}
+
 function SignalRow({ s, isNew }: { s: Signal; isNew: boolean }) {
   const sym = formatSymbol(s.symbol);
   const d15 = calcDeltaPercent(s.price15m, s.priceAtAlert);
@@ -177,6 +197,7 @@ function SignalRow({ s, isNew }: { s: Signal; isNew: boolean }) {
               / {sym.quote}
             </span>
             <SideBadge side={s.side} />
+            <ScoreBadge score={s.score} />
           </div>
           <div className="mt-1 truncate text-xs text-muted-foreground">
             {s.alertTypeLabel}

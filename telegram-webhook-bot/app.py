@@ -133,19 +133,49 @@ def send_telegram(text: str) -> bool:
     return _telegram_send(TELEGRAM_CHAT_ID, text)
 
 
-def _telegram_send(chat_id: str | int, text: str) -> bool:
+def _telegram_send(
+    chat_id: str | int,
+    text: str,
+    reply_markup: dict | None = None,
+) -> bool:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload: dict = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     try:
-        resp = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
-            timeout=10,
-        )
+        resp = requests.post(url, json=payload, timeout=10)
         resp.raise_for_status()
         return True
     except Exception as e:
         logger.error("Telegram send failed: %s", e)
         return False
+
+
+def _telegram_answer_callback(callback_id: str, text: str = "") -> None:
+    """Acknowledge a callback_query so Telegram stops showing a loading spinner."""
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+            json={"callback_query_id": callback_id, "text": text, "cache_time": 1},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.warning("answerCallbackQuery failed: %s", e)
+
+
+def _telegram_edit_markup(chat_id: int, message_id: int, reply_markup: dict | None) -> None:
+    """Replace the inline keyboard of an existing message (used after voting)."""
+    try:
+        payload: dict = {"chat_id": chat_id, "message_id": message_id}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageReplyMarkup",
+            json=payload,
+            timeout=10,
+        )
+    except Exception as e:
+        logger.warning("editMessageReplyMarkup failed: %s", e)
 
 
 def _delete_telegram_webhook() -> None:
@@ -179,7 +209,7 @@ def _poll_telegram_commands() -> None:
     logger.info("Telegram command polling started")
     while True:
         try:
-            params: dict = {"timeout": 30, "allowed_updates": ["message"]}
+            params: dict = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
             if offset is not None:
                 params["offset"] = offset
             resp = requests.get(
@@ -190,6 +220,12 @@ def _poll_telegram_commands() -> None:
             resp.raise_for_status()
             for update in resp.json().get("result", []):
                 offset = update["update_id"] + 1
+                cb = update.get("callback_query")
+                if cb:
+                    threading.Thread(
+                        target=lambda c=cb: handle_callback_query(c), daemon=True
+                    ).start()
+                    continue
                 message = update.get("message", {})
                 chat_id = message.get("chat", {}).get("id")
                 raw_text = (message.get("text") or "").strip()
@@ -679,6 +715,26 @@ def _get_db() -> sqlite3.Connection:
             )
         """)
         _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
+        # Migrate: add `score` column on existing alerts table if missing
+        try:
+            _db_conn.execute("ALTER TABLE alerts ADD COLUMN score INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS hidden_items (
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                PRIMARY KEY (kind, value)
+            )
+        """)
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_feedback (
+                alert_id INTEGER PRIMARY KEY,
+                vote INTEGER NOT NULL,
+                ts INTEGER NOT NULL
+            )
+        """)
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -775,6 +831,360 @@ def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
             logger.info("Hit-rate: filled %d follow-up prices", len(updates))
     except Exception as e:
         logger.warning("fill_alert_followups failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# User preferences (hidden types/symbols) + alert feedback
+# ---------------------------------------------------------------------------
+
+_prefs_lock = threading.Lock()
+_hidden_types: set[str] = set()
+_hidden_symbols: set[str] = set()
+_prefs_loaded = False
+
+
+def _load_prefs() -> None:
+    global _prefs_loaded
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute("SELECT kind, value FROM hidden_items").fetchall()
+        with _prefs_lock:
+            _hidden_types.clear()
+            _hidden_symbols.clear()
+            for kind, value in rows:
+                if kind == "type":
+                    _hidden_types.add(value)
+                elif kind == "symbol":
+                    _hidden_symbols.add(value)
+            _prefs_loaded = True
+    except Exception as e:
+        logger.warning("_load_prefs failed: %s", e)
+
+
+def _ensure_prefs_loaded() -> None:
+    if not _prefs_loaded:
+        _load_prefs()
+
+
+def is_hidden(alert_type: str, symbol: str) -> bool:
+    _ensure_prefs_loaded()
+    with _prefs_lock:
+        return alert_type in _hidden_types or symbol in _hidden_symbols
+
+
+def add_hidden(kind: str, value: str) -> bool:
+    """Returns True if it was newly added, False if already hidden."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO hidden_items (kind, value, ts) VALUES (?, ?, ?)",
+                (kind, value, int(time.time())),
+            )
+            conn.commit()
+            added = cur.rowcount > 0
+        with _prefs_lock:
+            if kind == "type":
+                _hidden_types.add(value)
+            elif kind == "symbol":
+                _hidden_symbols.add(value)
+        return added
+    except Exception as e:
+        logger.warning("add_hidden failed: %s", e)
+        return False
+
+
+def remove_hidden(kind: str, value: str) -> bool:
+    try:
+        with _db_lock:
+            conn = _get_db()
+            cur = conn.execute(
+                "DELETE FROM hidden_items WHERE kind=? AND value=?",
+                (kind, value),
+            )
+            conn.commit()
+            removed = cur.rowcount > 0
+        with _prefs_lock:
+            if kind == "type":
+                _hidden_types.discard(value)
+            elif kind == "symbol":
+                _hidden_symbols.discard(value)
+        return removed
+    except Exception as e:
+        logger.warning("remove_hidden failed: %s", e)
+        return False
+
+
+def list_hidden() -> tuple[list[str], list[str]]:
+    _ensure_prefs_loaded()
+    with _prefs_lock:
+        return sorted(_hidden_types), sorted(_hidden_symbols)
+
+
+def record_feedback(alert_id: int, vote: int) -> None:
+    try:
+        with _db_lock:
+            conn = _get_db()
+            conn.execute(
+                "INSERT OR REPLACE INTO alert_feedback (alert_id, vote, ts) VALUES (?, ?, ?)",
+                (alert_id, 1 if vote > 0 else -1, int(time.time())),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.warning("record_feedback failed: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Signal scoring
+# ---------------------------------------------------------------------------
+
+_WINRATE_CACHE: dict[tuple[str, str], tuple[float, float | None]] = {}
+_WINRATE_CACHE_TTL = 300  # 5 minutes
+
+
+def _winrate_for(alert_type: str, side: str) -> float | None:
+    """Historical win-rate at 4h horizon for (alert_type, side) over last 30d.
+    Returns None if there is not enough data."""
+    if side not in ("buy", "sell"):
+        return None
+    now = time.time()
+    cached = _WINRATE_CACHE.get((alert_type, side))
+    if cached and now - cached[0] < _WINRATE_CACHE_TTL:
+        return cached[1]
+    try:
+        with _db_lock:
+            conn = _get_db()
+            since = int(now) - 30 * 86400
+            until = int(now) - 4 * 3600
+            rows = conn.execute(
+                "SELECT recommendation, price_at_alert, price_4h FROM alerts "
+                "WHERE alert_type=? AND ts >= ? AND ts <= ? AND price_4h IS NOT NULL",
+                (alert_type, since, until),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("_winrate_for failed: %s", e)
+        return None
+    wins = total = 0
+    for rec, p0, p4 in rows:
+        if not p0 or p0 <= 0:
+            continue
+        row_side = _classify_side(alert_type, rec)
+        if row_side != side:
+            continue
+        change = (p4 - p0) / p0
+        signed = change if side == "buy" else -change
+        total += 1
+        if signed > 0:
+            wins += 1
+    wr = (wins / total) if total >= 8 else None
+    _WINRATE_CACHE[(alert_type, side)] = (now, wr)
+    return wr
+
+
+def compute_signal_score(
+    alert_type: str,
+    side: str,
+    *,
+    rsi: float | None = None,
+    above_ema: bool | None = None,
+    spike_ratio: float | None = None,
+    pct24: float | None = None,
+    btc_pct24: float | None = None,
+) -> int:
+    """Return 0-100 score for an alert. Higher = stronger setup."""
+    if side not in ("buy", "sell"):
+        return 50
+    score = 50.0
+    wr = _winrate_for(alert_type, side)
+    if wr is not None:
+        score += (wr - 0.5) * 60  # ±30 pts
+    if rsi is not None:
+        if side == "buy":
+            score += max(-10.0, min(10.0, (50.0 - rsi) * 0.5))
+        else:
+            score += max(-10.0, min(10.0, (rsi - 50.0) * 0.5))
+    if above_ema is not None:
+        aligned = (side == "buy" and above_ema) or (side == "sell" and not above_ema)
+        score += 8 if aligned else -8
+    if btc_pct24 is not None:
+        if side == "buy":
+            score += max(-10.0, min(10.0, btc_pct24 * 1.5))
+        else:
+            score += max(-10.0, min(10.0, -btc_pct24 * 1.5))
+    if spike_ratio is not None and spike_ratio > 1:
+        score += min(10.0, (spike_ratio - 1) * 5)
+    if pct24 is not None and side == "sell" and pct24 > 30:
+        # extreme one-day pumps are more likely to mean-revert
+        score += min(5.0, (pct24 - 30) * 0.2)
+    return max(0, min(100, int(round(score))))
+
+
+def _strength_label(score: int) -> str:
+    if score >= 75:
+        return "сильный"
+    if score >= 60:
+        return "хороший"
+    if score >= 45:
+        return "средний"
+    return "слабый"
+
+
+# ---------------------------------------------------------------------------
+# Alert send with inline buttons
+# ---------------------------------------------------------------------------
+
+MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "0"))
+
+
+def _tv_url(symbol: str) -> str:
+    return f"https://www.tradingview.com/chart/?symbol=BINANCE%3A{symbol}"
+
+
+def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "↑ сработал", "callback_data": f"fb:{alert_id}:1"},
+                {"text": "↓ не сработал", "callback_data": f"fb:{alert_id}:-1"},
+            ],
+            [
+                {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
+                {"text": "Скрыть тип", "callback_data": f"ht:{alert_type}"},
+                {"text": "График", "url": _tv_url(symbol)},
+            ],
+        ]
+    }
+
+
+def _build_voted_buttons(alert_id: int, symbol: str, vote: int) -> dict:
+    mark = "✓ Сработал" if vote > 0 else "✓ Не сработал"
+    return {
+        "inline_keyboard": [
+            [{"text": mark, "callback_data": f"noop:{alert_id}"}],
+            [{"text": "График", "url": _tv_url(symbol)}],
+        ]
+    }
+
+
+def send_alert_with_log(
+    symbol: str,
+    alert_type: str,
+    recommendation: str | None,
+    price: float | None,
+    body_text: str,
+    score: int | None = None,
+) -> tuple[bool, int | None]:
+    """Insert into alerts (if price valid), then send Telegram with inline
+    buttons referencing the new id. Honors hide-type/hide-symbol prefs,
+    silenced state, and MIN_ALERT_SCORE.
+
+    Returns (delivered, alert_id). Callers should consume cooldowns whenever
+    `delivered` is True, regardless of whether `alert_id` is set (it may be
+    None when the row could not be logged but the message was still sent).
+    `delivered` is False for hidden/silenced/below-min-score suppressions and
+    for Telegram send errors, so cooldowns stay live for retry.
+    """
+    if is_hidden(alert_type, symbol):
+        logger.info("Suppressed %s/%s (hidden by user prefs)", symbol, alert_type)
+        return (False, None)
+    with state_lock:
+        if state["silenced"]:
+            logger.info("Suppressed %s/%s (silenced): %s", symbol, alert_type, body_text[:60])
+            return (False, None)
+    if score is not None and score < MIN_ALERT_SCORE:
+        logger.info("Suppressed %s/%s (score %d < min %d)", symbol, alert_type, score, MIN_ALERT_SCORE)
+        return (False, None)
+    if price is None or price <= 0:
+        # Cannot log without price; send without buttons. If it goes through,
+        # consume cooldowns so we don't spam every cycle.
+        ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
+        return (ok, None)
+    try:
+        with _db_lock:
+            conn = _get_db()
+            cur = conn.execute(
+                "INSERT INTO alerts (ts, symbol, alert_type, recommendation, "
+                "price_at_alert, score) VALUES (?, ?, ?, ?, ?, ?)",
+                (int(time.time()), symbol, alert_type, recommendation, float(price), score),
+            )
+            conn.commit()
+            alert_id = int(cur.lastrowid or 0)
+    except Exception as e:
+        logger.warning("send_alert_with_log insert failed: %s", e)
+        # Fall back to send-without-buttons. Still consume cooldowns on success
+        # so we don't repeatedly retry a broken DB path every cycle.
+        ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
+        return (ok, None)
+
+    markup = _build_alert_buttons(alert_id, symbol, alert_type)
+    if not _telegram_send(TELEGRAM_CHAT_ID, body_text, reply_markup=markup):
+        # Rollback so cooldowns don't suppress retries
+        try:
+            with _db_lock:
+                conn = _get_db()
+                conn.execute("DELETE FROM alerts WHERE id=?", (alert_id,))
+                conn.commit()
+        except Exception:
+            pass
+        return (False, None)
+    return (True, alert_id)
+
+
+def handle_callback_query(cb: dict) -> None:
+    """Dispatch inline-button presses: feedback, hide-type, hide-symbol."""
+    cb_id = cb.get("id")
+    data = (cb.get("data") or "").strip()
+    msg = cb.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    message_id = msg.get("message_id")
+    if not cb_id or not data:
+        return
+    try:
+        kind, _, rest = data.partition(":")
+        if kind == "fb":
+            aid_str, _, vote_str = rest.partition(":")
+            try:
+                aid = int(aid_str)
+                vote = int(vote_str)
+            except ValueError:
+                _telegram_answer_callback(cb_id, "Неверные данные")
+                return
+            record_feedback(aid, vote)
+            # Look up symbol for the graph button
+            try:
+                with _db_lock:
+                    conn = _get_db()
+                    row = conn.execute(
+                        "SELECT symbol FROM alerts WHERE id=?", (aid,)
+                    ).fetchone()
+                symbol = row[0] if row else ""
+            except Exception:
+                symbol = ""
+            if chat_id and message_id and symbol:
+                _telegram_edit_markup(chat_id, message_id, _build_voted_buttons(aid, symbol, vote))
+            _telegram_answer_callback(cb_id, "Спасибо! Учтено")
+        elif kind == "ht":
+            if rest:
+                newly = add_hidden("type", rest)
+                _telegram_answer_callback(
+                    cb_id,
+                    f"Тип «{rest}» скрыт" if newly else f"Тип «{rest}» уже скрыт",
+                )
+        elif kind == "hs":
+            if rest:
+                newly = add_hidden("symbol", rest)
+                _telegram_answer_callback(
+                    cb_id,
+                    f"Пара {rest} скрыта" if newly else f"Пара {rest} уже скрыта",
+                )
+        elif kind == "noop":
+            _telegram_answer_callback(cb_id)
+        else:
+            _telegram_answer_callback(cb_id)
+    except Exception as e:
+        logger.exception("handle_callback_query failed: %s", e)
+        _telegram_answer_callback(cb_id, "Ошибка обработки")
 
 
 def compute_hit_rate_stats(days: int = 7) -> list[dict]:
@@ -1229,19 +1639,28 @@ def check_momentum(
 
         emoji = _MOMENTUM_EMOJI.get(threshold, "📊")
         sign = "+" if pct > 0 else ""
+        rec = "LONG" if pct > 0 else "SHORT"
+        kind = f"momentum_{'up' if pct > 0 else 'down'}_{int(abs(threshold))}"
+        side = "buy" if pct > 0 else "sell"
+        btc_t = tickers.get("BTCUSDT") if tickers else None
+        btc_pct24 = None
+        if btc_t:
+            try:
+                btc_pct24 = float(btc_t["priceChangePercent"])
+            except (ValueError, KeyError, TypeError):
+                btc_pct24 = None
+        score = compute_signal_score(kind, side, btc_pct24=btc_pct24)
         body = (
             f"{emoji} <b><code>{symbol}</code> {sign}{pct:.1f}% за 15 минут</b>\n"
-            f"💰 Цена: {price_str}"
+            f"💰 Цена: {price_str}\n"
+            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
         )
-        if not send_telegram(body):
+        delivered, _aid = send_alert_with_log(symbol, kind, rec, price, body, score)
+        if not delivered:
             continue
 
         with state_lock:
             state["last_momentum_alerted"].setdefault(symbol, {})[threshold] = now
-
-        rec = "LONG" if pct > 0 else "SHORT"
-        kind = f"momentum_{'up' if pct > 0 else 'down'}_{int(abs(threshold))}"
-        log_alert(symbol, kind, rec, price)
         sent += 1
     return sent
 
@@ -1267,10 +1686,22 @@ def check_overheated_oversold(
         except (ValueError, KeyError):
             continue
 
+        btc_t = tickers.get("BTCUSDT")
+        btc_pct24 = None
+        if btc_t:
+            try:
+                btc_pct24 = float(btc_t["priceChangePercent"])
+            except (ValueError, KeyError, TypeError):
+                btc_pct24 = None
+
         if pct24 >= OVERHEATED_24H_PCT and rsi >= RSI_OVERBOUGHT:
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
             if now - last >= OVERHEATED_COOLDOWN:
+                score = compute_signal_score(
+                    "overheated_24h", "sell",
+                    rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
+                )
                 body = (
                     f"⚠️ <b>ПЕРЕГРЕТА — возможен шорт</b>\n"
                     f"Монета выросла слишком быстро\n"
@@ -1278,18 +1709,23 @@ def check_overheated_oversold(
                     f"<code>{symbol}</code>\n"
                     f"📈 24ч: <b>+{pct24:.1f}%</b>\n"
                     f"🔥 RSI: <b>{rsi:.1f}</b>\n"
-                    f"💰 Цена: ${price:,.6g}"
+                    f"💰 Цена: ${price:,.6g}\n"
+                    f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                 )
-                if send_telegram(body):
+                delivered, _aid = send_alert_with_log(symbol, "overheated_24h", "SHORT", price, body, score)
+                if delivered:
                     with state_lock:
                         state["last_overheated_alerted"][symbol] = now
-                    log_alert(symbol, "overheated_24h", "SHORT", price)
                     sent_oh += 1
 
         elif pct24 <= OVERSOLD_24H_PCT and rsi <= RSI_OVERSOLD:
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
+                score = compute_signal_score(
+                    "oversold_24h", "buy",
+                    rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
+                )
                 body = (
                     f"💎 <b>ПЕРЕПРОДАНА — возможен лонг</b>\n"
                     f"Монета упала слишком сильно\n"
@@ -1297,12 +1733,13 @@ def check_overheated_oversold(
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b>\n"
                     f"🧊 RSI: <b>{rsi:.1f}</b>\n"
-                    f"💰 Цена: ${price:,.6g}"
+                    f"💰 Цена: ${price:,.6g}\n"
+                    f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                 )
-                if send_telegram(body):
+                delivered, _aid = send_alert_with_log(symbol, "oversold_24h", "LONG", price, body, score)
+                if delivered:
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
-                    log_alert(symbol, "oversold_24h", "LONG", price)
                     sent_os += 1
     return sent_oh, sent_os
 
@@ -1333,17 +1770,28 @@ def check_24h_pumps(tickers: dict[str, dict]) -> int:
             last = state["last_pump_alerted"].get(symbol, 0)
         if now - last < PUMP_24H_COOLDOWN:
             continue
+        btc_t = tickers.get("BTCUSDT")
+        btc_pct24 = None
+        if btc_t:
+            try:
+                btc_pct24 = float(btc_t["priceChangePercent"])
+            except (ValueError, KeyError, TypeError):
+                btc_pct24 = None
+        score = compute_signal_score(
+            "pump_24h", "sell", pct24=pct24, btc_pct24=btc_pct24,
+        )
         body = (
             f"🚀🚀🚀 <b>ТОП РОСТ ЗА 24Ч</b> 🚀🚀🚀\n"
             f"📈 <code>{symbol}</code> <b>+{pct24:.1f}%</b> за 24 часа\n"
             f"💰 Цена: ${price:,.6g}\n"
             f"📊 Объём 24ч: ${volume:,.0f}\n"
+            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})\n"
             f"⚠️ Внимание: возможна коррекция после сильного роста"
         )
-        if send_telegram(body):
+        delivered, _aid = send_alert_with_log(symbol, "pump_24h", "WATCH", price, body, score)
+        if delivered:
             with state_lock:
                 state["last_pump_alerted"][symbol] = now
-            log_alert(symbol, "pump_24h", "WATCH", price)
             sent += 1
     return sent
 
@@ -1588,6 +2036,26 @@ def run_checks():
                     near_24h_high=b["near_24h_high"],
                     above_ema200=above_ema,
                 )
+                rec_label = _rec_label(rec_line)
+                side_for_score = (
+                    "buy" if rec_label == "LONG"
+                    else "sell" if rec_label == "SHORT"
+                    else "neutral"
+                )
+                btc_t = tickers.get("BTCUSDT") if tickers else None
+                btc_pct24 = None
+                if btc_t:
+                    try:
+                        btc_pct24 = float(btc_t["priceChangePercent"])
+                    except (ValueError, KeyError, TypeError):
+                        btc_pct24 = None
+                score = compute_signal_score(
+                    "confluence", side_for_score,
+                    rsi=b["rsi"],
+                    above_ema=above_ema,
+                    spike_ratio=b["spike_ratio"],
+                    btc_pct24=btc_pct24,
+                )
                 header = [f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>"]
                 if b["price"] is not None:
                     header.append(f"Цена: <b>${b['price']:,.6g}</b>")
@@ -1600,23 +2068,24 @@ def run_checks():
                     "",
                     rec_line,
                     reason_line,
+                    f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})",
                 ])
-                delivered = send_telegram(body)
+                delivered, _aid = send_alert_with_log(
+                    sym, "confluence", rec_label, b["price"], body, score
+                )
                 if not delivered:
-                    # Silenced or Telegram error — do NOT consume cooldowns so signals
-                    # remain live for the next cycle.
+                    # Silenced, hidden, or Telegram error — do NOT consume cooldowns
                     logger.info(
-                        "Confluence alert %s NOT delivered (silenced/error); cooldowns preserved",
+                        "Confluence alert %s NOT delivered (silenced/hidden/error); cooldowns preserved",
                         sym,
                     )
                     continue
 
                 logger.info(
-                    "Confluence alert %s: %d signals %s",
-                    sym, len(b["lines"]), sorted(b["flags"]),
+                    "Confluence alert %s: %d signals %s score=%d",
+                    sym, len(b["lines"]), sorted(b["flags"]), score,
                 )
                 summary["confluence_alerts"] += 1
-                log_alert(sym, "confluence", _rec_label(rec_line), b["price"])
 
                 # Mark cooldowns only for signals that actually contributed to a sent alert
                 with state_lock:
@@ -2388,14 +2857,14 @@ def api_signals_recent():
                 if last_id is None:
                     cur = conn.execute(
                         "SELECT id, ts, symbol, alert_type, recommendation, "
-                        "price_at_alert, price_15m, price_1h, price_4h "
+                        "price_at_alert, price_15m, price_1h, price_4h, score "
                         "FROM alerts ORDER BY id DESC LIMIT ?",
                         (page_size,),
                     )
                 else:
                     cur = conn.execute(
                         "SELECT id, ts, symbol, alert_type, recommendation, "
-                        "price_at_alert, price_15m, price_1h, price_4h "
+                        "price_at_alert, price_15m, price_1h, price_4h, score "
                         "FROM alerts WHERE id < ? ORDER BY id DESC LIMIT ?",
                         (last_id, page_size),
                     )
@@ -2419,6 +2888,7 @@ def api_signals_recent():
                         "price15m": r[6],
                         "price1h": r[7],
                         "price4h": r[8],
+                        "score": r[9],
                     })
                     if len(signals) >= limit:
                         break
