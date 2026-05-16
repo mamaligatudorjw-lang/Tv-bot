@@ -2319,6 +2319,181 @@ def telegram_update():
 
 
 # ---------------------------------------------------------------------------
+# Public read-only API for the web app
+# ---------------------------------------------------------------------------
+
+def _classify_side(alert_type: str, recommendation: str | None) -> str:
+    if recommendation:
+        rec = recommendation.upper()
+        if "ЛОНГ" in rec or "LONG" in rec or "BUY" in rec:
+            return "buy"
+        if "ШОРТ" in rec or "SHORT" in rec or "SELL" in rec:
+            return "sell"
+    a = (alert_type or "").lower()
+    if a.startswith(("oversold", "momentum_up", "high_break",
+                     "weekly_high", "monthly_high", "vol_spike",
+                     "new_listing", "new_coin", "rsi_oversold")):
+        return "buy"
+    if a.startswith(("overheated", "momentum_down", "pump_24h",
+                     "rsi_overbought")):
+        return "sell"
+    return "neutral"
+
+
+def _label_alert_type(alert_type: str) -> str:
+    a = (alert_type or "")
+    base = {
+        "pump_24h": "Перегрев +30% за 24ч",
+        "overheated_24h": "Перегрев 24ч",
+        "overheated": "Перегрев",
+        "oversold_24h": "Перепродан 24ч",
+        "oversold": "Перепродан",
+        "rsi_overbought": "RSI перекуплен",
+        "rsi_oversold": "RSI перепродан",
+        "high_break": "Пробой максимума",
+        "weekly_high": "Недельный максимум",
+        "monthly_high": "Месячный максимум",
+        "vol_spike": "Всплеск объёма",
+        "confluence": "Совпадение сигналов",
+        "new_listing": "Новый листинг",
+        "new_coin": "Новая монета CoinGecko",
+    }
+    if a in base:
+        return base[a]
+    if a.startswith("momentum_up_"):
+        return f"Импульс вверх ×{a.rsplit('_', 1)[-1]}"
+    if a.startswith("momentum_down_"):
+        return f"Импульс вниз ×{a.rsplit('_', 1)[-1]}"
+    return a
+
+
+@app.route("/bot-api/signals/recent", methods=["GET"])
+def api_signals_recent():
+    try:
+        limit = max(1, min(int(request.args.get("limit", 50)), 200))
+    except (TypeError, ValueError):
+        limit = 50
+    side_filter = (request.args.get("side") or "").strip().lower()
+    if side_filter not in ("buy", "sell"):
+        side_filter = ""
+
+    signals: list[dict] = []
+    last_id: int | None = None
+    page_size = limit if not side_filter else limit * 4
+    max_scans = 6
+    try:
+        with _db_lock:
+            conn = _get_db()
+            for _ in range(max_scans):
+                if last_id is None:
+                    cur = conn.execute(
+                        "SELECT id, ts, symbol, alert_type, recommendation, "
+                        "price_at_alert, price_15m, price_1h, price_4h "
+                        "FROM alerts ORDER BY id DESC LIMIT ?",
+                        (page_size,),
+                    )
+                else:
+                    cur = conn.execute(
+                        "SELECT id, ts, symbol, alert_type, recommendation, "
+                        "price_at_alert, price_15m, price_1h, price_4h "
+                        "FROM alerts WHERE id < ? ORDER BY id DESC LIMIT ?",
+                        (last_id, page_size),
+                    )
+                rows = cur.fetchall()
+                if not rows:
+                    break
+                for r in rows:
+                    last_id = r[0]
+                    side = _classify_side(r[3], r[4])
+                    if side_filter and side != side_filter:
+                        continue
+                    signals.append({
+                        "id": r[0],
+                        "ts": r[1],
+                        "symbol": r[2],
+                        "alertType": r[3],
+                        "alertTypeLabel": _label_alert_type(r[3]),
+                        "recommendation": r[4],
+                        "side": side,
+                        "priceAtAlert": r[5],
+                        "price15m": r[6],
+                        "price1h": r[7],
+                        "price4h": r[8],
+                    })
+                    if len(signals) >= limit:
+                        break
+                if len(signals) >= limit or not side_filter:
+                    break
+    except Exception as e:
+        logger.warning("api_signals_recent failed: %s", e)
+        return jsonify({"error": "db_error"}), 500
+
+    return jsonify({"signals": signals, "count": len(signals)})
+
+
+@app.route("/bot-api/signals/stats", methods=["GET"])
+def api_signals_stats():
+    try:
+        with _db_lock:
+            conn = _get_db()
+            total = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+            now_ts = int(time.time())
+            last_24h = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE ts >= ?",
+                (now_ts - 86400,),
+            ).fetchone()[0]
+            grouped = conn.execute(
+                "SELECT alert_type, recommendation, COUNT(*) FROM alerts "
+                "WHERE ts >= ? GROUP BY alert_type, recommendation",
+                (now_ts - 86400 * 7,),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("api_signals_stats failed: %s", e)
+        return jsonify({"error": "db_error"}), 500
+
+    type_agg: dict[str, dict] = {}
+    for alert_type, rec, count in grouped:
+        side = _classify_side(alert_type, rec)
+        entry = type_agg.setdefault(alert_type, {
+            "alertType": alert_type,
+            "label": _label_alert_type(alert_type),
+            "count": 0,
+            "buy": 0,
+            "sell": 0,
+            "neutral": 0,
+        })
+        entry["count"] += count
+        entry[side] += count
+    rows_out = sorted(type_agg.values(), key=lambda e: e["count"], reverse=True)
+    for entry in rows_out:
+        if entry["buy"] >= entry["sell"] and entry["buy"] >= entry["neutral"]:
+            entry["side"] = "buy"
+        elif entry["sell"] >= entry["neutral"]:
+            entry["side"] = "sell"
+        else:
+            entry["side"] = "neutral"
+
+    return jsonify({
+        "total": total,
+        "last24h": last_24h,
+        "byTypeLast7d": rows_out,
+    })
+
+
+@app.route("/bot-api/status", methods=["GET"])
+def api_status():
+    with state_lock:
+        return jsonify({
+            "initialized": state["initialized"],
+            "trackedPairs": len(state["known_pairs"]),
+            "silenced": state["silenced"],
+            "lastRun": state["last_run"],
+            "lastRunSummary": state["last_run_summary"],
+            "activeBinanceHost": BINANCE_BASE,
+        })
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 

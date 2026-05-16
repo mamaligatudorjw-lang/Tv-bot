@@ -33,7 +33,7 @@ path = "/api/healthz"
 [[services]]
 localPort = 5000
 name = "Telegram Bot"
-paths = ["/health", "/run-now", "/telegram-update"]
+paths = ["/health", "/run-now", "/telegram-update", "/bot-api"]
 
 [services.development]
 run = "cd telegram-webhook-bot && gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 120 --keep-alive 5"
