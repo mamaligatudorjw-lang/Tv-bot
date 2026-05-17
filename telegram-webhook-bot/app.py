@@ -1498,17 +1498,11 @@ MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "60"))
 
 
 def _binance_url(symbol: str) -> str:
-    """Universal link to the spot-trading pair page on Binance. On iOS/Android
+    """Universal link to the USDⓈ-M Futures pair page on Binance. On iOS/Android
     with the Binance app installed, the OS hands this URL to the app and opens
     the in-app pair card; on desktop or without the app, it falls back to the
-    web page. The bot tracks spot USDT pairs (e.g. MIRAUSDT), and Binance
-    expects the form ``MIRA_USDT`` in trade URLs."""
-    if symbol.upper().endswith("USDT"):
-        base = symbol[:-4]
-        pair = f"{base}_USDT"
-    else:
-        pair = symbol
-    return f"https://www.binance.com/ru/trade/{pair}?type=spot"
+    web page. Futures URLs use the unsplit symbol form (e.g. ``MIRAUSDT``)."""
+    return f"https://www.binance.com/ru/futures/{symbol.upper()}"
 
 
 def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
