@@ -3,6 +3,7 @@ import math
 import time
 import html
 import logging
+import json
 import sqlite3
 import threading
 import numpy as np
@@ -127,6 +128,21 @@ EMA200_REFRESH_INTERVAL = 3600     # hourly
 
 # Hit-rate tracking
 HIT_RATE_DB_PATH = os.path.join(os.path.dirname(__file__) or ".", "alerts.db")
+
+# Rolling backup of alerts.db. Keeps the last ALERTS_DB_BACKUP_KEEP hourly
+# snapshots in a sibling directory; sufficient for short-term recovery after
+# an accidental schema change or corruption. Real durability still needs an
+# offsite copy (Object Storage / external bucket).
+ALERTS_DB_BACKUP_DIR = os.path.join(
+    os.path.dirname(__file__) or ".", "alerts_db_backups"
+)
+ALERTS_DB_BACKUP_KEEP = 24
+
+# Persisted runtime state — currently just the last-known-good Binance host
+# so a process restart doesn't redo the 4-second 451 carousel on every boot.
+BOT_STATE_PATH = os.path.join(
+    os.path.dirname(__file__) or ".", ".bot_state.json"
+)
 HIT_RATE_INTERVALS = ((900, "15м"), (3600, "1ч"), (14400, "4ч"))
 HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win
 HIT_RATE_RETENTION_DAYS = 120
@@ -330,8 +346,38 @@ def start_watchdog() -> None:
 # Binance helpers
 # ---------------------------------------------------------------------------
 
+def _load_bot_state() -> dict:
+    """Read the persisted bot state file. Returns {} if missing/broken so a
+    corrupted state file can never block startup."""
+    try:
+        with open(BOT_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        pass
+    return {}
+
+
+def _save_bot_state(updates: dict) -> None:
+    """Merge `updates` into the persisted state file. Best-effort; failures
+    are logged but never raised — losing this file just means the next boot
+    starts from defaults."""
+    try:
+        current = _load_bot_state()
+        current.update(updates)
+        tmp = BOT_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(current, f)
+        os.replace(tmp, BOT_STATE_PATH)
+    except OSError as e:
+        logger.warning("Could not persist bot state: %s", e)
+
+
 def _binance_get(path: str, params: dict | None = None, timeout: int = 15):
-    """Try each Binance host in turn; persist the last working host."""
+    """Try each Binance host in turn; persist the last working host both in
+    memory (for this process) and on disk (so restarts don't redo the 4s
+    451-carousel on every boot)."""
     global BINANCE_BASE
     hosts_to_try = [BINANCE_BASE] + [h for h in BINANCE_HOSTS if h != BINANCE_BASE]
     last_err = None
@@ -346,6 +392,7 @@ def _binance_get(path: str, params: dict | None = None, timeout: int = 15):
             if host != BINANCE_BASE:
                 logger.info("Switched active Binance host to %s", host)
                 BINANCE_BASE = host
+                _save_bot_state({"binance_base": host})
             return resp
         except requests.exceptions.RequestException as e:
             logger.warning("Host %s failed: %s", host, e)
@@ -3502,6 +3549,50 @@ def run_checks():  # type: ignore[no-redef]
         _run_checks_lock.release()
 
 
+# Restore last-known-good Binance host from disk so the first cycle after a
+# restart hits the working CDN immediately instead of running through 4
+# blocked hosts. _binance_get will keep it up to date going forward.
+_restored = _load_bot_state().get("binance_base")
+if _restored and _restored in BINANCE_HOSTS:
+    BINANCE_BASE = _restored
+    logger.info("Restored active Binance host from state: %s", _restored)
+
+
+def backup_alerts_db() -> None:
+    """Take a timestamped copy of alerts.db and prune to the last N snapshots.
+    Uses sqlite3's online backup API so it's safe even while the DB is being
+    written to by another thread."""
+    try:
+        os.makedirs(ALERTS_DB_BACKUP_DIR, exist_ok=True)
+        ts = time.strftime("%Y%m%d_%H%M%S", time.gmtime())
+        dst_path = os.path.join(ALERTS_DB_BACKUP_DIR, f"alerts_{ts}.db")
+        # Online backup — atomic, doesn't require a write lock for long.
+        src = sqlite3.connect(HIT_RATE_DB_PATH)
+        try:
+            dst = sqlite3.connect(dst_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+        # Rotate: keep the newest ALERTS_DB_BACKUP_KEEP files only.
+        existing = sorted(
+            f for f in os.listdir(ALERTS_DB_BACKUP_DIR)
+            if f.startswith("alerts_") and f.endswith(".db")
+        )
+        for stale in existing[:-ALERTS_DB_BACKUP_KEEP]:
+            try:
+                os.remove(os.path.join(ALERTS_DB_BACKUP_DIR, stale))
+            except OSError:
+                pass
+        logger.info("alerts.db backup written: %s (kept %d snapshots)",
+                    os.path.basename(dst_path),
+                    min(len(existing) + 1, ALERTS_DB_BACKUP_KEEP))
+    except Exception as e:
+        logger.exception("alerts.db backup failed: %s", e)
+
+
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(
     run_checks, "interval", minutes=5, id="binance_check",
@@ -3511,6 +3602,9 @@ scheduler.add_job(
     check_coingecko_new_coins, "interval", minutes=COINGECKO_CHECK_INTERVAL_MIN,
     id="coingecko_check",
     next_run_time=__import__("datetime").datetime.utcnow(),
+)
+scheduler.add_job(
+    backup_alerts_db, "interval", hours=1, id="alerts_db_backup",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
