@@ -359,10 +359,19 @@ def _load_bot_state() -> dict:
     return {}
 
 
+_bot_state_last_write = 0.0
+_BOT_STATE_DEBOUNCE_SEC = 60.0
+
+
 def _save_bot_state(updates: dict) -> None:
     """Merge `updates` into the persisted state file. Best-effort; failures
     are logged but never raised — losing this file just means the next boot
-    starts from defaults."""
+    starts from defaults. Debounced to once per minute so pathological host
+    flapping can't produce a thundering herd of small writes."""
+    global _bot_state_last_write
+    now = time.time()
+    if now - _bot_state_last_write < _BOT_STATE_DEBOUNCE_SEC:
+        return
     try:
         current = _load_bot_state()
         current.update(updates)
@@ -370,6 +379,7 @@ def _save_bot_state(updates: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(current, f)
         os.replace(tmp, BOT_STATE_PATH)
+        _bot_state_last_write = now
     except OSError as e:
         logger.warning("Could not persist bot state: %s", e)
 
@@ -3577,6 +3587,7 @@ def backup_alerts_db() -> None:
         finally:
             src.close()
         # Rotate: keep the newest ALERTS_DB_BACKUP_KEEP files only.
+        # `existing` already includes the file we just wrote.
         existing = sorted(
             f for f in os.listdir(ALERTS_DB_BACKUP_DIR)
             if f.startswith("alerts_") and f.endswith(".db")
@@ -3586,9 +3597,9 @@ def backup_alerts_db() -> None:
                 os.remove(os.path.join(ALERTS_DB_BACKUP_DIR, stale))
             except OSError:
                 pass
+        kept = min(len(existing), ALERTS_DB_BACKUP_KEEP)
         logger.info("alerts.db backup written: %s (kept %d snapshots)",
-                    os.path.basename(dst_path),
-                    min(len(existing) + 1, ALERTS_DB_BACKUP_KEEP))
+                    os.path.basename(dst_path), kept)
     except Exception as e:
         logger.exception("alerts.db backup failed: %s", e)
 
