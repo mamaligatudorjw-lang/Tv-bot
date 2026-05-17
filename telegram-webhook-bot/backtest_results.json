@@ -1,0 +1,817 @@
+{
+  "summary": {
+    "volume_surge_short": {
+      "total_signals": 10,
+      "horizons": {
+        "15m": {
+          "n": 10,
+          "win_rate": 30.0,
+          "win_rate_ci95": [
+            10.778928748621183,
+            60.322678002043475
+          ],
+          "avg_signed_pct": 0.538929894475313
+        },
+        "1h": {
+          "n": 10,
+          "win_rate": 20.0,
+          "win_rate_ci95": [
+            5.6680947980693315,
+            50.98431532792765
+          ],
+          "avg_signed_pct": -1.3114828155722094
+        },
+        "4h": {
+          "n": 10,
+          "win_rate": 10.0,
+          "win_rate_ci95": [
+            1.7875749515721129,
+            40.41563854975721
+          ],
+          "avg_signed_pct": -7.508503375516523
+        },
+        "24h": {
+          "n": 10,
+          "win_rate": 20.0,
+          "win_rate_ci95": [
+            5.6680947980693315,
+            50.98431532792765
+          ],
+          "avg_signed_pct": -7.528901483415917
+        },
+        "3d": {
+          "n": 10,
+          "win_rate": 20.0,
+          "win_rate_ci95": [
+            5.6680947980693315,
+            50.98431532792765
+          ],
+          "avg_signed_pct": -14.15240752121323
+        },
+        "7d": {
+          "n": 9,
+          "win_rate": 22.22222222222222,
+          "win_rate_ci95": [
+            6.322376231222723,
+            54.74166563271946
+          ],
+          "avg_signed_pct": -16.04226811829146
+        }
+      }
+    },
+    "volume_surge_long": {
+      "total_signals": 3,
+      "horizons": {
+        "15m": {
+          "n": 3,
+          "win_rate": 0.0,
+          "win_rate_ci95": [
+            0.0,
+            56.15060804490177
+          ],
+          "avg_signed_pct": -0.05264151818378143
+        },
+        "1h": {
+          "n": 3,
+          "win_rate": 0.0,
+          "win_rate_ci95": [
+            0.0,
+            56.15060804490177
+          ],
+          "avg_signed_pct": -0.6002144027523454
+        },
+        "4h": {
+          "n": 3,
+          "win_rate": 0.0,
+          "win_rate_ci95": [
+            0.0,
+            56.15060804490177
+          ],
+          "avg_signed_pct": -1.947380595845103
+        },
+        "24h": {
+          "n": 3,
+          "win_rate": 33.33333333333333,
+          "win_rate_ci95": [
+            6.14903152761605,
+            79.23450448735122
+          ],
+          "avg_signed_pct": -0.5769875608335212
+        },
+        "3d": {
+          "n": 3,
+          "win_rate": 33.33333333333333,
+          "win_rate_ci95": [
+            6.14903152761605,
+            79.23450448735122
+          ],
+          "avg_signed_pct": -6.03400409245254
+        },
+        "7d": {
+          "n": 3,
+          "win_rate": 66.66666666666666,
+          "win_rate_ci95": [
+            20.76549551264879,
+            93.85096847238394
+          ],
+          "avg_signed_pct": -3.103377293817997
+        }
+      }
+    }
+  },
+  "score_summary": {
+    "score>=60": {
+      "total": 0,
+      "horizons": {
+        "15m": null,
+        "1h": null,
+        "4h": null,
+        "24h": null,
+        "3d": null,
+        "7d": null
+      }
+    },
+    "score<60": {
+      "total": 13,
+      "horizons": {
+        "15m": {
+          "n": 13,
+          "win_rate": 23.076923076923077,
+          "avg_signed_pct": 0.40241341463090663
+        },
+        "1h": {
+          "n": 13,
+          "win_rate": 15.384615384615385,
+          "avg_signed_pct": -1.1473439510753176
+        },
+        "4h": {
+          "n": 13,
+          "win_rate": 7.6923076923076925,
+          "avg_signed_pct": -6.225167349438503
+        },
+        "24h": {
+          "n": 13,
+          "win_rate": 23.076923076923077,
+          "avg_signed_pct": -5.924613655127672
+        },
+        "3d": {
+          "n": 13,
+          "win_rate": 23.076923076923077,
+          "avg_signed_pct": -12.27892980688384
+        },
+        "7d": {
+          "n": 12,
+          "win_rate": 33.33333333333333,
+          "avg_signed_pct": -12.807545412173093
+        }
+      }
+    }
+  },
+  "details": [
+    {
+      "symbol": "LINKUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1777939200000,
+      "alert_price": 9.36,
+      "pct_volume": 370.5080718330579,
+      "crsi": 77.17751118036391,
+      "pct24": 2.519167579408528,
+      "btc_pct24": 1.6449834838536423,
+      "score": 48,
+      "horizons": {
+        "15m": {
+          "price": 9.39,
+          "delta_pct": 0.3205128205128327,
+          "signed_pct": -0.3205128205128327,
+          "win": false
+        },
+        "1h": {
+          "price": 9.4,
+          "delta_pct": 0.42735042735043727,
+          "signed_pct": -0.42735042735043727,
+          "win": false
+        },
+        "4h": {
+          "price": 9.51,
+          "delta_pct": 1.6025641025641066,
+          "signed_pct": -1.6025641025641066,
+          "win": false
+        },
+        "24h": {
+          "price": 9.76,
+          "delta_pct": 4.273504273504278,
+          "signed_pct": -4.273504273504278,
+          "win": false
+        },
+        "3d": {
+          "price": 9.85,
+          "delta_pct": 5.235042735042738,
+          "signed_pct": -5.235042735042738,
+          "win": false
+        },
+        "7d": {
+          "price": 10.6,
+          "delta_pct": 13.24786324786325,
+          "signed_pct": -13.24786324786325,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "LUNCUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1775865600000,
+      "alert_price": 4.066e-05,
+      "pct_volume": 458.84355265222183,
+      "crsi": 88.3616661391935,
+      "pct24": 7.9660116834837975,
+      "btc_pct24": 1.636388380950173,
+      "score": 48,
+      "horizons": {
+        "15m": {
+          "price": 4.051e-05,
+          "delta_pct": -0.36891293654698387,
+          "signed_pct": 0.36891293654698387,
+          "win": false
+        },
+        "1h": {
+          "price": 4.03e-05,
+          "delta_pct": -0.8853910477127479,
+          "signed_pct": 0.8853910477127479,
+          "win": false
+        },
+        "4h": {
+          "price": 4.148e-05,
+          "delta_pct": 2.0167240531234683,
+          "signed_pct": -2.0167240531234683,
+          "win": false
+        },
+        "24h": {
+          "price": 4.17e-05,
+          "delta_pct": 2.5577963600590183,
+          "signed_pct": -2.5577963600590183,
+          "win": false
+        },
+        "3d": {
+          "price": 4.214e-05,
+          "delta_pct": 3.639940973930151,
+          "signed_pct": -3.639940973930151,
+          "win": false
+        },
+        "7d": {
+          "price": 4.612e-05,
+          "delta_pct": 13.428430890309883,
+          "signed_pct": -13.428430890309883,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "LAYERUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1778284800000,
+      "alert_price": 0.0892,
+      "pct_volume": 1067.7340806289671,
+      "crsi": 82.69553483406,
+      "pct24": 1.1337868480725635,
+      "btc_pct24": 0.2339449541284382,
+      "score": 50,
+      "horizons": {
+        "15m": {
+          "price": 0.0903,
+          "delta_pct": 1.2331838565022464,
+          "signed_pct": -1.2331838565022464,
+          "win": false
+        },
+        "1h": {
+          "price": 0.0912,
+          "delta_pct": 2.242152466367715,
+          "signed_pct": -2.242152466367715,
+          "win": false
+        },
+        "4h": {
+          "price": 0.0913,
+          "delta_pct": 2.354260089686104,
+          "signed_pct": -2.354260089686104,
+          "win": false
+        },
+        "24h": {
+          "price": 0.0997,
+          "delta_pct": 11.771300448430488,
+          "signed_pct": -11.771300448430488,
+          "win": false
+        },
+        "3d": {
+          "price": 0.1149,
+          "delta_pct": 28.81165919282511,
+          "signed_pct": -28.81165919282511,
+          "win": false
+        },
+        "7d": {
+          "price": 0.0965,
+          "delta_pct": 8.183856502242154,
+          "signed_pct": -8.183856502242154,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "LAYERUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1778457600000,
+      "alert_price": 0.124,
+      "pct_volume": 1280.1293366657148,
+      "crsi": 99.40440844215031,
+      "pct24": 24.373119358074224,
+      "btc_pct24": 1.8984883190544346,
+      "score": 47,
+      "horizons": {
+        "15m": {
+          "price": 0.1233,
+          "delta_pct": -0.5645161290322519,
+          "signed_pct": 0.5645161290322519,
+          "win": false
+        },
+        "1h": {
+          "price": 0.1214,
+          "delta_pct": -2.096774193548391,
+          "signed_pct": 2.096774193548391,
+          "win": true
+        },
+        "4h": {
+          "price": 0.1337,
+          "delta_pct": 7.822580645161302,
+          "signed_pct": -7.822580645161302,
+          "win": false
+        },
+        "24h": {
+          "price": 0.1149,
+          "delta_pct": -7.338709677419352,
+          "signed_pct": 7.338709677419352,
+          "win": true
+        },
+        "3d": {
+          "price": 0.0996,
+          "delta_pct": -19.67741935483871,
+          "signed_pct": 19.67741935483871,
+          "win": true
+        },
+        "7d": null
+      }
+    },
+    {
+      "symbol": "SPKUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1775865600000,
+      "alert_price": 0.020879,
+      "pct_volume": 576.5240496560311,
+      "crsi": 77.73821409262726,
+      "pct24": 4.724883382655374,
+      "btc_pct24": 1.636388380950173,
+      "score": 48,
+      "horizons": {
+        "15m": {
+          "price": 0.020872,
+          "delta_pct": -0.03352650989032071,
+          "signed_pct": 0.03352650989032071,
+          "win": false
+        },
+        "1h": {
+          "price": 0.020986,
+          "delta_pct": 0.5124766511806095,
+          "signed_pct": -0.5124766511806095,
+          "win": false
+        },
+        "4h": {
+          "price": 0.020899,
+          "delta_pct": 0.09579002825805442,
+          "signed_pct": -0.09579002825805442,
+          "win": false
+        },
+        "24h": {
+          "price": 0.021195,
+          "delta_pct": 1.5134824464773065,
+          "signed_pct": -1.5134824464773065,
+          "win": false
+        },
+        "3d": {
+          "price": 0.021511,
+          "delta_pct": 3.0269648929546293,
+          "signed_pct": -3.0269648929546293,
+          "win": false
+        },
+        "7d": {
+          "price": 0.023695,
+          "delta_pct": 13.487235978734608,
+          "signed_pct": -13.487235978734608,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "SPKUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1776643200000,
+      "alert_price": 0.024602,
+      "pct_volume": 465.37107231459174,
+      "crsi": 78.34294404918678,
+      "pct24": 9.20632102272727,
+      "btc_pct24": -2.4969296525804143,
+      "score": 54,
+      "horizons": {
+        "15m": {
+          "price": 0.024516,
+          "delta_pct": -0.3495650760100775,
+          "signed_pct": 0.3495650760100775,
+          "win": false
+        },
+        "1h": {
+          "price": 0.02488,
+          "delta_pct": 1.129989431753518,
+          "signed_pct": -1.129989431753518,
+          "win": false
+        },
+        "4h": {
+          "price": 0.029756,
+          "delta_pct": 20.949516299487858,
+          "signed_pct": -20.949516299487858,
+          "win": false
+        },
+        "24h": {
+          "price": 0.027171,
+          "delta_pct": 10.44224046825462,
+          "signed_pct": -10.44224046825462,
+          "win": false
+        },
+        "3d": {
+          "price": 0.03826,
+          "delta_pct": 55.5158117226242,
+          "signed_pct": -55.5158117226242,
+          "win": false
+        },
+        "7d": {
+          "price": 0.037769,
+          "delta_pct": 53.520039021217784,
+          "signed_pct": -53.520039021217784,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "SPKUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1776902400000,
+      "alert_price": 0.03826,
+      "pct_volume": 611.1518056493504,
+      "crsi": 96.24467082644908,
+      "pct24": 34.65193214612516,
+      "btc_pct24": 2.4131161972407593,
+      "score": 47,
+      "horizons": {
+        "15m": {
+          "price": 0.03782,
+          "delta_pct": -1.1500261369576656,
+          "signed_pct": 1.1500261369576656,
+          "win": true
+        },
+        "1h": {
+          "price": 0.040666,
+          "delta_pct": 6.288552012545735,
+          "signed_pct": -6.288552012545735,
+          "win": false
+        },
+        "4h": {
+          "price": 0.052981,
+          "delta_pct": 38.4762153685311,
+          "signed_pct": -38.4762153685311,
+          "win": false
+        },
+        "24h": {
+          "price": 0.051936,
+          "delta_pct": 35.74490329325666,
+          "signed_pct": -35.74490329325666,
+          "win": false
+        },
+        "3d": {
+          "price": 0.040583,
+          "delta_pct": 6.071615263983269,
+          "signed_pct": -6.071615263983269,
+          "win": false
+        },
+        "7d": {
+          "price": 0.036006,
+          "delta_pct": -5.891270256142183,
+          "signed_pct": 5.891270256142183,
+          "win": true
+        }
+      }
+    },
+    {
+      "symbol": "TONUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1777939200000,
+      "alert_price": 1.653,
+      "pct_volume": 528.559278137057,
+      "crsi": 94.17879071429299,
+      "pct24": 22.172949002217297,
+      "btc_pct24": 1.6449834838536423,
+      "score": 48,
+      "horizons": {
+        "15m": {
+          "price": 1.623,
+          "delta_pct": -1.814882032667878,
+          "signed_pct": 1.814882032667878,
+          "win": true
+        },
+        "1h": {
+          "price": 1.777,
+          "delta_pct": 7.501512401693883,
+          "signed_pct": -7.501512401693883,
+          "win": false
+        },
+        "4h": {
+          "price": 1.737,
+          "delta_pct": 5.081669691470059,
+          "signed_pct": -5.081669691470059,
+          "win": false
+        },
+        "24h": {
+          "price": 1.952,
+          "delta_pct": 18.088324258923166,
+          "signed_pct": -18.088324258923166,
+          "win": false
+        },
+        "3d": {
+          "price": 2.714,
+          "delta_pct": 64.18632788868723,
+          "signed_pct": -64.18632788868723,
+          "win": false
+        },
+        "7d": {
+          "price": 2.429,
+          "delta_pct": 46.94494857834239,
+          "signed_pct": -46.94494857834239,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "PAXGUSDT",
+      "kind": "volume_surge_long",
+      "direction": 1,
+      "alert_ms": 1774310400000,
+      "alert_price": 4447.45,
+      "pct_volume": 880.1649889518394,
+      "crsi": 8.374985976727089,
+      "pct24": -0.6069802731411197,
+      "btc_pct24": 4.490856039729435,
+      "score": 57,
+      "horizons": {
+        "15m": {
+          "price": 4427.98,
+          "delta_pct": -0.4377789519837268,
+          "signed_pct": -0.4377789519837268,
+          "win": false
+        },
+        "1h": {
+          "price": 4373.61,
+          "delta_pct": -1.6602772375181318,
+          "signed_pct": -1.6602772375181318,
+          "win": false
+        },
+        "4h": {
+          "price": 4358.79,
+          "delta_pct": -1.9935018943439469,
+          "signed_pct": -1.9935018943439469,
+          "win": false
+        },
+        "24h": {
+          "price": 4549.65,
+          "delta_pct": 2.2979460140080232,
+          "signed_pct": 2.2979460140080232,
+          "win": true
+        },
+        "3d": {
+          "price": 4411.6,
+          "delta_pct": -0.8060798884754062,
+          "signed_pct": -0.8060798884754062,
+          "win": false
+        },
+        "7d": {
+          "price": 4512.8,
+          "delta_pct": 1.4693813308750039,
+          "signed_pct": 1.4693813308750039,
+          "win": true
+        }
+      }
+    },
+    {
+      "symbol": "PAXGUSDT",
+      "kind": "volume_surge_long",
+      "direction": 1,
+      "alert_ms": 1775433600000,
+      "alert_price": 4598.82,
+      "pct_volume": 626.7352296168826,
+      "crsi": 19.709801655212374,
+      "pct24": -1.0706472285144621,
+      "btc_pct24": 2.5761503420038014,
+      "score": 54,
+      "horizons": {
+        "15m": {
+          "price": 4611.69,
+          "delta_pct": 0.2798543974323825,
+          "signed_pct": 0.2798543974323825,
+          "win": false
+        },
+        "1h": {
+          "price": 4610.59,
+          "delta_pct": 0.25593521816466913,
+          "signed_pct": 0.25593521816466913,
+          "win": false
+        },
+        "4h": {
+          "price": 4628.38,
+          "delta_pct": 0.6427735810490605,
+          "signed_pct": 0.6427735810490605,
+          "win": false
+        },
+        "24h": {
+          "price": 4644.39,
+          "delta_pct": 0.9909063629365928,
+          "signed_pct": 0.9909063629365928,
+          "win": false
+        },
+        "3d": {
+          "price": 4702.52,
+          "delta_pct": 2.254926263693746,
+          "signed_pct": 2.254926263693746,
+          "win": true
+        },
+        "7d": {
+          "price": 4655.92,
+          "delta_pct": 1.241622851079198,
+          "signed_pct": 1.241622851079198,
+          "win": true
+        }
+      }
+    },
+    {
+      "symbol": "EURUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1774310400000,
+      "alert_price": 1.1608,
+      "pct_volume": 310.784324271555,
+      "crsi": 83.18844456164851,
+      "pct24": 0.4065392267105051,
+      "btc_pct24": 4.490856039729435,
+      "score": 43,
+      "horizons": {
+        "15m": {
+          "price": 1.1595,
+          "delta_pct": -0.11199172984149543,
+          "signed_pct": 0.11199172984149543,
+          "win": false
+        },
+        "1h": {
+          "price": 1.1589,
+          "delta_pct": -0.1636802205375614,
+          "signed_pct": 0.1636802205375614,
+          "win": false
+        },
+        "4h": {
+          "price": 1.1585,
+          "delta_pct": -0.19813921433493872,
+          "signed_pct": 0.19813921433493872,
+          "win": false
+        },
+        "24h": {
+          "price": 1.1617,
+          "delta_pct": 0.07753273604409897,
+          "signed_pct": -0.07753273604409897,
+          "win": false
+        },
+        "3d": {
+          "price": 1.1537,
+          "delta_pct": -0.6116471399035239,
+          "signed_pct": 0.6116471399035239,
+          "win": false
+        },
+        "7d": {
+          "price": 1.1465,
+          "delta_pct": -1.2319090282563732,
+          "signed_pct": 1.2319090282563732,
+          "win": true
+        }
+      }
+    },
+    {
+      "symbol": "UTKUSDT",
+      "kind": "volume_surge_long",
+      "direction": 1,
+      "alert_ms": 1774569600000,
+      "alert_price": 0.00757,
+      "pct_volume": 704.5327789882174,
+      "crsi": 8.938846754872435,
+      "pct24": -23.843058350100595,
+      "btc_pct24": -3.527253147861273,
+      "score": 45,
+      "horizons": {
+        "15m": {
+          "price": 0.00757,
+          "delta_pct": 0.0,
+          "signed_pct": 0.0,
+          "win": false
+        },
+        "1h": {
+          "price": 0.00754,
+          "delta_pct": -0.39630118890357346,
+          "signed_pct": -0.39630118890357346,
+          "win": false
+        },
+        "4h": {
+          "price": 0.00723,
+          "delta_pct": -4.491413474240423,
+          "signed_pct": -4.491413474240423,
+          "win": false
+        },
+        "24h": {
+          "price": 0.00719,
+          "delta_pct": -5.01981505944518,
+          "signed_pct": -5.01981505944518,
+          "win": false
+        },
+        "3d": {
+          "price": 0.00609,
+          "delta_pct": -19.55085865257596,
+          "signed_pct": -19.55085865257596,
+          "win": false
+        },
+        "7d": {
+          "price": 0.00666,
+          "delta_pct": -12.021136063408193,
+          "signed_pct": -12.021136063408193,
+          "win": false
+        }
+      }
+    },
+    {
+      "symbol": "UTKUSDT",
+      "kind": "volume_surge_short",
+      "direction": -1,
+      "alert_ms": 1775520000000,
+      "alert_price": 0.00706,
+      "pct_volume": 1037.0159643485297,
+      "crsi": 85.36576993216464,
+      "pct24": 4.592592592592598,
+      "btc_pct24": -0.2614936543028244,
+      "score": 50,
+      "horizons": {
+        "15m": {
+          "price": 0.00688,
+          "delta_pct": -2.549575070821536,
+          "signed_pct": 2.549575070821536,
+          "win": true
+        },
+        "1h": {
+          "price": 0.00693,
+          "delta_pct": -1.8413597733711033,
+          "signed_pct": 1.8413597733711033,
+          "win": true
+        },
+        "4h": {
+          "price": 0.00684,
+          "delta_pct": -3.116147308781878,
+          "signed_pct": 3.116147308781878,
+          "win": true
+        },
+        "24h": {
+          "price": 0.00693,
+          "delta_pct": -1.8413597733711033,
+          "signed_pct": 1.8413597733711033,
+          "win": true
+        },
+        "3d": {
+          "price": 0.00673,
+          "delta_pct": -4.674220963172811,
+          "signed_pct": 4.674220963172811,
+          "win": true
+        },
+        "7d": {
+          "price": 0.00725,
+          "delta_pct": 2.6912181303116154,
+          "signed_pct": -2.6912181303116154,
+          "win": false
+        }
+      }
+    }
+  ]
+}
