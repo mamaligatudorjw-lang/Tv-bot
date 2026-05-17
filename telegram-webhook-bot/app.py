@@ -2,6 +2,7 @@ import os
 import math
 import time
 import html
+import base64
 import logging
 import json
 import sqlite3
@@ -210,6 +211,130 @@ def _telegram_edit_markup(chat_id: int, message_id: int, reply_markup: dict | No
         logger.warning("editMessageReplyMarkup failed: %s", e)
 
 
+# ---------------------------------------------------------------------------
+# Gemini Vision — used to extract trade details from forwarded Binance share
+# cards so the user can drop a screenshot into the bot instead of typing
+# `/trade SYMBOL ... ENTRY EXIT` by hand. Env vars are auto-provisioned by
+# Replit AI Integrations (no key needed in source).
+# ---------------------------------------------------------------------------
+_GEMINI_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL")
+_GEMINI_API_KEY = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY")
+_GEMINI_VISION_MODEL = "gemini-2.5-flash"
+_TRADE_EXTRACT_PROMPT = (
+    "You are looking at a Binance Futures trade share card (screenshot). "
+    "Extract the trade details and return STRICT JSON only — no prose, no "
+    "code fences. Schema: "
+    '{"symbol": string, "direction": "лонг"|"шорт", "entry": number, '
+    '"exit": number}. '
+    "Rules: symbol must end with USDT (e.g. BTCUSDT, MIRAUSDT). "
+    "Direction: 'Купить'/'Buy'/'Long' → 'лонг'; 'Продать'/'Sell'/'Short' → 'шорт'. "
+    "entry = «Цена входа» / «Entry Price». "
+    "exit  = «Средняя цена закрытия» / «Average Close Price» / «Exit Price». "
+    "Use plain decimal numbers (no thousand separators, dot as decimal). "
+    "If the image is not a Binance Futures trade card, or any required field "
+    'is missing, return {"error": "<short reason in Russian>"} instead.'
+)
+
+
+def _safe_err(e: Exception) -> str:
+    """Log-safe error representation. The Telegram bot token lives in URLs and
+    the Gemini API key would too if it were ever leaked; ``requests`` puts the
+    full URL into RequestException stringification, so we must NEVER pass the
+    raw exception into ``logger.*("%s", e)``. This helper keeps just the
+    exception class + HTTP status when available."""
+    name = type(e).__name__
+    status = None
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        status = getattr(resp, "status_code", None)
+    return f"{name}(status={status})" if status is not None else name
+
+
+def _gemini_extract_trade_from_image(
+    image_bytes: bytes, mime_type: str = "image/jpeg",
+) -> dict | None:
+    """Call Gemini Vision with the trade-extraction prompt and parse its JSON.
+    Returns the parsed dict (which may be either the trade fields or
+    {"error": ...}) or None on transport/parse failure.
+
+    URL shape: the Replit AI Integrations proxy is OpenAI/Google-compatible
+    but mounts the model endpoints directly under the base URL (no /v1beta
+    prefix — mirrors the GoogleGenAI SDK template's ``apiVersion: ""``).
+    Auth uses the ``x-goog-api-key`` header so the key never appears in the
+    URL or in ``requests`` exception strings if a call fails."""
+    if not _GEMINI_BASE_URL or not _GEMINI_API_KEY:
+        logger.error("Gemini env vars missing — cannot parse trade photo")
+        return None
+    url = (f"{_GEMINI_BASE_URL.rstrip('/')}/models/"
+           f"{_GEMINI_VISION_MODEL}:generateContent")
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": _TRADE_EXTRACT_PROMPT},
+                {"inline_data": {
+                    "mime_type": mime_type,
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                }},
+            ],
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 512,
+            "temperature": 0.0,
+        },
+    }
+    try:
+        resp = requests.post(
+            url,
+            headers={"x-goog-api-key": _GEMINI_API_KEY},
+            json=payload,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        parts = body["candidates"][0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts).strip()
+        return json.loads(text)
+    except (requests.RequestException, KeyError, IndexError,
+            json.JSONDecodeError, ValueError) as e:
+        logger.warning("Gemini vision call failed: %s", _safe_err(e))
+        return None
+
+
+def _telegram_download_photo(file_id: str) -> tuple[bytes, str] | None:
+    """Resolve a Telegram file_id → raw image bytes + mime type. Returns None
+    on failure. Mime is inferred from the path extension since Telegram does
+    not return Content-Type for the file CDN. The bot token is part of the
+    URL, so failures are logged via _safe_err to avoid leaking the token."""
+    try:
+        gf = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id}, timeout=10,
+        )
+        gf.raise_for_status()
+        file_path = gf.json()["result"]["file_path"]
+        dl = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
+            timeout=30,
+        )
+        dl.raise_for_status()
+        ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else "jpg"
+        mime = "image/png" if ext == "png" else "image/jpeg"
+        return dl.content, mime
+    except (requests.RequestException, KeyError) as e:
+        logger.warning("Telegram getFile/download failed for file_id=%s: %s",
+                       file_id, _safe_err(e))
+        return None
+
+
+# Bounded executor for photo-parsing jobs. Each job blocks for up to ~30s on
+# the vision call, so an unbounded thread-per-photo pattern (as we use for
+# /commands) would let a burst of forwards exhaust sockets/memory. Two
+# workers is enough for human-paced forwarding; excess photos queue here.
+_photo_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="photo")
+
+
 def _delete_telegram_webhook() -> None:
     """Remove any existing webhook so getUpdates polling works."""
     try:
@@ -260,9 +385,18 @@ def _poll_telegram_commands() -> None:
                     continue
                 message = update.get("message", {})
                 chat_id = message.get("chat", {}).get("id")
+                if not chat_id:
+                    continue
+                # Photo branch: forwarded Binance share-card screenshots are
+                # parsed by Gemini Vision and routed through /trade analysis.
+                # Uses a bounded executor (2 workers) so a burst of forwards
+                # can't exhaust resources — each parse blocks ~30s on vision.
+                if message.get("photo"):
+                    _photo_executor.submit(handle_trade_photo, chat_id, message)
+                    continue
                 raw_text = (message.get("text") or "").strip()
                 text = raw_text.lower()
-                if not chat_id or not text:
+                if not text:
                     continue
                 for cmd, handler in COMMANDS.items():
                     # Exact match — the command must be the whole word, optionally
@@ -3049,6 +3183,66 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
     lines.append("")
     lines.append(f"💡 <b>Совет:</b> {advice}")
     _telegram_send(chat_id, "\n".join(lines))
+
+
+def handle_trade_photo(chat_id: int, message: dict) -> None:
+    """Extract a trade from a forwarded Binance Futures share-card screenshot
+    via Gemini Vision, then run it through the same analysis as `/trade`.
+    Designed so the user can drop a picture into the bot instead of typing
+    `/trade SYMBOL DIR ENTRY EXIT`. Sends a friendly Russian error message
+    on any failure path so the user always knows what to do next."""
+    photos = message.get("photo") or []
+    if not photos:
+        return
+    # Telegram returns the same image in multiple resolutions; the largest is
+    # last and produces the best OCR.
+    file_id = photos[-1].get("file_id")
+    if not file_id:
+        return
+
+    _telegram_send(chat_id, "🔎 Распознаю сделку на скриншоте…")
+
+    downloaded = _telegram_download_photo(file_id)
+    if downloaded is None:
+        _telegram_send(chat_id,
+            "⚠️ Не удалось скачать изображение из Telegram. Попробуйте ещё раз.")
+        return
+    image_bytes, mime = downloaded
+
+    parsed = _gemini_extract_trade_from_image(image_bytes, mime_type=mime)
+    if parsed is None:
+        _telegram_send(chat_id,
+            "⚠️ Не удалось разобрать изображение (vision-сервис не ответил). "
+            "Попробуйте ещё раз через минуту или введите сделку вручную: "
+            "<code>/trade SYMBOL лонг|шорт ENTRY EXIT</code>")
+        return
+    if "error" in parsed:
+        reason = html.escape(str(parsed.get("error", "не распознано")))
+        _telegram_send(chat_id,
+            f"⚠️ {reason}\n\n"
+            "Это должен быть скриншот карточки Binance Futures Share. "
+            "Или введите сделку вручную: "
+            "<code>/trade SYMBOL лонг|шорт ENTRY EXIT</code>")
+        return
+
+    # Build a synthetic `/trade ...` text and reuse the existing handler so
+    # validation, persistence, and analysis stay in one place.
+    try:
+        sym = str(parsed["symbol"]).upper().strip()
+        direction = str(parsed["direction"]).lower().strip()
+        entry = float(parsed["entry"])
+        exit_ = float(parsed["exit"])
+    except (KeyError, TypeError, ValueError) as e:
+        logger.warning("Vision returned malformed trade JSON %r: %s", parsed, e)
+        _telegram_send(chat_id,
+            "⚠️ Распознавание вернуло некорректные данные. Попробуйте "
+            "другой скриншот или введите сделку вручную: "
+            "<code>/trade SYMBOL лонг|шорт ENTRY EXIT</code>")
+        return
+
+    synthetic = f"/trade {sym} {direction} {entry} {exit_}"
+    logger.info("Trade photo from chat_id=%s parsed as: %s", chat_id, synthetic)
+    handle_trade_command(chat_id, synthetic)
 
 
 def handle_mytrades_command(chat_id: int) -> None:

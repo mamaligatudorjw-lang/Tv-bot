@@ -30,7 +30,13 @@ _Populate as you build — non-obvious choices a reader couldn't infer from the 
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+Russian-language crypto signals bot (Telegram) with a companion React web
+preview. The Python Flask bot polls Binance every 5 min and fires alerts on
+volume surges, RSI extremes, new listings, weekly/monthly highs, and a
+combined "volume-surge + CRSI" setup. Users can also journal their own
+trades via `/trade SYMBOL лонг|шорт ENTRY EXIT` **or by forwarding a
+Binance Futures Share-card screenshot** — the bot extracts the four fields
+via Gemini Vision and runs them through the same analysis pipeline.
 
 ## User preferences
 
@@ -38,7 +44,16 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Never `git add -f telegram-webhook-bot/alerts.db`. The SQLite file contains
+  Telegram chat IDs, alert history, and user feedback. It is gitignored;
+  forcing it into a commit would leak that data.
+- Bot helpers that talk to Telegram or Gemini must log failures through
+  `_safe_err(e)`, not `"%s" % e`. The raw `requests.RequestException` string
+  contains the full URL — which holds the bot token (Telegram) or the API
+  key (Gemini if ever moved to query-param auth).
+- The Gemini base URL is the Replit AI Integrations proxy; it mounts model
+  endpoints **without** a `/v1beta` prefix (mirrors the SDK template's
+  `apiVersion: ""`). Auth is via the `x-goog-api-key` header.
 
 ## Pointers
 
