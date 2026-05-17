@@ -40,6 +40,7 @@ import json
 import time
 import argparse
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Suppress app.py's module-level scheduler/polling/watchdog so importing
 # the module doesn't start a real bot.
@@ -113,7 +114,9 @@ def price_at(candles, target_ms, interval_ms):
 
 
 def simulate_volume_surge_for_symbol(symbol: str, backtest_days: int,
-                                      btc_pct24_by_day: dict):
+                                      btc_pct24_by_day: dict,
+                                      crsi_short: float = 75.0,
+                                      crsi_long: float = 25.0):
     """Walk forward through daily candles and identify each day where the
     bot would have fired a volume_surge alert. Returns list of candidate
     signals (without win/loss yet — that needs 1h klines)."""
@@ -137,9 +140,14 @@ def simulate_volume_surge_for_symbol(symbol: str, backtest_days: int,
         crsi = app._calculate_crsi(closes)
         if crsi is None:
             continue
-        if crsi >= app.CRSI_OVERBOUGHT:
+        # Use harness-local thresholds (default 75/25 — the *original*
+        # loose pair) so a sweep can always reconstruct subsets at stricter
+        # cutoffs. Don't read app.CRSI_* here: production constants may
+        # have already been tightened from earlier backtest findings, and
+        # we want the candidate population, not the filtered-by-prod one.
+        if crsi >= crsi_short:
             kind, direction = "volume_surge_short", -1
-        elif crsi <= app.CRSI_OVERSOLD:
+        elif crsi <= crsi_long:
             kind, direction = "volume_surge_long", +1
         else:
             continue
@@ -173,46 +181,54 @@ def simulate_volume_surge_for_symbol(symbol: str, backtest_days: int,
     return signals
 
 
-def evaluate_signals(signals):
-    """Pull klines per signal, compute win/loss at each horizon.
-    Uses 15m candles for sub-hour horizons and 1h candles for ≥1h horizons,
-    so e.g. the "15m" bucket actually measures price ~15m after alert
-    (previously it shared a candle with the 1h bucket — see git history)."""
+def _evaluate_one(s, max_horizon_s):
+    """Worker: fetch klines for one signal and compute horizon outcomes."""
+    start = s["alert_ms"]
+    try:
+        klines_15m = fetch_klines(s["symbol"], "15m",
+                                   start, start + 2 * 3600 * 1000)
+        klines_1h  = fetch_klines(s["symbol"], "1h",
+                                   start, start + (max_horizon_s + 3600) * 1000)
+    except Exception as e:
+        return None, f"{s['symbol']} skip ({e})"
+    rec = {**s, "horizons": {}}
+    for label, secs in HORIZONS:
+        if secs < 3600:
+            px = price_at(klines_15m, start + secs * 1000, _INTERVAL_MS["15m"])
+        else:
+            px = price_at(klines_1h,  start + secs * 1000, _INTERVAL_MS["1h"])
+        if px is None:
+            rec["horizons"][label] = None
+            continue
+        delta_pct  = (px - s["alert_price"]) / s["alert_price"] * 100.0
+        signed_pct = delta_pct * s["direction"]
+        rec["horizons"][label] = {
+            "price":      px,
+            "delta_pct":  delta_pct,
+            "signed_pct": signed_pct,
+            "win":        signed_pct >= WIN_PCT,
+        }
+    return rec, None
+
+
+def evaluate_signals(signals, workers: int = 8):
+    """Pull klines per signal in parallel; compute win/loss at each horizon.
+    Sub-hour horizons use 15m candles, ≥1h use 1h candles (fixes the earlier
+    bug where 15m & 1h aliased to the same hourly close)."""
     out = []
     max_horizon_s = max(secs for _, secs in HORIZONS)
-    for i, s in enumerate(signals, 1):
-        start = s["alert_ms"]
-        try:
-            # 15m candles for short horizons (<1h). 4h × 1000 candles is
-            # plenty for a 1h horizon, and 15m × 1000 covers >10 days for
-            # the sub-hour windows.
-            klines_15m = fetch_klines(s["symbol"], "15m",
-                                       start, start + 2 * 3600 * 1000)
-            klines_1h  = fetch_klines(s["symbol"], "1h",
-                                       start, start + (max_horizon_s + 3600) * 1000)
-        except Exception as e:
-            print(f"  [eval {i}/{len(signals)}] {s['symbol']} skip ({e})",
-                  file=sys.stderr)
-            continue
-        rec = {**s, "horizons": {}}
-        for label, secs in HORIZONS:
-            if secs < 3600:
-                px = price_at(klines_15m, start + secs * 1000, _INTERVAL_MS["15m"])
-            else:
-                px = price_at(klines_1h,  start + secs * 1000, _INTERVAL_MS["1h"])
-            if px is None:
-                rec["horizons"][label] = None
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_evaluate_one, s, max_horizon_s) for s in signals]
+        done = 0
+        for f in as_completed(futures):
+            rec, err = f.result()
+            done += 1
+            if err:
+                print(f"  [eval {done}/{len(signals)}] {err}", file=sys.stderr)
                 continue
-            delta_pct  = (px - s["alert_price"]) / s["alert_price"] * 100.0
-            signed_pct = delta_pct * s["direction"]
-            rec["horizons"][label] = {
-                "price":      px,
-                "delta_pct":  delta_pct,
-                "signed_pct": signed_pct,
-                "win":        signed_pct >= WIN_PCT,
-            }
-        out.append(rec)
-        time.sleep(0.02)
+            out.append(rec)
+            if done % 25 == 0:
+                print(f"  evaluated {done}/{len(signals)}", file=sys.stderr)
     return out
 
 
@@ -378,6 +394,13 @@ def main():
     parser.add_argument("--out",     default="backtest_results.json")
     parser.add_argument("--sweep-crsi", action="store_true",
                         help="Also print a CRSI-threshold sweep table")
+    parser.add_argument("--crsi-short", type=float, default=75.0,
+                        help="Loosest CRSI cutoff for SHORT candidate scan "
+                             "(default 75 = the original threshold; sweep "
+                             "starts here and tightens upward)")
+    parser.add_argument("--crsi-long",  type=float, default=25.0,
+                        help="Loosest CRSI cutoff for LONG candidate scan "
+                             "(default 25 = the original threshold)")
     args = parser.parse_args()
 
     symbols = resolve_symbols(args)
@@ -397,17 +420,27 @@ def main():
             )
 
     all_signals = []
-    for i, sym in enumerate(symbols, 1):
+    def _scan(sym):
         try:
-            sigs = simulate_volume_surge_for_symbol(sym, args.days, btc_pct24_by_day)
+            return sym, simulate_volume_surge_for_symbol(
+                sym, args.days, btc_pct24_by_day,
+                crsi_short=args.crsi_short, crsi_long=args.crsi_long,
+            ), None
         except Exception as e:
-            print(f"  [{i}/{len(symbols)}] {sym}: skip ({e})", file=sys.stderr)
-            continue
-        if sigs:
-            print(f"  [{i}/{len(symbols)}] {sym}: {len(sigs)} candidate alerts",
-                  file=sys.stderr)
-        all_signals.extend(sigs)
-        time.sleep(0.03)
+            return sym, [], str(e)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futures = [ex.submit(_scan, s) for s in symbols]
+        done = 0
+        for f in as_completed(futures):
+            sym, sigs, err = f.result()
+            done += 1
+            if err:
+                print(f"  [{done}/{len(symbols)}] {sym}: skip ({err})", file=sys.stderr)
+                continue
+            if sigs:
+                print(f"  [{done}/{len(symbols)}] {sym}: {len(sigs)} candidate alerts",
+                      file=sys.stderr)
+            all_signals.extend(sigs)
 
     print(f"\n→ Found {len(all_signals)} candidate alerts. Evaluating outcomes…",
           file=sys.stderr)

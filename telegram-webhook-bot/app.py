@@ -93,7 +93,12 @@ VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
 # Volume-surge + CRSI combo alert (calendar-day vol vs yesterday)
 MIN_VOLUME_USDT_BROAD = 10_000     # lower floor so pairs like ORCAUSDT enter the daily refresh
 VOLUME_SURGE_PCT = 300.0           # today's USDT vol must be ≥ +300% over yesterday's
-CRSI_OVERBOUGHT = 75.0
+# SHORT-side tightened 75→90 on 2026-05-17 after a 100-symbol × 180-day
+# backtest: at the old threshold the SHORT side was break-even (PnL ≈ 0%);
+# at CRSI≥90 winrate jumps to 74% with +5.8% avg PnL on the 7d horizon
+# (n=57). LONG threshold stays at 25 because backtest evidence for a tighter
+# cut was underpowered (n≈12). See `telegram-webhook-bot/backtest.py`.
+CRSI_OVERBOUGHT = 90.0
 CRSI_OVERSOLD = 25.0
 VOLUME_SURGE_COOLDOWN = 14400      # 4h per coin so a multi-hour pump doesn't re-fire each cycle
 CRSI_KLINES_LIMIT = 110            # needs ≥104 closes (RSI_3 + streak_RSI_2 + 100-day rank)
@@ -2097,7 +2102,7 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     so coins like ORCAUSDT are eligible) where today's USDT volume is
     ≥ +VOLUME_SURGE_PCT vs yesterday's AND the daily Connors-RSI is in an
     extreme zone, fire a directional alert:
-      • CRSI ≥ CRSI_OVERBOUGHT (75) → SHORT
+      • CRSI ≥ CRSI_OVERBOUGHT (90) → SHORT
       • CRSI ≤ CRSI_OVERSOLD   (25) → LONG
     The CRSI calc fetches daily closes lazily and caches them for 30 min, so
     only actual surge candidates pay the API cost."""

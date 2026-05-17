@@ -31,11 +31,11 @@ def test_double_pass_deduplicates(monkeypatch):
         "BTCUSDT": {"lastPrice": "60000", "priceChangePercent": "1.0"},
     }
 
-    # CRSI=80 → SHORT branch. Daily closes just need to be non-empty since
-    # we also stub _calculate_crsi.
+    # CRSI=92 → SHORT branch (threshold is 90 since 2026-05-17). Daily closes
+    # just need to be non-empty since we also stub _calculate_crsi.
     monkeypatch.setattr(app, "_fetch_daily_closes_for_crsi",
                         lambda _s: [1.0] * 120)
-    monkeypatch.setattr(app, "_calculate_crsi", lambda _closes: 80.0)
+    monkeypatch.setattr(app, "_calculate_crsi", lambda _closes: 92.0)
 
     calls = []
 
@@ -80,7 +80,7 @@ def test_below_threshold_does_not_alert(monkeypatch):
     # These should never be reached, but stub defensively.
     monkeypatch.setattr(app, "_fetch_daily_closes_for_crsi",
                         lambda _s: [1.0] * 120)
-    monkeypatch.setattr(app, "_calculate_crsi", lambda _c: 80.0)
+    monkeypatch.setattr(app, "_calculate_crsi", lambda _c: 92.0)
 
     assert app.check_volume_surge_crsi(tickers) == 0
     assert calls == []

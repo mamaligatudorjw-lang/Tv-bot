@@ -1,0 +1,18 @@
+# Bot runtime data — contains chat IDs, user feedback, alert history.
+# Do NOT commit. (Note: alerts.db was historically tracked; future
+# checkpoints will skip it, but git history still contains the prior
+# snapshots — scrub the history if that's a concern.)
+alerts.db
+alerts.db-journal
+alerts.db-wal
+alerts.db-shm
+alerts_db_backups/
+
+# Backtest artifacts — large JSON outputs, rerunnable from CLI.
+backtest_results.json
+backtest*.log
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
