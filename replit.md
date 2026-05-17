@@ -44,7 +44,7 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
-- Never `git add -f telegram-webhook-bot/alerts.db`. The SQLite file contains
+- Never `git add -f telegram-webhook-bot/alerts.db` (or any `alerts.db-*` / `alerts_db_backups/` files). The SQLite file contains
   Telegram chat IDs, alert history, and user feedback. It is gitignored;
   forcing it into a commit would leak that data.
 - Bot helpers that talk to Telegram or Gemini must log failures through
