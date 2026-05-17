@@ -253,6 +253,60 @@ def summarize(results):
     return summary
 
 
+def summarize_crsi_sweep(results, short_grid, long_grid):
+    """For each candidate (short, long) CRSI cutoff, filter the already-
+    evaluated signals to those that *would* have fired under that stricter
+    setting and report winrate / avg PnL at every horizon. Re-uses the same
+    klines we already pulled — no extra API calls."""
+    sweep = []
+    for st in short_grid:
+        rs = [r for r in results
+              if r["kind"] == "volume_surge_short" and r["crsi"] >= st]
+        sweep.append(("SHORT", st, _per_horizon(rs)))
+    for lt in long_grid:
+        rs = [r for r in results
+              if r["kind"] == "volume_surge_long" and r["crsi"] <= lt]
+        sweep.append(("LONG", lt, _per_horizon(rs)))
+    return sweep
+
+
+def _per_horizon(rs):
+    """Compact per-horizon stats for one filtered subset of signals."""
+    out = {"n_total": len(rs)}
+    for label, _ in HORIZONS:
+        valid = [r for r in rs if r["horizons"].get(label)]
+        if not valid:
+            out[label] = None
+            continue
+        wins = sum(1 for r in valid if r["horizons"][label]["win"])
+        avg  = sum(r["horizons"][label]["signed_pct"] for r in valid) / len(valid)
+        lo, hi = _wilson_ci(wins, len(valid))
+        out[label] = {"n": len(valid),
+                      "win_rate": wins / len(valid) * 100.0,
+                      "win_rate_ci95": [lo, hi],
+                      "avg_signed_pct": avg}
+    return out
+
+
+def print_sweep(sweep):
+    print("CRSI threshold sweep (live default is short=75, long=25):")
+    print(f"  {'side':<6} {'thr':>5} {'n':>5}   "
+          f"{'24h':>14}   {'3d':>14}   {'7d':>14}")
+    print(f"  {'':<6} {'':>5} {'':>5}   "
+          f"{'win  pnl':>14}   {'win  pnl':>14}   {'win  pnl':>14}")
+    for side, thr, h in sweep:
+        cells = []
+        for label in ("24h", "3d", "7d"):
+            v = h.get(label)
+            if v is None:
+                cells.append(f"{'—':>14}")
+            else:
+                cells.append(f"{v['win_rate']:>5.1f}% {v['avg_signed_pct']:>+6.2f}%")
+        print(f"  {side:<6} {thr:>5.0f} {h['n_total']:>5}   "
+              f"{cells[0]}   {cells[1]}   {cells[2]}")
+    print()
+
+
 def summarize_by_score_bucket(results):
     """Split signals into score≥60 (live-eligible-ish) vs <60 and report
     per-bucket win rates at each horizon. Useful for judging whether the
@@ -322,6 +376,8 @@ def main():
     parser.add_argument("--top",     type=int, default=50,  help="Top N USDT pairs by 24h vol")
     parser.add_argument("--symbols", default="",            help="Comma-separated symbols (overrides --top)")
     parser.add_argument("--out",     default="backtest_results.json")
+    parser.add_argument("--sweep-crsi", action="store_true",
+                        help="Also print a CRSI-threshold sweep table")
     args = parser.parse_args()
 
     symbols = resolve_symbols(args)
@@ -372,11 +428,26 @@ def main():
                       f"{h['avg_signed_pct']:>9.2f}%")
     print()
 
+    sweep = None
+    if args.sweep_crsi:
+        sweep = summarize_crsi_sweep(
+            results,
+            short_grid=[75, 80, 85, 90, 95],
+            long_grid=[25, 20, 15, 10, 5],
+        )
+        print_sweep(sweep)
+
     out_path = os.path.join(os.path.dirname(__file__), args.out)
     with open(out_path, "w") as f:
-        json.dump({"summary": summary,
+        payload = {"summary": summary,
                    "score_summary": score_summary,
-                   "details": results}, f, indent=2)
+                   "details": results}
+        if sweep is not None:
+            payload["crsi_sweep"] = [
+                {"side": side, "threshold": thr, "stats": stats}
+                for side, thr, stats in sweep
+            ]
+        json.dump(payload, f, indent=2)
     print(f"Detailed results written to {out_path}", file=sys.stderr)
 
 
