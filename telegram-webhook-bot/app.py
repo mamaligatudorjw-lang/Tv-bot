@@ -1595,7 +1595,16 @@ def send_alert_with_log(
         return (ok, None)
 
     markup = _build_alert_buttons(alert_id, symbol, alert_type)
-    if not _telegram_send(TELEGRAM_CHAT_ID, body_text, reply_markup=markup):
+    # Duplicate the Binance link inside the message text so the user can
+    # long-press → "Открыть во внешнем браузере", which lets the OS resolve
+    # the universal-link and hand it to the Binance app. Inline-button taps
+    # always go through Telegram's in-app browser and skip universal-links.
+    body_with_link = (
+        f"{body_text}\n\n"
+        f"🔗 <a href=\"{_binance_url(symbol)}\">Открыть в приложении Binance</a> "
+        f"<i>(зажмите ссылку → «Открыть во внешнем браузере»)</i>"
+    )
+    if not _telegram_send(TELEGRAM_CHAT_ID, body_with_link, reply_markup=markup):
         # Rollback so cooldowns don't suppress retries
         try:
             with _db_lock:
