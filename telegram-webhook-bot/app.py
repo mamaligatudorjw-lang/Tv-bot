@@ -1497,8 +1497,18 @@ def _strength_label(score: int) -> str:
 MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "60"))
 
 
-def _tv_url(symbol: str) -> str:
-    return f"https://www.tradingview.com/chart/?symbol=BINANCE%3A{symbol}"
+def _binance_url(symbol: str) -> str:
+    """Universal link to the spot-trading pair page on Binance. On iOS/Android
+    with the Binance app installed, the OS hands this URL to the app and opens
+    the in-app pair card; on desktop or without the app, it falls back to the
+    web page. The bot tracks spot USDT pairs (e.g. MIRAUSDT), and Binance
+    expects the form ``MIRA_USDT`` in trade URLs."""
+    if symbol.upper().endswith("USDT"):
+        base = symbol[:-4]
+        pair = f"{base}_USDT"
+    else:
+        pair = symbol
+    return f"https://www.binance.com/ru/trade/{pair}?type=spot"
 
 
 def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
@@ -1511,7 +1521,7 @@ def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
             [
                 {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
                 {"text": "Скрыть тип", "callback_data": f"ht:{alert_type}"},
-                {"text": "График", "url": _tv_url(symbol)},
+                {"text": "Открыть в Binance", "url": _binance_url(symbol)},
             ],
         ]
     }
@@ -1522,7 +1532,7 @@ def _build_voted_buttons(alert_id: int, symbol: str, vote: int) -> dict:
     return {
         "inline_keyboard": [
             [{"text": mark, "callback_data": f"noop:{alert_id}"}],
-            [{"text": "График", "url": _tv_url(symbol)}],
+            [{"text": "Открыть в Binance", "url": _binance_url(symbol)}],
         ]
     }
 
