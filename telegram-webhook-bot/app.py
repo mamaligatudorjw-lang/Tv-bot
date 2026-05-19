@@ -1595,6 +1595,14 @@ def send_alert_with_log(
         return (ok, None)
 
     markup = _build_alert_buttons(alert_id, symbol, alert_type)
+    # C. Leverage warning appended to every SHORT alert.
+    if recommendation == "SHORT":
+        body_text = (
+            body_text
+            + "\n\n⚠️ <i>Горизонт сигнала: 1-4 ч, ожидаемое движение 2-7%. "
+            "Плечо выше 5× может привести к ликвидации раньше, "
+            "чем сигнал отработает. Управляйте размером позиции.</i>"
+        )
     # Duplicate the Binance link inside the message text so the user can
     # long-press → "Открыть во внешнем браузере", which lets the OS resolve
     # the universal-link and hand it to the Binance app. Inline-button taps
@@ -2107,6 +2115,11 @@ def check_momentum(
         if threshold is None:
             continue
 
+        # A. momentum_down_2 disabled: 28 % hit-rate at 1h/4h (below chance),
+        #    average price move +0.84 % after the signal (wrong direction).
+        if threshold == -2.0:
+            continue
+
         with state_lock:
             sym_map = state["last_momentum_alerted"].get(symbol, {})
             last_ts = sym_map.get(threshold, 0)
@@ -2122,6 +2135,18 @@ def check_momentum(
                 price_str = f"${price:,.6g}"
             except (ValueError, KeyError):
                 pass
+
+        # B. EMA-200 trend filter for momentum shorts: if the coin is above
+        #    EMA-200 (4h) it is in an uptrend — don't short into the trend.
+        if pct < 0:
+            with state_lock:
+                ema_val = state["ema200_4h"].get(symbol)
+            if price is not None and ema_val is not None and price > ema_val:
+                logger.debug(
+                    "Momentum short suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
+                    symbol, price, ema_val,
+                )
+                continue
 
         emoji = _MOMENTUM_EMOJI.get(threshold, "📊")
         sign = "+" if pct > 0 else ""
@@ -2190,6 +2215,17 @@ def check_overheated_oversold(
             atr = state["atr_4h"].get(symbol)
 
         if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
+            # B. EMA-200 trend filter: a coin that is overheated AND still
+            #    above EMA-200 is in a strong uptrend — fading it with a
+            #    short has historically low edge. Skip if in uptrend.
+            with state_lock:
+                ema_oh = state["ema200_4h"].get(symbol)
+            if ema_oh is not None and price > ema_oh:
+                logger.debug(
+                    "Overheated short suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
+                    symbol, price, ema_oh,
+                )
+                continue
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
             if now - last >= OVERHEATED_COOLDOWN:
