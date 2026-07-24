@@ -150,8 +150,11 @@ BOT_STATE_PATH = os.path.join(
     os.path.dirname(__file__) or ".", ".bot_state.json"
 )
 HIT_RATE_INTERVALS = ((900, "15м"), (3600, "1ч"), (14400, "4ч"))
-HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win
+HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win (legacy, kept for compat)
 HIT_RATE_RETENTION_DAYS = 120
+# SL/TP for simulated P&L in hit-rate stats (matches backtest defaults)
+HIT_RATE_SL_PCT = 2.0              # stop-loss %
+HIT_RATE_TP_PCT = 4.0              # take-profit %
 
 
 # ---------------------------------------------------------------------------
@@ -1681,9 +1684,47 @@ def handle_callback_query(cb: dict) -> None:
         _telegram_answer_callback(cb_id, "Ошибка обработки")
 
 
+def _sltp_outcome(p0: float, p_future: float, rec: str,
+                  sl_pct: float = HIT_RATE_SL_PCT,
+                  tp_pct: float = HIT_RATE_TP_PCT) -> str:
+    """Approximate SL/TP outcome using a single close-price snapshot.
+
+    Since we only store close prices (not OHLC) we can only detect *clear*
+    hits — if the price crossed TP or SL level.  When both are crossed
+    simultaneously (impossible with a single close) or neither, we return
+    'timeout'.  This is an approximation; the backtest uses candle high/low
+    for a stricter simulation.
+
+    Returns: 'tp' | 'sl' | 'timeout'
+    """
+    if p0 <= 0:
+        return "timeout"
+    pct = (p_future - p0) / p0 * 100.0
+    if rec == "LONG":
+        if pct <= -sl_pct:
+            return "sl"
+        if pct >= tp_pct:
+            return "tp"
+    elif rec == "SHORT":
+        if pct >= sl_pct:
+            return "sl"
+        if pct <= -tp_pct:
+            return "tp"
+    return "timeout"
+
+
 def compute_hit_rate_stats(days: int = 7) -> list[dict]:
-    """Aggregate wins per (alert_type, recommendation) over the last `days` days.
-    A win = price moved >= HIT_RATE_WIN_PCT in the recommended direction.
+    """Aggregate simulated SL/TP P&L per (alert_type, recommendation) over
+    the last `days` days.
+
+    For each alert we walk through price snapshots at 15m → 1h → 4h and apply
+    a fixed SL={HIT_RATE_SL_PCT}% / TP={HIT_RATE_TP_PCT}% rule:
+      - 'tp'      = price crossed TP level → win, P&L = +tp_pct
+      - 'sl'      = price crossed SL level → loss, P&L = -sl_pct
+      - 'timeout' = neither triggered, P&L = signed close move at that checkpoint
+
+    Each horizon is evaluated independently (not walk-through) so the stats
+    answer: "if I closed the position exactly at this checkpoint, what was my P&L?"
     """
     cutoff = int(time.time()) - days * 86400
     out: list[dict] = []
@@ -1695,24 +1736,48 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
                 "FROM alerts WHERE ts >= ?",
                 (cutoff,),
             )
+            # agg[key] = {total, horizons: {label: {tp, sl, timeout, pnl_sum, n}}}
             agg: dict[tuple, dict] = {}
+            sl_pct = HIT_RATE_SL_PCT
+            tp_pct = HIT_RATE_TP_PCT
             for atype, rec, p0, p15, p1h, p4h in cursor:
+                if p0 is None or p0 <= 0:
+                    continue
                 key = (atype, rec or "—")
-                a = agg.setdefault(key, {"total": 0, "w15": [0, 0], "w1h": [0, 0], "w4h": [0, 0]})
+                a = agg.setdefault(key, {
+                    "total": 0,
+                    "horizons": {
+                        "15м": {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
+                        "1ч":  {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
+                        "4ч":  {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
+                    },
+                })
                 a["total"] += 1
-                for col, future in (("w15", p15), ("w1h", p1h), ("w4h", p4h)):
-                    if future is None or p0 is None or p0 <= 0:
+                for label, p_future in (("15м", p15), ("1ч", p1h), ("4ч", p4h)):
+                    if p_future is None:
                         continue
-                    pct = (future - p0) / p0 * 100.0
-                    a[col][1] += 1
-                    if rec == "LONG" and pct >= HIT_RATE_WIN_PCT:
-                        a[col][0] += 1
-                    elif rec == "SHORT" and pct <= -HIT_RATE_WIN_PCT:
-                        a[col][0] += 1
+                    h = a["horizons"][label]
+                    outcome = _sltp_outcome(p0, p_future, rec or "", sl_pct, tp_pct)
+                    h[outcome] += 1
+                    h["n"] += 1
+                    if outcome == "tp":
+                        h["pnl_sum"] += tp_pct
+                    elif outcome == "sl":
+                        h["pnl_sum"] -= sl_pct
+                    else:
+                        # timeout: use actual signed close move
+                        pct = (p_future - p0) / p0 * 100.0
+                        if rec == "SHORT":
+                            pct = -pct
+                        h["pnl_sum"] += pct
         for (atype, rec), a in agg.items():
             out.append({
-                "alert_type": atype, "recommendation": rec, "total": a["total"],
-                "w15": a["w15"], "w1h": a["w1h"], "w4h": a["w4h"],
+                "alert_type":    atype,
+                "recommendation": rec,
+                "total":         a["total"],
+                "sl_pct":        HIT_RATE_SL_PCT,
+                "tp_pct":        HIT_RATE_TP_PCT,
+                "horizons":      a["horizons"],
             })
         out.sort(key=lambda r: (-r["total"], r["alert_type"]))
     except Exception as e:
@@ -2950,7 +3015,7 @@ def handle_silence_command(chat_id: int) -> None:
 
 
 def handle_stats_command(chat_id: int) -> None:
-    """Show win rates per alert type for the last HIT_RATE_RETENTION_DAYS days."""
+    """Show simulated SL/TP P&L stats per alert type for the last HIT_RATE_RETENTION_DAYS days."""
     stats = compute_hit_rate_stats(days=HIT_RATE_RETENTION_DAYS)
     if not stats:
         _telegram_send(
@@ -2960,21 +3025,40 @@ def handle_stats_command(chat_id: int) -> None:
         )
         return
 
-    def fmt(arr: list) -> str:
-        wins, n = arr
+    sl_pct = HIT_RATE_SL_PCT
+    tp_pct = HIT_RATE_TP_PCT
+
+    def fmt_horizon(h: dict) -> str:
+        """Format one horizon bucket as  TP%/SL% avg_pnl."""
+        n = h["n"]
         if n == 0:
             return "—"
-        return f"{wins/n*100:.0f}% ({n})"
+        tp_r = h["tp"]  / n * 100.0
+        sl_r = h["sl"]  / n * 100.0
+        avg  = h["pnl_sum"] / n
+        sign = "+" if avg >= 0 else ""
+        return f"🟢{tp_r:.0f}% 🔴{sl_r:.0f}% ({sign}{avg:.1f}%)"
 
-    lines = [f"📊 <b>Статистика за {HIT_RATE_RETENTION_DAYS} дней</b>", ""]
+    lines = [
+        f"📊 <b>Статистика за {HIT_RATE_RETENTION_DAYS} дней</b>",
+        f"<i>SL {sl_pct:.0f}% / TP {tp_pct:.0f}% · симуляция по ценам снапшотов</i>",
+        "",
+    ]
     for r in stats:
+        h15 = r["horizons"]["15м"]
+        h1h = r["horizons"]["1ч"]
+        h4h = r["horizons"]["4ч"]
         lines.append(
-            f"<b>{r['alert_type']}</b> · {r['recommendation']} · "
-            f"{r['total']} алертов\n"
-            f"  15м: {fmt(r['w15'])}  |  1ч: {fmt(r['w1h'])}  |  4ч: {fmt(r['w4h'])}"
+            f"<b>{r['alert_type']}</b> · {r['recommendation']} · {r['total']} алертов\n"
+            f"  15м: {fmt_horizon(h15)}\n"
+            f"   1ч: {fmt_horizon(h1h)}\n"
+            f"   4ч: {fmt_horizon(h4h)}"
         )
     lines.append("")
-    lines.append(f"<i>Успех = движение ≥ {HIT_RATE_WIN_PCT:.0f}% в нужную сторону</i>")
+    lines.append(
+        f"<i>🟢 = TP достигнут (+{tp_pct:.0f}%)  🔴 = стоп (−{sl_pct:.0f}%)  "
+        f"в скобках — средний P&L включая таймауты</i>"
+    )
     _telegram_send(chat_id, "\n".join(lines))
 
 
