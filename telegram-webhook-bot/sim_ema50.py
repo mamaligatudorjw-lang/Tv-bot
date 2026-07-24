@@ -190,7 +190,7 @@ def coin_history_lookup(symbol: str, ts: int) -> list:
 # ---------------------------------------------------------------------------
 # Pre-fetch all needed data in parallel before running the simulation
 # ---------------------------------------------------------------------------
-SHORT_SIGNALS = ["overheated_24h", "confluence", "momentum_down_3"]
+SHORT_SIGNALS = ["overheated_24h", "confluence", "momentum_down_1"]
 
 def prefetch_all(all_alerts: dict[str, list]) -> None:
     symbols   = {a["symbol"] for alerts in all_alerts.values() for a in alerts}
@@ -225,7 +225,7 @@ def prefetch_all(all_alerts: dict[str, list]) -> None:
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    global USE_EMA50_FILTER
+    global USE_EMA200_FILTER, USE_EMA50_FILTER
 
     all_alerts = {sig: load_alerts(sig) for sig in SHORT_SIGNALS}
     n_total = sum(len(v) for v in all_alerts.values())
@@ -236,7 +236,7 @@ def main():
 
     # ---- таблица сравнения ----
     print()
-    header = f"{'Сигнал':<22} {'Фильтр':<20} {'Сделок':>7} {'Отсеяно':>8} " \
+    header = f"{'Сигнал':<22} {'Фильтр':<22} {'Сделок':>7} {'Отсеяно':>8} " \
              f"{'TP%':>7} {'SL%':>7} {'avgP&L':>9}"
     print(header)
     print("-" * len(header))
@@ -246,23 +246,29 @@ def main():
             print(f"{sig:<22}  нет данных")
             continue
 
-        USE_EMA50_FILTER = False
-        res_a = simulate_short(alerts, price_lookup, coin_history_lookup)
+        # Вариант 1: без фильтров
+        USE_EMA200_FILTER = False
+        USE_EMA50_FILTER  = False
+        res_none = simulate_short(alerts, price_lookup, coin_history_lookup)
 
-        USE_EMA50_FILTER = True
-        res_b = simulate_short(alerts, price_lookup, coin_history_lookup)
+        # Вариант 2: только EMA-200
+        USE_EMA200_FILTER = True
+        USE_EMA50_FILTER  = False
+        res_ema200 = simulate_short(alerts, price_lookup, coin_history_lookup)
+
+        # Вариант 3: EMA-200 + EMA-50
+        USE_EMA200_FILTER = True
+        USE_EMA50_FILTER  = True
+        res_both = simulate_short(alerts, price_lookup, coin_history_lookup)
 
         def row(label, r):
-            return (f"{sig:<22} {label:<20} {r['trades']:>7} {r['skipped']:>8} "
+            return (f"{sig:<22} {label:<22} {r['trades']:>7} {r['skipped']:>8} "
                     f"{r['tp_pct']:>6.1f}% {r['sl_pct']:>6.1f}% "
                     f"{r['avg_pnl_pct']:>+8.2f}%")
 
-        print(row("EMA-200", res_a))
-        print(row("EMA-200 + EMA-50", res_b))
-        delta = res_b["avg_pnl_pct"] - res_a["avg_pnl_pct"]
-        sign = "+" if delta >= 0 else ""
-        print(f"{'':22} {'→ Δ avg P&L':20} {'':>7} {'':>8} {'':>7} {'':>7} "
-              f"{sign}{delta:>+7.2f}%")
+        print(row("без фильтра", res_none))
+        print(row("EMA-200", res_ema200))
+        print(row("EMA-200 + EMA-50", res_both))
         print()
 
 if __name__ == "__main__":
