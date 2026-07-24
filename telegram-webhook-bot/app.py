@@ -71,6 +71,8 @@ state = {
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
+    "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
+    "market_regime_ts": 0,             # unix ts of last regime refresh
     "initialized": False,
     "last_run": None,
     "last_run_summary": {},
@@ -966,6 +968,108 @@ def refresh_ema200_4h(symbols: list[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Market regime (BTC daily EMA-200: BULL / NEUTRAL / BEAR)
+# ---------------------------------------------------------------------------
+
+# Signals that should never fire regardless of regime (pure noise).
+# Note: NEUTRAL/WATCH recommendations are already blocked by send_alert_with_log;
+# this set covers alert_type names that are directional but proven useless.
+BLOCKED_SIGNALS: set[str] = {"confluence_neutral"}
+
+_REGIME_TTL = 3600  # refresh at most once per hour
+
+
+def get_market_regime() -> str:
+    """Return the current macro market regime based on BTC daily EMA-200.
+
+    BULL   — BTC spot price > EMA-200*(1+1.5%) AND EMA-200 rising vs 10 bars ago
+    BEAR   — BTC spot price < EMA-200*(1-1.5%) AND EMA-200 falling vs 10 bars ago
+    NEUTRAL — anything else (sideways / insufficient data)
+
+    Result is cached in `state` for _REGIME_TTL seconds.
+    """
+    with state_lock:
+        cached_val = state["market_regime"]
+        cached_ts  = state["market_regime_ts"]
+
+    if time.time() - cached_ts < _REGIME_TTL:
+        return cached_val
+
+    try:
+        resp = _binance_get(
+            "/api/v3/klines",
+            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 300},
+            timeout=10,
+        )
+        data   = resp.json()
+        closes = [float(c[4]) for c in data]
+        if len(closes) < 12:
+            return cached_val  # not enough data — keep last known
+
+        ema   = closes[0]
+        k     = 2.0 / (200 + 1)
+        for price in closes[1:]:
+            ema = price * k + ema * (1 - k)
+            # note: we need the full series for ema_prev; rebuild below
+
+        # Full EMA-200 series
+        ema_s = [closes[0]]
+        for price in closes[1:]:
+            ema_s.append(price * k + ema_s[-1] * (1 - k))
+
+        price_now = closes[-1]
+        ema_now   = ema_s[-1]
+        ema_prev  = ema_s[-10]
+        buffer    = 0.015
+
+        if price_now > ema_now * (1 + buffer) and ema_now > ema_prev:
+            regime = "BULL"
+        elif price_now < ema_now * (1 - buffer) and ema_now < ema_prev:
+            regime = "BEAR"
+        else:
+            regime = "NEUTRAL"
+
+        with state_lock:
+            state["market_regime"]    = regime
+            state["market_regime_ts"] = time.time()
+        logger.info("Market regime updated: %s (BTC=%.0f EMA200=%.0f)", regime, price_now, ema_now)
+        return regime
+    except Exception as e:
+        logger.warning("get_market_regime failed: %s", e)
+        return cached_val  # stale value is safer than crashing
+
+
+def get_regime_label(alert_type: str, recommendation: str) -> tuple[bool, str]:
+    """Return (should_send, label_text) for an outgoing alert.
+
+    should_send is False only for explicitly blocked signal types.
+    For all others: send but append a short regime context line.
+    """
+    if alert_type in BLOCKED_SIGNALS:
+        return (False, "")
+
+    regime = get_market_regime()
+
+    aligned = (
+        (regime == "BULL"  and recommendation == "LONG") or
+        (regime == "BEAR"  and recommendation == "SHORT")
+    )
+    against = (
+        (regime == "BULL"  and recommendation == "SHORT") or
+        (regime == "BEAR"  and recommendation == "LONG")
+    )
+
+    if aligned:
+        label = f"🌐 Фаза рынка: {regime} ✅ (по тренду)"
+    elif against:
+        label = f"🌐 Фаза рынка: {regime} ⚠️ (против тренда — повышенный риск)"
+    else:
+        label = f"🌐 Фаза рынка: {regime} ➖ (боковик)"
+
+    return (True, label)
+
+
+# ---------------------------------------------------------------------------
 # Recommendation engine
 # ---------------------------------------------------------------------------
 
@@ -1598,6 +1702,20 @@ def send_alert_with_log(
         return (ok, None)
 
     markup = _build_alert_buttons(alert_id, symbol, alert_type)
+    # Regime label: append market context to every outgoing alert.
+    _regime_send, _regime_label = get_regime_label(alert_type, recommendation)
+    if not _regime_send:
+        # Blocked by BLOCKED_SIGNALS — roll back the DB row we just inserted.
+        try:
+            with _db_lock:
+                conn = _get_db()
+                conn.execute("DELETE FROM alerts WHERE id=?", (alert_id,))
+                conn.commit()
+        except Exception:
+            pass
+        return (False, None)
+    if _regime_label:
+        body_text = f"{body_text}\n{_regime_label}"
     # C. Leverage warning appended to every SHORT alert.
     if recommendation == "SHORT":
         body_text = (
