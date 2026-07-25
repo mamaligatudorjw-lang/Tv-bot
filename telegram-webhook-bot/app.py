@@ -2977,6 +2977,24 @@ def run_checks():
 
 
 # ---------------------------------------------------------------------------
+# Keep-alive HTTP server (port 8089 — 8080 is reserved for api-server)
+# Lets external ping services (UptimeRobot etc.) prevent dev-mode sleeping.
+# ---------------------------------------------------------------------------
+_ka_app = Flask("keep_alive")
+
+@_ka_app.route("/")
+def _ka_home():
+    return "Bot is alive"
+
+def keep_alive() -> None:
+    threading.Thread(
+        target=lambda: _ka_app.run(host="0.0.0.0", port=8089),
+        daemon=True,
+        name="keep-alive",
+    ).start()
+
+
+# ---------------------------------------------------------------------------
 # Cycle logging
 # ---------------------------------------------------------------------------
 _CYCLE_LOG_PATH = os.path.join(os.path.dirname(__file__), "cycle_log.jsonl")
@@ -4108,6 +4126,7 @@ scheduler.add_job(
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
 # does NOT silently disable the workers.
 if os.environ.get("TESTING", "").strip().lower() not in {"1", "true", "yes"}:
+    keep_alive()
     scheduler.start()
     start_command_polling()
     start_watchdog()
