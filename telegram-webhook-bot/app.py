@@ -5,6 +5,7 @@ import html
 import base64
 import logging
 import json
+from datetime import datetime
 import sqlite3
 import threading
 import numpy as np
@@ -2968,10 +2969,25 @@ def run_checks():
     elapsed = time.time() - start
     summary["elapsed_seconds"] = round(elapsed, 1)
     logger.info("Check cycle done in %.1fs: %s", elapsed, summary)
+    log_cycle(summary)
 
     with state_lock:
         state["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         state["last_run_summary"] = summary
+
+
+# ---------------------------------------------------------------------------
+# Cycle logging
+# ---------------------------------------------------------------------------
+_CYCLE_LOG_PATH = os.path.join(os.path.dirname(__file__), "cycle_log.jsonl")
+
+def log_cycle(summary: dict) -> None:
+    line = {"ts": datetime.utcnow().isoformat(), **summary}
+    try:
+        with open(_CYCLE_LOG_PATH, "a") as f:
+            f.write(json.dumps(line) + "\n")
+    except Exception as exc:
+        logger.warning("log_cycle write failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
