@@ -2844,6 +2844,17 @@ def run_checks():
                     above_ema200=above_ema,
                 )
                 rec_label = _rec_label(rec_line)
+
+                # EMA-200 trend filter: suppress confluence SHORT signals when
+                # the coin is in an uptrend (price above 4h EMA-200).
+                if rec_label == "SHORT" and above_ema is True:
+                    logger.debug(
+                        "Confluence SHORT suppressed by EMA-200 filter: "
+                        "%s price=%.6g ema=%.6g",
+                        sym, b["price"] or 0, ema or 0,
+                    )
+                    continue
+
                 side_for_score = (
                     "buy" if rec_label == "LONG"
                     else "sell" if rec_label == "SHORT"
