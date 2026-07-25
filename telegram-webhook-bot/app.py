@@ -2278,6 +2278,7 @@ def check_momentum(
     Cooldown is per (symbol, threshold-tier).
     """
     sent = 0
+    ema_blocked = 0
     now = time.time()
     for symbol, pct in pct_15m_map.items():
         if pct is None:
@@ -2329,6 +2330,7 @@ def check_momentum(
                     "Momentum short suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
                     symbol, price, ema_val,
                 )
+                ema_blocked += 1
                 continue
 
         emoji = _MOMENTUM_EMOJI.get(threshold, "📊")
@@ -2360,19 +2362,19 @@ def check_momentum(
         with state_lock:
             state["last_momentum_alerted"].setdefault(symbol, {})[threshold] = now
         sent += 1
-    return sent
+    return sent, ema_blocked
 
 
 def check_overheated_oversold(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Standalone "overheated" (24h >= +20% AND RSI >= 70) and "oversold"
     (24h <= -20% AND RSI <= 30) alerts. Bypass confluence.
     """
     if not tickers:
-        return 0, 0
-    sent_oh, sent_os = 0, 0
+        return 0, 0, 0
+    sent_oh, sent_os, ema_blocked_oh = 0, 0, 0
     now = time.time()
     for symbol, t in tickers.items():
         rsi = rsi_map.get(symbol)
@@ -2408,6 +2410,7 @@ def check_overheated_oversold(
                     "Overheated short suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
                     symbol, price, ema_oh,
                 )
+                ema_blocked_oh += 1
                 continue
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
@@ -2459,7 +2462,7 @@ def check_overheated_oversold(
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
-    return sent_oh, sent_os
+    return sent_oh, sent_os, ema_blocked_oh
 
 
 def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
@@ -2591,9 +2594,12 @@ def run_checks():
         "rsi_overbought": 0, "rsi_oversold": 0,
         "vol_spikes": 0, "weekly_highs": 0, "monthly_highs": 0,
         "confluence_alerts": 0,        # multi-signal alerts actually sent
+        "confluence_ema_blocked": 0,   # confluence SHORTs suppressed by EMA-200 filter
         "single_signals_skipped": 0,   # coins with only 1 signal — suppressed
         "momentum_alerts": 0,          # standalone 15-min price-momentum alerts
+        "momentum_ema_blocked": 0,     # momentum SHORTs suppressed by EMA-200 filter
         "overheated_alerts": 0,        # standalone +20% & RSI>=70
+        "overheated_ema_blocked": 0,   # overheated SHORTs suppressed by EMA-200 filter
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
         "errors": [],
@@ -2673,11 +2679,14 @@ def run_checks():
                 summary["vol_spikes"] = len(vol_spikes)
 
                 # 6a. Standalone momentum alerts (15-min price change tiers)
-                summary["momentum_alerts"] = check_momentum(pct_15m_map, tickers)
+                mom_sent, mom_ema_blocked = check_momentum(pct_15m_map, tickers)
+                summary["momentum_alerts"] = mom_sent
+                summary["momentum_ema_blocked"] = mom_ema_blocked
 
                 # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
-                oh_n, os_n = check_overheated_oversold(tickers, rsi_map)
+                oh_n, os_n, oh_ema_blocked = check_overheated_oversold(tickers, rsi_map)
                 summary["overheated_alerts"] = oh_n
+                summary["overheated_ema_blocked"] = oh_ema_blocked
                 summary["oversold_alerts"] = os_n
 
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
@@ -2853,6 +2862,7 @@ def run_checks():
                         "%s price=%.6g ema=%.6g",
                         sym, b["price"] or 0, ema or 0,
                     )
+                    summary["confluence_ema_blocked"] += 1
                     continue
 
                 side_for_score = (
