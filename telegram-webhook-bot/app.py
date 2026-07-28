@@ -365,6 +365,7 @@ def _poll_telegram_commands() -> None:
         "/stats":    handle_stats_command,
         "/trade":    handle_trade_command,
         "/mytrades": handle_mytrades_command,
+        "/analyze":  handle_analyze_command,
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
     }
@@ -411,7 +412,7 @@ def _poll_telegram_commands() -> None:
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
                         # Commands that take args receive the full raw text;
                         # the rest are called with just chat_id (backwards-compat).
-                        takes_args = cmd in ("/trade",)
+                        takes_args = cmd in ("/trade", "/analyze")
                         def _run(h=handler, cid=chat_id, c=cmd, rt=raw_text, ta=takes_args):
                             try:
                                 if ta:
@@ -833,6 +834,56 @@ def _calculate_atr(
     if not math.isfinite(atr) or atr <= 0:
         return None
     return atr
+
+
+def _calculate_supertrend(
+    highs: list[float], lows: list[float], closes: list[float],
+    period: int = 10, multiplier: float = 3.0,
+) -> str | None:
+    """Supertrend indicator on 4h candles. Returns 'UP' (bullish) or 'DOWN' (bearish).
+    Uses Wilder-smoothed ATR and standard band-flip logic."""
+    n = len(closes)
+    if n < period + 2:
+        return None
+    # True Range series (indexed from 1)
+    trs: list[float] = []
+    for i in range(1, n):
+        trs.append(max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        ))
+    if len(trs) < period:
+        return None
+    # Wilder-smoothed ATR
+    atr_s: list[float] = [sum(trs[:period]) / period]
+    for tr in trs[period:]:
+        atr_s.append((atr_s[-1] * (period - 1) + tr) / period)
+    # atr_s[i] corresponds to candle index (period + i)
+    final_ub: list[float] = [0.0] * n
+    final_lb: list[float] = [0.0] * n
+    direction: list[bool] = [True] * n   # True = UP (bullish)
+    for i in range(period, n):
+        atr_i = atr_s[i - period]
+        hl2 = (highs[i] + lows[i]) / 2.0
+        basic_ub = hl2 + multiplier * atr_i
+        basic_lb = hl2 - multiplier * atr_i
+        if i == period:
+            final_ub[i] = basic_ub
+            final_lb[i] = basic_lb
+            direction[i] = closes[i] >= final_lb[i]
+        else:
+            prev_ub = final_ub[i - 1]
+            prev_lb = final_lb[i - 1]
+            # Upper band: lock down only when previous close was below it
+            final_ub[i] = min(basic_ub, prev_ub) if closes[i - 1] <= prev_ub else basic_ub
+            # Lower band: lock up only when previous close was above it
+            final_lb[i] = max(basic_lb, prev_lb) if closes[i - 1] >= prev_lb else basic_lb
+            if direction[i - 1]:                     # was UP
+                direction[i] = closes[i] >= final_lb[i]   # flip to DOWN if below lower band
+            else:                                    # was DOWN
+                direction[i] = closes[i] > final_ub[i]    # flip to UP if above upper band
+    return "UP" if direction[-1] else "DOWN"
 
 
 def _calculate_daily_sigma(closes: list[float]) -> float | None:
@@ -4088,6 +4139,402 @@ def handle_signal_command(chat_id: int) -> None:
         )
     elif skipped_neutral:
         lines.append(f"\n<i>Скрыто нейтральных: {skipped_neutral}</i>")
+
+    _telegram_send(chat_id, "\n".join(lines))
+
+
+def handle_analyze_command(chat_id: int, raw_text: str) -> None:
+    """Real-time full analysis of a single coin: /analyze SYMBOL"""
+    parts = raw_text.strip().split()
+    if len(parts) < 2:
+        _telegram_send(
+            chat_id,
+            "Использование: <code>/analyze BTCUSDT</code>\n"
+            "Пример: <code>/analyze DEXEUSDT</code>",
+        )
+        return
+
+    raw_sym = parts[1].upper().strip()
+    symbol = raw_sym if raw_sym.endswith("USDT") else raw_sym + "USDT"
+
+    _telegram_send(chat_id, f"⏳ Анализирую <code>{symbol}</code>…")
+
+    # ── Parallel data fetch ────────────────────────────────────────────────
+    def fetch_ticker():
+        try:
+            resp = _binance_get(
+                "/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10,
+            )
+            d = resp.json()
+            # Binance returns {"code": -1121} for unknown symbols
+            return None if "code" in d else d
+        except Exception as e:
+            logger.warning("analyze ticker failed %s: %s", symbol, e)
+            return None
+
+    def fetch_4h_klines():
+        try:
+            resp = _binance_get(
+                "/api/v3/klines",
+                params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
+                timeout=10,
+            )
+            return resp.json()
+        except Exception as e:
+            logger.warning("analyze 4h klines failed %s: %s", symbol, e)
+            return None
+
+    def fetch_rsi():
+        return get_klines_rsi(symbol)
+
+    def fetch_5m():
+        return get_5m_signals(symbol)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_tick = ex.submit(fetch_ticker)
+        f_4h   = ex.submit(fetch_4h_klines)
+        f_rsi  = ex.submit(fetch_rsi)
+        f_5m   = ex.submit(fetch_5m)
+
+    ticker     = f_tick.result()
+    klines_4h  = f_4h.result()
+    rsi        = f_rsi.result()
+    spike_ratio, pct_15m = f_5m.result()
+
+    # ── Ticker validation ──────────────────────────────────────────────────
+    price = pct24 = volume_usdt = None
+    if ticker:
+        try:
+            price       = float(ticker["lastPrice"])
+            pct24       = float(ticker["priceChangePercent"])
+            volume_usdt = float(ticker["quoteVolume"])
+        except (ValueError, KeyError):
+            pass
+
+    if price is None:
+        _telegram_send(
+            chat_id,
+            f"❌ Монета <code>{symbol}</code> не найдена на Binance Spot.\n"
+            "Проверьте название (пример: <code>BTCUSDT</code>, <code>DEXEUSDT</code>).",
+        )
+        return
+
+    # ── 4h indicators ──────────────────────────────────────────────────────
+    ema200 = atr = supertrend = None
+    if klines_4h and len(klines_4h) >= EMA200_PERIOD:
+        h4_highs  = [float(k[2]) for k in klines_4h]
+        h4_lows   = [float(k[3]) for k in klines_4h]
+        h4_closes = [float(k[4]) for k in klines_4h]
+        ema200     = _calculate_ema(h4_closes, EMA200_PERIOD)
+        atr        = _calculate_atr(h4_highs, h4_lows, h4_closes, 14)
+        supertrend = _calculate_supertrend(h4_highs, h4_lows, h4_closes)
+
+    above_ema: bool | None = None
+    ema_pct: float | None = None
+    if ema200 is not None and price > 0:
+        above_ema = price > ema200
+        ema_pct   = (price - ema200) / ema200 * 100.0
+
+    # ── Market regime ──────────────────────────────────────────────────────
+    regime = get_market_regime()
+
+    # ── Signal evaluation ──────────────────────────────────────────────────
+    oh_threshold = _vol_threshold(symbol, OVERHEATED_24H_PCT, 2.5)
+    os_threshold = _vol_threshold(symbol, OVERSOLD_24H_PCT, 2.5)
+
+    signals_triggered: list[tuple[str, str, int, str]] = []  # (type, dir, score, reason)
+    signals_missing:   list[str] = []
+
+    btc_pct24: float | None = None
+    with state_lock:
+        btc_t = None  # no tickers dict here; skip BTC pct
+
+    # — overheated_24h SHORT —
+    if pct24 is not None and rsi is not None:
+        if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
+            if above_ema is True:
+                signals_missing.append(
+                    f"overheated SHORT: условия есть, но цена выше EMA-200 → заблокирован"
+                )
+            else:
+                sc = compute_signal_score(
+                    "overheated_24h", "sell", rsi=rsi, above_ema=above_ema, pct24=pct24,
+                )
+                min_sc = MIN_SCORE_BY_TYPE.get("overheated_24h", MIN_ALERT_SCORE)
+                if sc >= min_sc:
+                    signals_triggered.append((
+                        "overheated_24h", "SHORT", sc,
+                        f"+{pct24:.1f}% за 24ч (порог +{oh_threshold:.1f}%) + RSI {rsi:.1f}",
+                    ))
+                else:
+                    signals_missing.append(
+                        f"overheated SHORT: score {sc} < {min_sc} (нужно усиление)"
+                    )
+        else:
+            parts_missing = []
+            if pct24 is not None and pct24 < oh_threshold:
+                parts_missing.append(f"рост {pct24:+.1f}% < порога {oh_threshold:.1f}%")
+            if rsi is not None and rsi < RSI_OVERBOUGHT:
+                parts_missing.append(f"RSI {rsi:.1f} < {RSI_OVERBOUGHT}")
+            if parts_missing:
+                signals_missing.append("overheated SHORT: " + ", ".join(parts_missing))
+
+    # — oversold_24h LONG —
+    if pct24 is not None and rsi is not None:
+        if pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
+            sc = compute_signal_score(
+                "oversold_24h", "buy", rsi=rsi, above_ema=above_ema, pct24=pct24,
+            )
+            if sc >= MIN_SCORE_BY_TYPE.get("oversold_24h", MIN_ALERT_SCORE):
+                signals_triggered.append((
+                    "oversold_24h", "LONG", sc,
+                    f"{pct24:.1f}% за 24ч (порог {os_threshold:.1f}%) + RSI {rsi:.1f}",
+                ))
+            else:
+                signals_missing.append(f"oversold LONG: score {sc} слишком низкий")
+        else:
+            parts_missing = []
+            if pct24 is not None and pct24 > os_threshold:
+                parts_missing.append(f"падение {pct24:.1f}% > порога {os_threshold:.1f}%")
+            if rsi is not None and rsi > RSI_OVERSOLD:
+                parts_missing.append(f"RSI {rsi:.1f} > {RSI_OVERSOLD}")
+            if parts_missing:
+                signals_missing.append("oversold LONG: " + ", ".join(parts_missing))
+
+    # — momentum_down SHORT (15m) —
+    if pct_15m is not None:
+        DISABLED = {-2.0, -3.0}
+        active = sorted(t for t in MOMENTUM_THRESHOLDS_DOWN if t not in DISABLED)
+        for threshold in active:  # ascending: -10, -5 …
+            if pct_15m <= threshold:
+                if above_ema is True:
+                    signals_missing.append(
+                        f"momentum_down SHORT ({threshold:.0f}%): цена выше EMA-200 → заблокирован"
+                    )
+                elif rsi is not None and rsi < 60:
+                    signals_missing.append(
+                        f"momentum_down SHORT: RSI {rsi:.1f} < 60 → заблокирован"
+                    )
+                else:
+                    signals_triggered.append((
+                        "momentum_down", "SHORT", 65,
+                        f"{pct_15m:.1f}% за 15м (порог {threshold:.0f}%)",
+                    ))
+                break
+        else:
+            if pct_15m > 0:
+                signals_missing.append(
+                    f"momentum_down: рост +{pct_15m:.1f}% за 15м, нет нисходящего движения"
+                )
+            else:
+                signals_missing.append(
+                    f"momentum_down: −{abs(pct_15m):.1f}% за 15м, "
+                    f"не достигает минимального порога ({min(active):.0f}%)"
+                )
+
+    # — confluence —
+    near_high = _near_24h_high(ticker)
+    c_flags: list[str] = []
+    if rsi is not None and rsi >= RSI_OVERBOUGHT:
+        c_flags.append(f"RSI {rsi:.0f} перекуплен")
+    elif rsi is not None and rsi <= RSI_OVERSOLD:
+        c_flags.append(f"RSI {rsi:.0f} перепродан")
+    if spike_ratio is not None and spike_ratio >= VOLUME_SPIKE_MULTIPLIER:
+        c_flags.append(f"объём {spike_ratio:.1f}×")
+    if near_high:
+        c_flags.append("вблизи 24ч макс.")
+
+    if len(c_flags) >= CONFLUENCE_MIN_SIGNALS:
+        rec_line, _ = make_recommendation(
+            rsi=rsi,
+            spike_ratio=spike_ratio,
+            broke_weekly=False,
+            broke_monthly=False,
+            near_24h_high=near_high,
+            above_ema200=above_ema,
+        )
+        rec_label = _rec_label(rec_line)
+        if rec_label == "SHORT" and above_ema is True:
+            signals_missing.append(
+                f"confluence SHORT: блокирован EMA-200 (цена выше)"
+            )
+        elif rec_label in ("LONG", "SHORT"):
+            sc_side = "sell" if rec_label == "SHORT" else "buy"
+            sc = compute_signal_score(
+                "confluence", sc_side,
+                rsi=rsi, above_ema=above_ema, spike_ratio=spike_ratio,
+            )
+            signals_triggered.append((
+                "confluence", rec_label, sc,
+                " + ".join(c_flags),
+            ))
+        else:
+            signals_missing.append(
+                f"confluence: смешанные сигналы ({', '.join(c_flags)})"
+            )
+    else:
+        need = CONFLUENCE_MIN_SIGNALS - len(c_flags)
+        if c_flags:
+            signals_missing.append(
+                f"confluence: {', '.join(c_flags)} — нужно ещё {need} сигнал(а)"
+            )
+        else:
+            signals_missing.append("confluence: нет активных сигналов (RSI нейтраль, объём норм.)")
+
+    # ── Best signal ────────────────────────────────────────────────────────
+    best: tuple[str, str, int, str] | None = None
+    if signals_triggered:
+        best = max(signals_triggered, key=lambda x: x[2])
+
+    sig_type  = best[0] if best else None
+    direction = best[1] if best else None
+    score     = best[2] if best else None
+    reason    = best[3] if best else None
+
+    # ── TP / SL / R:R ─────────────────────────────────────────────────────
+    sl_price = tp_price = rr = None
+    if price and direction:
+        if atr and atr > 0:
+            if direction == "LONG":
+                sl_price = price - 1.5 * atr
+                tp_price = price + 3.0 * atr
+            else:
+                sl_price = price + 1.5 * atr
+                tp_price = price - 3.0 * atr
+        else:
+            # Fallback: fixed SL 2% / TP 4%
+            if direction == "LONG":
+                sl_price = price * 0.98
+                tp_price = price * 1.04
+            else:
+                sl_price = price * 1.02
+                tp_price = price * 0.96
+        if sl_price and tp_price and sl_price > 0 and tp_price > 0:
+            rr = abs(tp_price - price) / abs(sl_price - price)
+
+    # ── Trend alignment ───────────────────────────────────────────────────
+    trend_aligned: bool | None = None
+    if direction:
+        if (direction == "LONG" and regime == "BULL") or (direction == "SHORT" and regime == "BEAR"):
+            trend_aligned = True
+        elif (direction == "LONG" and regime == "BEAR") or (direction == "SHORT" and regime == "BULL"):
+            trend_aligned = False
+
+    # ── Build message ──────────────────────────────────────────────────────
+    lines: list[str] = [f"🔍 <b>АНАЛИЗ {symbol}</b>", ""]
+
+    # 1. Current data
+    lines.append("📊 <b>ТЕКУЩИЕ ДАННЫЕ:</b>")
+    lines.append(f"Цена: <b>${price:,.6g}</b>")
+    if volume_usdt is not None:
+        if volume_usdt >= 1_000_000:
+            vol_str = f"${volume_usdt / 1_000_000:.1f}M"
+        else:
+            vol_str = f"${volume_usdt / 1_000:.0f}K"
+        lines.append(f"Объём 24ч: <b>{vol_str}</b>")
+    if pct24 is not None:
+        sign = "+" if pct24 >= 0 else ""
+        lines.append(f"Изменение 24ч: <b>{sign}{pct24:.2f}%</b>")
+    lines.append("")
+
+    # 2. Indicators
+    lines.append("📈 <b>ИНДИКАТОРЫ:</b>")
+    if rsi is not None:
+        rsi_lbl = (
+            "перекуплен 🔥" if rsi >= RSI_OVERBOUGHT
+            else "перепродан 🧊" if rsi <= RSI_OVERSOLD
+            else "нейтраль"
+        )
+        lines.append(f"RSI (14): <b>{rsi:.1f}</b> → {rsi_lbl}")
+    else:
+        lines.append("RSI (14): <i>нет данных</i>")
+
+    if ema200 is not None and ema_pct is not None:
+        ema_dir = "выше ↑" if above_ema else "ниже ↓"
+        lines.append(f"EMA-200 (4ч): <b>${ema200:,.6g}</b>")
+        lines.append(f"Цена vs EMA: <b>{ema_dir}</b> на {abs(ema_pct):.2f}%")
+    else:
+        lines.append("EMA-200 (4ч): <i>нет данных</i>")
+
+    if spike_ratio is not None:
+        vol_lbl = " 🚀" if spike_ratio >= VOLUME_SPIKE_MULTIPLIER else ""
+        lines.append(f"Volume Spike 5м: <b>{spike_ratio:.1f}×</b> от среднего{vol_lbl}")
+    else:
+        lines.append("Volume Spike 5м: <i>нет данных</i>")
+
+    if supertrend is not None:
+        st_icon = "🟢" if supertrend == "UP" else "🔴"
+        lines.append(f"Supertrend: {st_icon} <b>{supertrend}</b>")
+    else:
+        lines.append("Supertrend: <i>нет данных</i>")
+    lines.append("")
+
+    # 3. Recommendation
+    lines.append("🎯 <b>РЕКОМЕНДАЦИЯ:</b>")
+    if direction and reason and score is not None:
+        dir_icon = "📈" if direction == "LONG" else "📉"
+        type_labels = {
+            "overheated_24h": "перегрев 24ч",
+            "oversold_24h":   "перепроданность 24ч",
+            "momentum_down":  "импульс вниз 15м",
+            "confluence":     "конфлюэнс",
+        }
+        type_lbl = type_labels.get(sig_type or "", sig_type or "")
+        lines.append(f"Сигнал: {dir_icon} <b>{direction}</b> ({type_lbl})")
+        lines.append(f"Причина: {reason}")
+        lines.append(f"Сила: <b>{score}/100</b> ({_strength_label(score)})")
+    else:
+        lines.append("Сигнал: <b>НЕТ СИГНАЛА</b>")
+        # Pick most informative missing condition
+        if signals_missing:
+            # Prefer the one that got closest (has numeric thresholds)
+            lines.append(f"Причина: {signals_missing[0]}")
+        lines.append("Сила: —")
+    lines.append("")
+
+    # 4. Risk management
+    lines.append("🛡️ <b>УПРАВЛЕНИЕ РИСКОМ:</b>")
+    if sl_price and tp_price and rr and direction and price:
+        sl_pct_val = abs(sl_price - price) / price * 100
+        tp_pct_val = abs(tp_price - price) / price * 100
+        sl_sign = "+" if direction == "SHORT" else "−"
+        tp_sign = "+" if direction == "LONG" else "−"
+        lines.append(f"Stop Loss: <b>${sl_price:,.6g}</b> ({sl_sign}{sl_pct_val:.2f}%)")
+        lines.append(f"Take Profit: <b>${tp_price:,.6g}</b> ({tp_sign}{tp_pct_val:.2f}%)")
+        lines.append(f"R/R: 1:{rr:.1f}")
+    else:
+        lines.append("Stop Loss / Take Profit: нет активного сигнала")
+    lines.append("")
+
+    # 5. Market phase
+    regime_icons = {"BULL": "🟢", "BEAR": "🔴", "NEUTRAL": "⚪"}
+    regime_icon = regime_icons.get(regime, "⚪")
+    lines.append(f"🌍 <b>ФАЗА РЫНКА:</b> {regime_icon} {regime}")
+    if direction:
+        if trend_aligned is True:
+            lines.append("Статус: ✅ По тренду")
+        elif trend_aligned is False:
+            lines.append("Статус: ⚠️ Против тренда")
+        else:
+            lines.append("Статус: ➡️ Тренд нейтральный")
+
+    # 6. Notes
+    notes: list[str] = []
+    if above_ema is True and direction == "SHORT":
+        notes.append("цена выше EMA-200 — часть SHORT-сигналов заблокирована ботом")
+    elif above_ema is False and direction == "LONG":
+        notes.append("цена ниже EMA-200 — возможно продолжение нисходящего тренда")
+    if supertrend and direction:
+        st_aligned = (supertrend == "UP" and direction == "LONG") or \
+                     (supertrend == "DOWN" and direction == "SHORT")
+        if not st_aligned:
+            notes.append(f"Supertrend {supertrend} расходится с сигналом {direction}")
+    if not direction and len(signals_missing) > 1:
+        notes.append("нет ни одного активного сигнала — монета в нейтральной зоне")
+
+    if notes:
+        lines.append("")
+        lines.append(f"💡 <i>Заметка: {notes[0]}</i>")
 
     _telegram_send(chat_id, "\n".join(lines))
 
