@@ -89,7 +89,7 @@ state = {
 # ---------------------------------------------------------------------------
 RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
-CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
+CONFLUENCE_MIN_SIGNALS = 3         # only alert when ≥ this many signals fire on same coin in one cycle
 COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
 COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
 COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
@@ -1786,15 +1786,6 @@ def send_alert_with_log(
     if is_hidden(alert_type, symbol):
         logger.info("Suppressed %s/%s (hidden by user prefs)", symbol, alert_type)
         return (False, None)
-    # SL re-entry block: suppress all new signals on a symbol for 12h after its SL fires
-    with state_lock:
-        sl_ts = state["sl_blocked"].get(symbol, 0)
-    if time.time() - sl_ts < SL_REENTRY_COOLDOWN:
-        remaining = int((SL_REENTRY_COOLDOWN - (time.time() - sl_ts)) / 3600 * 10) / 10
-        logger.info(
-            "Suppressed %s/%s (SL block, %.1fh remaining)", symbol, alert_type, remaining,
-        )
-        return (False, None)
     with state_lock:
         if state["silenced"]:
             logger.info("Suppressed %s/%s (silenced): %s", symbol, alert_type, body_text[:60])
@@ -2968,6 +2959,7 @@ def run_checks():
         "vol_spikes": 0, "weekly_highs": 0, "monthly_highs": 0,
         "confluence_alerts": 0,        # multi-signal alerts actually sent
         "confluence_ema_blocked": 0,   # confluence SHORTs suppressed by EMA-200 filter
+        "confluence_btc_blocked": 0,   # confluence signals suppressed by BTC direction filter
         "single_signals_skipped": 0,   # coins with only 1 signal — suppressed
         "momentum_alerts": 0,          # standalone 15-min price-momentum alerts
         "momentum_ema_blocked": 0,     # momentum SHORTs suppressed by EMA-200 filter
@@ -3235,8 +3227,8 @@ def run_checks():
                 )
                 rec_label = _rec_label(rec_line)
 
-                # EMA-200 trend filter: suppress confluence SHORT signals when
-                # the coin is in an uptrend (price above 4h EMA-200).
+                # EMA-200 trend filter
+                # SHORT: suppress if price is above EMA-200 (uptrend — don't fight it)
                 if rec_label == "SHORT" and above_ema is True:
                     logger.debug(
                         "Confluence SHORT suppressed by EMA-200 filter: "
@@ -3245,6 +3237,48 @@ def run_checks():
                     )
                     summary["confluence_ema_blocked"] += 1
                     continue
+                # LONG: suppress if price is below EMA-200 (downtrend — don't catch falling knives)
+                if rec_label == "LONG" and above_ema is False:
+                    logger.debug(
+                        "Confluence LONG suppressed by EMA-200 filter: "
+                        "%s price=%.6g ema=%.6g (below EMA)",
+                        sym, b["price"] or 0, ema or 0,
+                    )
+                    summary["confluence_ema_blocked"] += 1
+                    continue
+
+                # BTC direction filter — alts follow BTC short-term.
+                # RSI of BTC (1h) tells us if BTC is in an up or down swing right now.
+                # 24h BTC % is a backup for when RSI is in neutral zone.
+                btc_rsi = rsi_map.get("BTCUSDT")
+                if rec_label == "SHORT":
+                    # BTC pumping → shorting alts is risky (they'll be lifted too)
+                    btc_bullish = (
+                        (btc_rsi is not None and btc_rsi > 55) or
+                        (btc_pct24 is not None and btc_pct24 > 2.0)
+                    )
+                    if btc_bullish:
+                        logger.debug(
+                            "Confluence SHORT suppressed by BTC filter: %s "
+                            "BTC RSI=%.1f 24h=%.1f%%",
+                            sym, btc_rsi or 0, btc_pct24 or 0,
+                        )
+                        summary["confluence_btc_blocked"] += 1
+                        continue
+                elif rec_label == "LONG":
+                    # BTC falling → longing alts is risky (they'll be dragged down too)
+                    btc_bearish = (
+                        (btc_rsi is not None and btc_rsi < 45) or
+                        (btc_pct24 is not None and btc_pct24 < -2.0)
+                    )
+                    if btc_bearish:
+                        logger.debug(
+                            "Confluence LONG suppressed by BTC filter: %s "
+                            "BTC RSI=%.1f 24h=%.1f%%",
+                            sym, btc_rsi or 0, btc_pct24 or 0,
+                        )
+                        summary["confluence_btc_blocked"] += 1
+                        continue
 
                 side_for_score = (
                     "buy" if rec_label == "LONG"
