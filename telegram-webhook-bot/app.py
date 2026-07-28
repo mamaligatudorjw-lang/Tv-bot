@@ -2476,13 +2476,14 @@ def check_momentum(
                 continue
 
             # C. RSI confirmation: a momentum-down signal has better edge when
-            #    RSI was elevated (≥60) before the drop — confirms the fall is
-            #    from an overbought level rather than a random wick.
+            #    RSI was elevated before the drop — confirms the fall is from a
+            #    heated level, not a random wick.
+            #    Threshold lowered 60→50: ≥60 was too strict (fired only 3 times ever).
             if rsi_map is not None:
                 rsi_val = rsi_map.get(symbol)
-                if rsi_val is not None and rsi_val < 60:
+                if rsi_val is not None and rsi_val < 50:
                     logger.debug(
-                        "Momentum short suppressed by RSI filter: %s rsi=%.1f < 60",
+                        "Momentum short suppressed by RSI filter: %s rsi=%.1f < 50",
                         symbol, rsi_val,
                     )
                     continue
