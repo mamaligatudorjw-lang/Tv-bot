@@ -157,7 +157,8 @@ HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win (leg
 HIT_RATE_RETENTION_DAYS = 120
 # SL/TP for simulated P&L in hit-rate stats (matches backtest defaults)
 HIT_RATE_SL_PCT = 2.0              # stop-loss %
-HIT_RATE_TP_PCT = 4.0              # take-profit %
+HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
+HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
 
 
 # ---------------------------------------------------------------------------
@@ -1969,8 +1970,8 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
             # agg[key] = {total, horizons: {label: {tp, sl, timeout, pnl_sum, n}}}
             agg: dict[tuple, dict] = {}
             sl_pct = HIT_RATE_SL_PCT
-            tp_pct = HIT_RATE_TP_PCT
             for atype, rec, p0, p3m, p5m, p15, p1h, p4h in cursor:
+                tp_pct = HIT_RATE_TP_PCT_SHORT if rec == "SHORT" else HIT_RATE_TP_PCT
                 if p0 is None or p0 <= 0:
                     continue
                 key = (atype, rec or "—")
@@ -2015,7 +2016,7 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
                 "recommendation": rec,
                 "total":         a["total"],
                 "sl_pct":        HIT_RATE_SL_PCT,
-                "tp_pct":        HIT_RATE_TP_PCT,
+                "tp_pct":        HIT_RATE_TP_PCT_SHORT if rec == "SHORT" else HIT_RATE_TP_PCT,
                 "horizons":      a["horizons"],
             })
         out.sort(key=lambda r: (-r["total"], r["alert_type"]))
@@ -3328,7 +3329,7 @@ def _auto_start_monitor(
         tp_price = entry * (1 + HIT_RATE_TP_PCT / 100)
     else:
         sl_price = entry * (1 + HIT_RATE_SL_PCT / 100)
-        tp_price = entry * (1 - HIT_RATE_TP_PCT / 100)
+        tp_price = entry * (1 - HIT_RATE_TP_PCT_SHORT / 100)
     ts_open = int(time.time())
 
     try:
@@ -4402,13 +4403,13 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
                 sl_price = price + 1.5 * atr
                 tp_price = price - 3.0 * atr
         else:
-            # Fallback: fixed SL 2% / TP 4%
+            # Fallback: fixed SL 2% / TP 4% LONG, TP 6% SHORT
             if direction == "LONG":
                 sl_price = price * 0.98
-                tp_price = price * 1.04
+                tp_price = price * (1 + HIT_RATE_TP_PCT / 100)
             else:
                 sl_price = price * 1.02
-                tp_price = price * 0.96
+                tp_price = price * (1 - HIT_RATE_TP_PCT_SHORT / 100)
         if sl_price and tp_price and sl_price > 0 and tp_price > 0:
             rr = abs(tp_price - price) / abs(sl_price - price)
 
