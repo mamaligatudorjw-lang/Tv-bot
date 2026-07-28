@@ -99,6 +99,11 @@ MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
 SL_REENTRY_COOLDOWN  = 43200      # 12h block on ALL new signals after an SL hit
 
+# --- Reversal confirmation for SHORT signals ---
+# A SHORT is only sent if price has already pulled back ≥ this % from its
+# 24-hour high.  Prevents shorting a coin that is still actively rising.
+SHORT_REVERSAL_CONFIRM_PCT = 1.5  # price must be ≥ 1.5% below 24h high
+
 # --- New listing pump→dump SHORT (TEST) ---
 NEW_LISTING_WINDOW_H     = 48     # only watch coins listed in last 48h
 NEW_LISTING_PUMP_PCT     = 20.0   # coin must be ≥+20% above its listing price
@@ -2531,13 +2536,14 @@ def check_momentum(
 def check_overheated_oversold(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, int]:
     """Standalone "overheated" (24h >= +20% AND RSI >= 70) and "oversold"
     (24h <= -20% AND RSI <= 30) alerts. Bypass confluence.
+    Returns: sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh
     """
     if not tickers:
-        return 0, 0, 0
-    sent_oh, sent_os, ema_blocked_oh = 0, 0, 0
+        return 0, 0, 0, 0
+    sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh = 0, 0, 0, 0
     now = time.time()
     for symbol, t in tickers.items():
         rsi = rsi_map.get(symbol)
@@ -2575,6 +2581,24 @@ def check_overheated_oversold(
                 )
                 ema_blocked_oh += 1
                 continue
+
+            # Reversal confirmation: price must have pulled back ≥ 1.5% from
+            # its 24h high before we short. Prevents shorting a rising coin.
+            try:
+                high_24h = float(t["highPrice"])
+                if high_24h > 0:
+                    pullback_pct = (high_24h - price) / high_24h * 100.0
+                    if pullback_pct < SHORT_REVERSAL_CONFIRM_PCT:
+                        logger.debug(
+                            "Overheated short suppressed by reversal filter: "
+                            "%s price=%.6g high=%.6g pullback=%.2f%%",
+                            symbol, price, high_24h, pullback_pct,
+                        )
+                        reversal_blocked_oh += 1
+                        continue
+            except (ValueError, KeyError):
+                pass
+
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
             regime = state.get("market_regime", "NEUTRAL")
@@ -3087,8 +3111,10 @@ def run_checks():
         "rsi_overbought": 0, "rsi_oversold": 0,
         "vol_spikes": 0, "weekly_highs": 0, "monthly_highs": 0,
         "confluence_alerts": 0,        # multi-signal alerts actually sent
-        "confluence_ema_blocked": 0,   # confluence SHORTs suppressed by EMA-200 filter
-        "confluence_btc_blocked": 0,   # confluence signals suppressed by BTC direction filter
+        "confluence_ema_blocked": 0,         # confluence SHORTs suppressed by EMA-200 filter
+        "confluence_btc_blocked": 0,         # confluence signals suppressed by BTC direction filter
+        "confluence_reversal_blocked": 0,    # confluence SHORTs suppressed: price still at 24h high
+        "overheated_reversal_blocked": 0,    # overheated SHORTs suppressed: price still at 24h high
         "single_signals_skipped": 0,   # coins with only 1 signal — suppressed
         "momentum_alerts": 0,          # standalone 15-min price-momentum alerts
         "momentum_ema_blocked": 0,     # momentum SHORTs suppressed by EMA-200 filter
@@ -3181,7 +3207,8 @@ def run_checks():
                 summary["momentum_ema_blocked"] = mom_ema_blocked
 
                 # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
-                oh_n, os_n, oh_ema_blocked = check_overheated_oversold(tickers, rsi_map)
+                oh_n, os_n, oh_ema_blocked, oh_reversal_blocked = check_overheated_oversold(tickers, rsi_map)
+                summary["overheated_reversal_blocked"] = oh_reversal_blocked
                 summary["overheated_alerts"] = oh_n
                 summary["overheated_ema_blocked"] = oh_ema_blocked
                 summary["oversold_alerts"] = os_n
@@ -3412,6 +3439,28 @@ def run_checks():
                         )
                         summary["confluence_btc_blocked"] += 1
                         continue
+
+                # Reversal confirmation filter for SHORT signals.
+                # Don't short a coin that is still at/near its 24h high —
+                # wait for price to pull back ≥ SHORT_REVERSAL_CONFIRM_PCT
+                # from the peak, confirming the move has actually turned.
+                if rec_label == "SHORT" and b["price"] is not None and tickers:
+                    t_conf = tickers.get(sym)
+                    if t_conf is not None:
+                        try:
+                            high_24h = float(t_conf["highPrice"])
+                            if high_24h > 0:
+                                pullback_pct = (high_24h - b["price"]) / high_24h * 100.0
+                                if pullback_pct < SHORT_REVERSAL_CONFIRM_PCT:
+                                    logger.debug(
+                                        "Confluence SHORT suppressed by reversal filter: "
+                                        "%s price=%.6g high=%.6g pullback=%.2f%%",
+                                        sym, b["price"], high_24h, pullback_pct,
+                                    )
+                                    summary["confluence_reversal_blocked"] += 1
+                                    continue
+                        except (ValueError, KeyError):
+                            pass
 
                 side_for_score = (
                     "buy" if rec_label == "LONG"
