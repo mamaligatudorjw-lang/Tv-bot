@@ -70,6 +70,7 @@ state = {
     "last_momentum_alerted": {},       # symbol -> {threshold: ts}
     "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
+    "last_breakdown_alerted": {},      # symbol -> ts (breakdown_short TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
@@ -1702,7 +1703,14 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     "overheated_24h":   70,   # only strong setups (vs global 60)
     "momentum_down_5":  65,
     "momentum_down_10": 65,
+    "breakdown_short":  55,   # TEST signal — lower bar while calibrating
 }
+
+# --- Breakdown continuation SHORT (TEST) ---
+BREAKDOWN_SHORT_PCT  = -10.0   # 24h drop must be ≤ this to qualify
+BREAKDOWN_RSI_MIN    = 30.0    # RSI must be above (oversold coins excluded — different setup)
+BREAKDOWN_RSI_MAX    = 58.0    # RSI must be below (confirms selling pressure, not neutral)
+BREAKDOWN_COOLDOWN   = 28800   # 8h cooldown per coin
 
 # Dynamic cooldown for overheated_24h based on market regime:
 # in a bull market the same coin can re-trigger quickly — use longer gap.
@@ -2603,6 +2611,111 @@ def check_overheated_oversold(
     return sent_oh, sent_os, ema_blocked_oh
 
 
+def check_breakdown_short(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> int:
+    """🧪 ТЕСТ: Breakdown continuation SHORT.
+
+    Fires when:
+      - 24h drop ≤ BREAKDOWN_SHORT_PCT (−10%)  — сильное дневное движение вниз
+      - Price < EMA-200 (4h)                    — подтверждённый нисходящий тренд
+      - RSI in (BREAKDOWN_RSI_MIN, BREAKDOWN_RSI_MAX) = (30, 58)
+          above 30 = не перепродана, ещё есть куда падать
+          below 58 = давление продавцов подтверждено
+      - Volume ≥ MIN_VOLUME_USDT                — ликвидная монета
+
+    Цель: ловить монеты типа BANKUSDT, которые уже сломали структуру и
+    продолжают падение — в отличие от overheated (шорт от вершины).
+    Помечается [ТЕСТ] до накопления статистики.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24: float | None = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    for symbol, t in tickers.items():
+        rsi = rsi_map.get(symbol)
+        if rsi is None:
+            continue
+        try:
+            pct24 = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        # Liquidity filter
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        # 1. Strong 24h drop
+        if pct24 > BREAKDOWN_SHORT_PCT:
+            continue
+
+        # 2. RSI in "room to fall" zone — not oversold, not neutral
+        if not (BREAKDOWN_RSI_MIN < rsi < BREAKDOWN_RSI_MAX):
+            continue
+
+        # 3. Price below EMA-200 — confirmed downtrend
+        with state_lock:
+            ema = state["ema200_4h"].get(symbol)
+            atr = state["atr_4h"].get(symbol)
+        if ema is None or price >= ema:
+            continue
+
+        # Cooldown
+        with state_lock:
+            last = state["last_breakdown_alerted"].get(symbol, 0)
+        if now - last < BREAKDOWN_COOLDOWN:
+            continue
+
+        ema_pct = (ema - price) / ema * 100.0   # how far below EMA (positive = below)
+
+        score = compute_signal_score(
+            "breakdown_short", "sell",
+            rsi=rsi, above_ema=False, pct24=pct24, btc_pct24=btc_pct24,
+        )
+        min_score = MIN_SCORE_BY_TYPE.get("breakdown_short", MIN_ALERT_SCORE)
+        if score < min_score:
+            logger.debug(
+                "Suppressed %s/breakdown_short (score=%d < min %d)", symbol, score, min_score,
+            )
+            continue
+
+        sl_tp = _format_sl_tp("sell", price, atr)
+        body = (
+            f"🧪 <b>[ТЕСТ] ПРОБОЙ ВНИЗ — шорт продолжается</b>\n"
+            f"Монета в нисходящем тренде, импульс не исчерпан\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"📉 24ч: <b>{pct24:.1f}%</b>\n"
+            f"📊 RSI: <b>{rsi:.1f}</b> — давление продавцов, не перепродан\n"
+            f"📍 Ниже EMA-200: <b>{ema_pct:.1f}%</b>\n"
+            f"💰 Цена: <b>${price:,.6g}</b>\n"
+            f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
+        )
+        delivered, _aid = send_alert_with_log(
+            symbol, "breakdown_short", "SHORT", price, body, score,
+        )
+        if delivered:
+            with state_lock:
+                state["last_breakdown_alerted"][symbol] = now
+            logger.info("Breakdown SHORT alert sent: %s pct24=%.1f rsi=%.1f", symbol, pct24, rsi)
+            sent += 1
+
+    return sent
+
+
 def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     """Volume-spike + CRSI combo. For any pair in the cached
     state['volume_ranking'] (which is built from the broadened daily refresh,
@@ -2740,6 +2853,7 @@ def run_checks():
         "overheated_ema_blocked": 0,   # overheated SHORTs suppressed by EMA-200 filter
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
+        "breakdown_alerts": 0,         # TEST: breakdown continuation SHORT
         "errors": [],
     }
 
@@ -2830,6 +2944,9 @@ def run_checks():
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
                 # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
                 summary["vol_surge_alerts"] = check_volume_surge_crsi(tickers)
+
+                # 6d. TEST: Breakdown continuation SHORT (drop ≥10% + below EMA + RSI 30-58)
+                summary["breakdown_alerts"] = check_breakdown_short(tickers, rsi_map)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 with state_lock:
