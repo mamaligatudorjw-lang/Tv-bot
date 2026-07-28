@@ -152,7 +152,7 @@ ALERTS_DB_BACKUP_KEEP = 24
 BOT_STATE_PATH = os.path.join(
     os.path.dirname(__file__) or ".", ".bot_state.json"
 )
-HIT_RATE_INTERVALS = ((900, "15м"), (3600, "1ч"), (14400, "4ч"))
+HIT_RATE_INTERVALS = ((180, "3м"), (300, "5м"), (900, "15м"), (3600, "1ч"), (14400, "4ч"))
 HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win (legacy, kept for compat)
 HIT_RATE_RETENTION_DAYS = 120
 # SL/TP for simulated P&L in hit-rate stats (matches backtest defaults)
@@ -1189,17 +1189,24 @@ def _get_db() -> sqlite3.Connection:
                 alert_type TEXT NOT NULL,
                 recommendation TEXT,
                 price_at_alert REAL NOT NULL,
+                price_3m  REAL,
+                price_5m  REAL,
                 price_15m REAL,
-                price_1h REAL,
-                price_4h REAL
+                price_1h  REAL,
+                price_4h  REAL
             )
         """)
         _db_conn.execute("CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts)")
-        # Migrate: add `score` column on existing alerts table if missing
-        try:
-            _db_conn.execute("ALTER TABLE alerts ADD COLUMN score INTEGER")
-        except sqlite3.OperationalError:
-            pass
+        # Migrate: add columns on existing alerts table if missing
+        for _col, _coltype in (
+            ("score",    "INTEGER"),
+            ("price_3m", "REAL"),
+            ("price_5m", "REAL"),
+        ):
+            try:
+                _db_conn.execute(f"ALTER TABLE alerts ADD COLUMN {_col} {_coltype}")
+            except sqlite3.OperationalError:
+                pass
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_items (
                 kind TEXT NOT NULL,
@@ -1287,28 +1294,37 @@ def log_alert(symbol: str, alert_type: str, recommendation: str | None, price: f
 
 
 def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
-    """Back-fill follow-up prices for past alerts whose 15m/1h/4h windows have
+    """Back-fill follow-up prices for past alerts whose time windows have
     elapsed, using the just-fetched tickers map. Cheap to call every cycle.
+    Supports five snapshot horizons: 3м / 5м / 15м / 1ч / 4ч.
+    Note: 3m/5m prices are captured at the first cycle tick *after* the
+    threshold passes (≈ 3–10 min after the signal), which is a known
+    approximation inherent in the 5-min polling architecture.
     """
     if not tickers:
         return
     now_ts = int(time.time())
-    c15 = now_ts - HIT_RATE_INTERVALS[0][0]
-    c1h = now_ts - HIT_RATE_INTERVALS[1][0]
-    c4h = now_ts - HIT_RATE_INTERVALS[2][0]
+    c3m  = now_ts - HIT_RATE_INTERVALS[0][0]   # 180 s
+    c5m  = now_ts - HIT_RATE_INTERVALS[1][0]   # 300 s
+    c15  = now_ts - HIT_RATE_INTERVALS[2][0]   # 900 s
+    c1h  = now_ts - HIT_RATE_INTERVALS[3][0]   # 3 600 s
+    c4h  = now_ts - HIT_RATE_INTERVALS[4][0]   # 14 400 s
     retain_cutoff = now_ts - HIT_RATE_RETENTION_DAYS * 86400
     try:
         with _db_lock:
             conn = _get_db()
             rows = conn.execute(
-                "SELECT id, symbol, price_15m, price_1h, price_4h, ts FROM alerts "
-                "WHERE (price_15m IS NULL AND ts <= ?) "
+                "SELECT id, symbol, price_3m, price_5m, price_15m, price_1h, price_4h, ts "
+                "FROM alerts "
+                "WHERE (price_3m  IS NULL AND ts <= ?) "
+                "   OR (price_5m  IS NULL AND ts <= ?) "
+                "   OR (price_15m IS NULL AND ts <= ?) "
                 "   OR (price_1h  IS NULL AND ts <= ?) "
                 "   OR (price_4h  IS NULL AND ts <= ?)",
-                (c15, c1h, c4h),
+                (c3m, c5m, c15, c1h, c4h),
             ).fetchall()
             updates: list[tuple] = []
-            for row_id, symbol, p15, p1h, p4h, ts in rows:
+            for row_id, symbol, p3m, p5m, p15, p1h, p4h, ts in rows:
                 t = tickers.get(symbol)
                 if not t:
                     continue
@@ -1316,13 +1332,17 @@ def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
                     cur = float(t["lastPrice"])
                 except (ValueError, KeyError):
                     continue
-                new_p15 = cur if (p15 is None and ts <= c15) else p15
-                new_p1h = cur if (p1h is None and ts <= c1h) else p1h
-                new_p4h = cur if (p4h is None and ts <= c4h) else p4h
-                updates.append((new_p15, new_p1h, new_p4h, row_id))
+                new_p3m  = cur if (p3m  is None and ts <= c3m)  else p3m
+                new_p5m  = cur if (p5m  is None and ts <= c5m)  else p5m
+                new_p15  = cur if (p15  is None and ts <= c15)  else p15
+                new_p1h  = cur if (p1h  is None and ts <= c1h)  else p1h
+                new_p4h  = cur if (p4h  is None and ts <= c4h)  else p4h
+                updates.append((new_p3m, new_p5m, new_p15, new_p1h, new_p4h, row_id))
             if updates:
                 conn.executemany(
-                    "UPDATE alerts SET price_15m=?, price_1h=?, price_4h=? WHERE id=?",
+                    "UPDATE alerts SET "
+                    "price_3m=?, price_5m=?, price_15m=?, price_1h=?, price_4h=? "
+                    "WHERE id=?",
                     updates,
                 )
             conn.execute("DELETE FROM alerts WHERE ts < ?", (retain_cutoff,))
@@ -1890,7 +1910,8 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
         with _db_lock:
             conn = _get_db()
             cursor = conn.execute(
-                "SELECT alert_type, recommendation, price_at_alert, price_15m, price_1h, price_4h "
+                "SELECT alert_type, recommendation, price_at_alert, "
+                "price_3m, price_5m, price_15m, price_1h, price_4h "
                 "FROM alerts WHERE ts >= ?",
                 (cutoff,),
             )
@@ -1898,20 +1919,24 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
             agg: dict[tuple, dict] = {}
             sl_pct = HIT_RATE_SL_PCT
             tp_pct = HIT_RATE_TP_PCT
-            for atype, rec, p0, p15, p1h, p4h in cursor:
+            for atype, rec, p0, p3m, p5m, p15, p1h, p4h in cursor:
                 if p0 is None or p0 <= 0:
                     continue
                 key = (atype, rec or "—")
                 a = agg.setdefault(key, {
                     "total": 0,
                     "horizons": {
+                        "3м":  {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
+                        "5м":  {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
                         "15м": {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
                         "1ч":  {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
                         "4ч":  {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0},
                     },
                 })
                 a["total"] += 1
-                for label, p_future in (("15м", p15), ("1ч", p1h), ("4ч", p4h)):
+                for label, p_future in (
+                    ("3м", p3m), ("5м", p5m), ("15м", p15), ("1ч", p1h), ("4ч", p4h)
+                ):
                     if p_future is None:
                         continue
                     h = a["horizons"][label]
@@ -1929,6 +1954,11 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
                             pct = -pct
                         h["pnl_sum"] += pct
         for (atype, rec), a in agg.items():
+            # Ensure all five horizon keys are always present (even if no data)
+            for _lbl in ("3м", "5м", "15м", "1ч", "4ч"):
+                a["horizons"].setdefault(
+                    _lbl, {"tp": 0, "sl": 0, "timeout": 0, "pnl_sum": 0.0, "n": 0}
+                )
             out.append({
                 "alert_type":    atype,
                 "recommendation": rec,
@@ -3569,11 +3599,15 @@ def handle_stats_command(chat_id: int) -> None:
         "",
     ]
     for r in stats:
-        h15 = r["horizons"]["15м"]
-        h1h = r["horizons"]["1ч"]
-        h4h = r["horizons"]["4ч"]
+        h3m  = r["horizons"]["3м"]
+        h5m  = r["horizons"]["5м"]
+        h15  = r["horizons"]["15м"]
+        h1h  = r["horizons"]["1ч"]
+        h4h  = r["horizons"]["4ч"]
         lines.append(
             f"<b>{r['alert_type']}</b> · {r['recommendation']} · {r['total']} алертов\n"
+            f"   3м: {fmt_horizon(h3m)}\n"
+            f"   5м: {fmt_horizon(h5m)}\n"
             f"  15м: {fmt_horizon(h15)}\n"
             f"   1ч: {fmt_horizon(h1h)}\n"
             f"   4ч: {fmt_horizon(h4h)}"
@@ -4183,14 +4217,14 @@ def api_signals_recent():
                 if last_id is None:
                     cur = conn.execute(
                         "SELECT id, ts, symbol, alert_type, recommendation, "
-                        "price_at_alert, price_15m, price_1h, price_4h, score "
+                        "price_at_alert, price_3m, price_5m, price_15m, price_1h, price_4h, score "
                         "FROM alerts ORDER BY id DESC LIMIT ?",
                         (page_size,),
                     )
                 else:
                     cur = conn.execute(
                         "SELECT id, ts, symbol, alert_type, recommendation, "
-                        "price_at_alert, price_15m, price_1h, price_4h, score "
+                        "price_at_alert, price_3m, price_5m, price_15m, price_1h, price_4h, score "
                         "FROM alerts WHERE id < ? ORDER BY id DESC LIMIT ?",
                         (last_id, page_size),
                     )
@@ -4211,10 +4245,12 @@ def api_signals_recent():
                         "recommendation": r[4],
                         "side": side,
                         "priceAtAlert": r[5],
-                        "price15m": r[6],
-                        "price1h": r[7],
-                        "price4h": r[8],
-                        "score": r[9],
+                        "price3m":  r[6],
+                        "price5m":  r[7],
+                        "price15m": r[8],
+                        "price1h":  r[9],
+                        "price4h":  r[10],
+                        "score":    r[11],
                     })
                     if len(signals) >= limit:
                         break
@@ -4298,14 +4334,16 @@ def api_signals_performance():
     now_ts = int(time.time())
     since = now_ts - 86400 * window_days
     # require at least 4h of settle time so the 4h follow-up could be filled
-    settled_before = now_ts - 4 * 3600
+    # 5-minute settle so even 3m/5m follow-ups can appear; longer horizons
+    # naturally have fewer follow-ups for recent signals — that is expected.
+    settled_before = now_ts - 5 * 60
 
     try:
         with _db_lock:
             conn = _get_db()
             rows = conn.execute(
                 "SELECT alert_type, recommendation, price_at_alert, "
-                "price_15m, price_1h, price_4h "
+                "price_3m, price_5m, price_15m, price_1h, price_4h "
                 "FROM alerts WHERE ts >= ? AND ts <= ?",
                 (since, settled_before),
             ).fetchall()
@@ -4314,7 +4352,7 @@ def api_signals_performance():
         return jsonify({"error": "db_error"}), 500
 
     buckets: dict[tuple[str, str], dict] = {}
-    for alert_type, rec, p0, p15, p1h, p4h in rows:
+    for alert_type, rec, p0, p3m, p5m, p15, p1h, p4h in rows:
         side = _classify_side(alert_type, rec)
         if side == "neutral":
             continue
@@ -4328,11 +4366,13 @@ def api_signals_performance():
             "count": 0,
             "horizons": {
                 h: {"followups": 0, "wins": 0, "sumReturn": 0.0}
-                for h in ("15m", "1h", "4h")
+                for h in ("3m", "5m", "15m", "1h", "4h")
             },
         })
         b["count"] += 1
-        for horizon, pf in (("15m", p15), ("1h", p1h), ("4h", p4h)):
+        for horizon, pf in (
+            ("3m", p3m), ("5m", p5m), ("15m", p15), ("1h", p1h), ("4h", p4h)
+        ):
             if pf is None or pf <= 0:
                 continue
             change = (pf - p0) / p0

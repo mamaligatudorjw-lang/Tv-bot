@@ -16,9 +16,11 @@ export interface Signal {
   recommendation: string | null;
   side: "buy" | "sell" | "neutral";
   priceAtAlert: number;
+  price3m:  number | null;
+  price5m:  number | null;
   price15m: number | null;
-  price1h: number | null;
-  price4h: number | null;
+  price1h:  number | null;
+  price4h:  number | null;
   score: number | null;
 }
 
@@ -38,7 +40,7 @@ export interface StatsResponse {
   }[];
 }
 
-export type Horizon = "15m" | "1h" | "4h";
+export type Horizon = "3m" | "5m" | "15m" | "1h" | "4h";
 
 export interface HorizonStat {
   followups: number;
