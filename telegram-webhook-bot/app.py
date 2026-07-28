@@ -4268,14 +4268,14 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
                     ))
                 else:
                     signals_missing.append(
-                        f"overheated SHORT: score {sc} < {min_sc} (нужно усиление)"
+                        f"overheated SHORT: score {sc} &lt; {min_sc} (нужно усиление)"
                     )
         else:
             parts_missing = []
             if pct24 is not None and pct24 < oh_threshold:
-                parts_missing.append(f"рост {pct24:+.1f}% < порога {oh_threshold:.1f}%")
+                parts_missing.append(f"рост {pct24:+.1f}% &lt; порога {oh_threshold:.1f}%")
             if rsi is not None and rsi < RSI_OVERBOUGHT:
-                parts_missing.append(f"RSI {rsi:.1f} < {RSI_OVERBOUGHT}")
+                parts_missing.append(f"RSI {rsi:.1f} &lt; {RSI_OVERBOUGHT}")
             if parts_missing:
                 signals_missing.append("overheated SHORT: " + ", ".join(parts_missing))
 
@@ -4295,9 +4295,9 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
         else:
             parts_missing = []
             if pct24 is not None and pct24 > os_threshold:
-                parts_missing.append(f"падение {pct24:.1f}% > порога {os_threshold:.1f}%")
+                parts_missing.append(f"падение {pct24:.1f}% &gt; порога {os_threshold:.1f}%")
             if rsi is not None and rsi > RSI_OVERSOLD:
-                parts_missing.append(f"RSI {rsi:.1f} > {RSI_OVERSOLD}")
+                parts_missing.append(f"RSI {rsi:.1f} &gt; {RSI_OVERSOLD}")
             if parts_missing:
                 signals_missing.append("oversold LONG: " + ", ".join(parts_missing))
 
@@ -4313,7 +4313,7 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
                     )
                 elif rsi is not None and rsi < 60:
                     signals_missing.append(
-                        f"momentum_down SHORT: RSI {rsi:.1f} < 60 → заблокирован"
+                        f"momentum_down SHORT: RSI {rsi:.1f} &lt; 60 → заблокирован"
                     )
                 else:
                     signals_triggered.append((
