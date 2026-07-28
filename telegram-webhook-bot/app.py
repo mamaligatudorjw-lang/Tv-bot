@@ -71,6 +71,7 @@ state = {
     "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
     "last_breakdown_alerted": {},      # symbol -> ts (breakdown_short TEST cooldown)
+    "last_momentum_long_alerted": {},  # symbol -> ts (momentum_long TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
@@ -1704,6 +1705,7 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     "momentum_down_5":  65,
     "momentum_down_10": 65,
     "breakdown_short":  55,   # TEST signal — lower bar while calibrating
+    "momentum_long":    55,   # TEST signal — mirror of breakdown_short for longs
 }
 
 # --- Breakdown continuation SHORT (TEST) ---
@@ -1711,6 +1713,12 @@ BREAKDOWN_SHORT_PCT  = -10.0   # 24h drop must be ≤ this to qualify
 BREAKDOWN_RSI_MIN    = 30.0    # RSI must be above (oversold coins excluded — different setup)
 BREAKDOWN_RSI_MAX    = 58.0    # RSI must be below (confirms selling pressure, not neutral)
 BREAKDOWN_COOLDOWN   = 28800   # 8h cooldown per coin
+
+# --- Momentum continuation LONG (TEST) ---
+MOMENTUM_LONG_PCT    = 10.0    # 24h rise must be ≥ this to qualify
+MOMENTUM_LONG_RSI_MIN = 42.0   # RSI must be above (confirms momentum, not dead-cat)
+MOMENTUM_LONG_RSI_MAX = 68.0   # RSI must be below overbought (still room to grow)
+MOMENTUM_LONG_COOLDOWN = 28800 # 8h cooldown per coin
 
 # Dynamic cooldown for overheated_24h based on market regime:
 # in a bull market the same coin can re-trigger quickly — use longer gap.
@@ -2716,6 +2724,109 @@ def check_breakdown_short(
     return sent
 
 
+def check_momentum_long(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> int:
+    """🧪 ТЕСТ: Momentum continuation LONG.
+
+    Зеркало breakdown_short — ловит монеты в середине восходящего движения:
+      - 24h рост ≥ MOMENTUM_LONG_PCT (+10%)    — сильное дневное движение вверх
+      - Price > EMA-200 (4h)                   — подтверждённый восходящий тренд
+      - RSI in (MOMENTUM_LONG_RSI_MIN, MOMENTUM_LONG_RSI_MAX) = (42, 68)
+          выше 42 = импульс подтверждён, не ложный отскок
+          ниже 68 = ещё не перекуплена, есть куда расти
+
+    В отличие от overheated_24h (ловит вершину +20%/RSI≥70 для шорта),
+    этот сигнал ловит середину восходящего движения для входа в лонг.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24: float | None = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    for symbol, t in tickers.items():
+        rsi = rsi_map.get(symbol)
+        if rsi is None:
+            continue
+        try:
+            pct24 = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        # Liquidity filter
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        # 1. Strong 24h rise
+        if pct24 < MOMENTUM_LONG_PCT:
+            continue
+
+        # 2. RSI in "room to grow" zone — momentum confirmed, not overbought
+        if not (MOMENTUM_LONG_RSI_MIN < rsi < MOMENTUM_LONG_RSI_MAX):
+            continue
+
+        # 3. Price above EMA-200 — confirmed uptrend
+        with state_lock:
+            ema = state["ema200_4h"].get(symbol)
+            atr = state["atr_4h"].get(symbol)
+        if ema is None or price <= ema:
+            continue
+
+        # Cooldown
+        with state_lock:
+            last = state["last_momentum_long_alerted"].get(symbol, 0)
+        if now - last < MOMENTUM_LONG_COOLDOWN:
+            continue
+
+        ema_pct = (price - ema) / ema * 100.0   # how far above EMA (positive = above)
+
+        score = compute_signal_score(
+            "momentum_long", "buy",
+            rsi=rsi, above_ema=True, pct24=pct24, btc_pct24=btc_pct24,
+        )
+        min_score = MIN_SCORE_BY_TYPE.get("momentum_long", MIN_ALERT_SCORE)
+        if score < min_score:
+            logger.debug(
+                "Suppressed %s/momentum_long (score=%d < min %d)", symbol, score, min_score,
+            )
+            continue
+
+        sl_tp = _format_sl_tp("buy", price, atr)
+        body = (
+            f"🧪 <b>[ТЕСТ] ИМПУЛЬС ВВЕРХ — лонг продолжается</b>\n"
+            f"Монета в восходящем тренде, импульс не исчерпан\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"📈 24ч: <b>+{pct24:.1f}%</b>\n"
+            f"📊 RSI: <b>{rsi:.1f}</b> — импульс активен, не перекуплен\n"
+            f"📍 Выше EMA-200: <b>+{ema_pct:.1f}%</b>\n"
+            f"💰 Цена: <b>${price:,.6g}</b>\n"
+            f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
+        )
+        delivered, _aid = send_alert_with_log(
+            symbol, "momentum_long", "LONG", price, body, score,
+        )
+        if delivered:
+            with state_lock:
+                state["last_momentum_long_alerted"][symbol] = now
+            logger.info("Momentum LONG alert sent: %s pct24=%.1f rsi=%.1f", symbol, pct24, rsi)
+            sent += 1
+
+    return sent
+
+
 def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     """Volume-spike + CRSI combo. For any pair in the cached
     state['volume_ranking'] (which is built from the broadened daily refresh,
@@ -2854,6 +2965,7 @@ def run_checks():
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
         "breakdown_alerts": 0,         # TEST: breakdown continuation SHORT
+        "momentum_long_alerts": 0,     # TEST: momentum continuation LONG
         "errors": [],
     }
 
@@ -2947,6 +3059,9 @@ def run_checks():
 
                 # 6d. TEST: Breakdown continuation SHORT (drop ≥10% + below EMA + RSI 30-58)
                 summary["breakdown_alerts"] = check_breakdown_short(tickers, rsi_map)
+
+                # 6e. TEST: Momentum continuation LONG (rise ≥10% + above EMA + RSI 42-68)
+                summary["momentum_long_alerts"] = check_momentum_long(tickers, rsi_map)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 with state_lock:
