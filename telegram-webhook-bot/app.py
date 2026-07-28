@@ -72,6 +72,7 @@ state = {
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
     "last_breakdown_alerted": {},      # symbol -> ts (breakdown_short TEST cooldown)
     "last_momentum_long_alerted": {},  # symbol -> ts (momentum_long TEST cooldown)
+    "sl_blocked": {},                  # symbol -> ts (12h re-entry block after SL hit)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
@@ -95,6 +96,7 @@ COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
+SL_REENTRY_COOLDOWN  = 43200      # 12h block on ALL new signals after an SL hit
 
 # Volume-surge + CRSI combo alert (calendar-day vol vs yesterday)
 MIN_VOLUME_USDT_BROAD = 10_000     # lower floor so pairs like ORCAUSDT enter the daily refresh
@@ -158,7 +160,7 @@ HIT_RATE_INTERVALS = ((180, "3м"), (300, "5м"), (900, "15м"), (3600, "1ч"), 
 HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win (legacy, kept for compat)
 HIT_RATE_RETENTION_DAYS = 120
 # SL/TP for simulated P&L in hit-rate stats (matches backtest defaults)
-HIT_RATE_SL_PCT = 2.0              # stop-loss %
+HIT_RATE_SL_PCT = 2.5              # stop-loss % (raised from 2.0 to reduce noise SL hits)
 HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
 HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
 
@@ -1783,6 +1785,15 @@ def send_alert_with_log(
     """
     if is_hidden(alert_type, symbol):
         logger.info("Suppressed %s/%s (hidden by user prefs)", symbol, alert_type)
+        return (False, None)
+    # SL re-entry block: suppress all new signals on a symbol for 12h after its SL fires
+    with state_lock:
+        sl_ts = state["sl_blocked"].get(symbol, 0)
+    if time.time() - sl_ts < SL_REENTRY_COOLDOWN:
+        remaining = int((SL_REENTRY_COOLDOWN - (time.time() - sl_ts)) / 3600 * 10) / 10
+        logger.info(
+            "Suppressed %s/%s (SL block, %.1fh remaining)", symbol, alert_type, remaining,
+        )
         return (False, None)
     with state_lock:
         if state["silenced"]:
@@ -3535,6 +3546,11 @@ class PositionMonitor(threading.Thread):
             self.symbol, self.direction, result,
             self.entry, exit_price, elapsed,
         )
+        # After SL hit: block all new signals on this symbol for SL_REENTRY_COOLDOWN
+        if result == "SL":
+            with state_lock:
+                state["sl_blocked"][self.symbol] = time.time()
+            logger.info("SL block set for %s (12h re-entry cooldown)", self.symbol)
         with _monitors_lock:
             _active_monitors.pop(self.position_id, None)
 
@@ -3555,6 +3571,14 @@ def _auto_start_monitor(
     if os.environ.get("TESTING", "").strip().lower() in {"1", "true", "yes"}:
         return
     if direction not in ("LONG", "SHORT"):
+        return
+    # One active position per symbol: skip if a monitor for this symbol is already running
+    with _monitors_lock:
+        open_symbols = {m.symbol for m in _active_monitors.values()}
+    if symbol in open_symbols:
+        logger.info(
+            "_auto_start_monitor blocked: %s already has an open position monitor", symbol,
+        )
         return
     if direction == "LONG":
         sl_price = entry * (1 - HIT_RATE_SL_PCT / 100)
