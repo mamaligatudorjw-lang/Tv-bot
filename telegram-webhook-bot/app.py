@@ -1604,6 +1604,22 @@ def _strength_label(score: int) -> str:
 
 MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "60"))
 
+# Per-type score minimums — override the global MIN_ALERT_SCORE for specific
+# signal types where historical data shows a higher bar improves quality.
+MIN_SCORE_BY_TYPE: dict[str, int] = {
+    "overheated_24h":   70,   # only strong setups (vs global 60)
+    "momentum_down_5":  65,
+    "momentum_down_10": 65,
+}
+
+# Dynamic cooldown for overheated_24h based on market regime:
+# in a bull market the same coin can re-trigger quickly — use longer gap.
+OVERHEATED_COOLDOWN_BY_REGIME: dict[str, int] = {
+    "BULL":    8 * 3600,   # 8 h — uptrend retests are common, avoid re-firing
+    "BEAR":    4 * 3600,   # 4 h — standard
+    "NEUTRAL": 4 * 3600,   # 4 h — standard
+}
+
 
 def _binance_url(symbol: str) -> str:
     """Universal link to the USDⓈ-M Futures pair page on Binance. On iOS/Android
@@ -1672,12 +1688,12 @@ def send_alert_with_log(
             symbol, alert_type, recommendation,
         )
         return (False, None)
-    # Score gate. Treat missing scores as below-min — every actionable alert
-    # must carry a strength rating.
-    if score is None or score < MIN_ALERT_SCORE:
+    # Score gate — per-type minimum overrides the global floor where set.
+    min_score = MIN_SCORE_BY_TYPE.get(alert_type, MIN_ALERT_SCORE)
+    if score is None or score < min_score:
         logger.info(
             "Suppressed %s/%s (score=%s < min %d)",
-            symbol, alert_type, score, MIN_ALERT_SCORE,
+            symbol, alert_type, score, min_score,
         )
         return (False, None)
     if price is None or price <= 0:
@@ -2273,6 +2289,7 @@ _MOMENTUM_EMOJI = {
 def check_momentum(
     pct_15m_map: dict[str, float],
     tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float] | None = None,
 ) -> int:
     """For each symbol with a 15-min pct change, send a single alert at the
     highest tier crossed (e.g. +12% triggers only the +10% alert, not all 4).
@@ -2300,9 +2317,10 @@ def check_momentum(
         if threshold is None:
             continue
 
-        # A. momentum_down_2 disabled: 28 % hit-rate at 1h/4h (below chance),
-        #    average price move +0.84 % after the signal (wrong direction).
-        if threshold == -2.0:
+        # A. Disabled tiers:
+        #    momentum_down_2: 28% hit-rate, avg price +0.84% after signal (wrong dir).
+        #    momentum_down_3: backtest shows TP 29%, SL 37% — net negative expectancy.
+        if threshold in (-2.0, -3.0):
             continue
 
         with state_lock:
@@ -2333,6 +2351,18 @@ def check_momentum(
                 )
                 ema_blocked += 1
                 continue
+
+            # C. RSI confirmation: a momentum-down signal has better edge when
+            #    RSI was elevated (≥60) before the drop — confirms the fall is
+            #    from an overbought level rather than a random wick.
+            if rsi_map is not None:
+                rsi_val = rsi_map.get(symbol)
+                if rsi_val is not None and rsi_val < 60:
+                    logger.debug(
+                        "Momentum short suppressed by RSI filter: %s rsi=%.1f < 60",
+                        symbol, rsi_val,
+                    )
+                    continue
 
         emoji = _MOMENTUM_EMOJI.get(threshold, "📊")
         sign = "+" if pct > 0 else ""
@@ -2415,7 +2445,9 @@ def check_overheated_oversold(
                 continue
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
-            if now - last >= OVERHEATED_COOLDOWN:
+            regime = state.get("market_regime", "NEUTRAL")
+            oh_cooldown = OVERHEATED_COOLDOWN_BY_REGIME.get(regime, OVERHEATED_COOLDOWN)
+            if now - last >= oh_cooldown:
                 score = compute_signal_score(
                     "overheated_24h", "sell",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
@@ -2680,7 +2712,7 @@ def run_checks():
                 summary["vol_spikes"] = len(vol_spikes)
 
                 # 6a. Standalone momentum alerts (15-min price change tiers)
-                mom_sent, mom_ema_blocked = check_momentum(pct_15m_map, tickers)
+                mom_sent, mom_ema_blocked = check_momentum(pct_15m_map, tickers, rsi_map)
                 summary["momentum_alerts"] = mom_sent
                 summary["momentum_ema_blocked"] = mom_ema_blocked
 
