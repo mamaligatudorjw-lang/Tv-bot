@@ -21,7 +21,7 @@ args = ["pnpm", "--filter", "@workspace/api-server", "run", "build"]
 NODE_ENV = "production"
 
 [services.production.run]
-args = ["node", "--enable-source-maps", "artifacts/api-server/dist/index.mjs"]
+args = ["bash", "scripts/start-production.sh"]
 
 [services.production.run.env]
 PORT = "8080"
