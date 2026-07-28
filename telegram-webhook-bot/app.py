@@ -1236,6 +1236,26 @@ def _get_db() -> sqlite3.Connection:
                 coin_id TEXT PRIMARY KEY
             )
         """)
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS position_monitors (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id    INTEGER,
+                ts_open     INTEGER NOT NULL,
+                symbol      TEXT    NOT NULL,
+                direction   TEXT    NOT NULL,
+                entry_price REAL    NOT NULL,
+                sl_price    REAL    NOT NULL,
+                tp_price    REAL    NOT NULL,
+                status      TEXT    NOT NULL DEFAULT 'open',
+                ts_close    INTEGER,
+                exit_price  REAL,
+                pnl_pct     REAL
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_posmon_status "
+            "ON position_monitors(status)"
+        )
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -1760,6 +1780,9 @@ def send_alert_with_log(
         except Exception:
             pass
         return (False, None)
+    # Launch position monitor for the delivered signal
+    if price is not None and price > 0:
+        _auto_start_monitor(alert_id, symbol, recommendation, float(price))
     return (True, alert_id)
 
 
@@ -3009,6 +3032,320 @@ def run_checks():
 
 
 # ---------------------------------------------------------------------------
+# Position Monitor — TP / SL / timeout tracking for every delivered signal
+# ---------------------------------------------------------------------------
+# Each delivered LONG/SHORT alert spawns a daemon thread that polls Binance
+# every ~45 s and fires a Telegram exit notification when the position hits
+# TP, SL, or the 4-hour timeout.  State is persisted in `position_monitors`
+# (SQLite) so monitors survive a bot restart.
+# ---------------------------------------------------------------------------
+
+MONITOR_POLL_INTERVAL = 45          # seconds between price polls
+MONITOR_TIMEOUT_HOURS = 4           # hours until forced timeout
+MONITOR_SLIPPAGE_PCT  = 5.0         # re-verify if price moves >5 % in one tick
+
+_active_monitors: dict[int, "PositionMonitor"] = {}
+_monitors_lock = threading.Lock()
+
+
+def _get_current_price(symbol: str) -> float | None:
+    """Fetch the latest spot price via the lightweight /ticker/price endpoint."""
+    try:
+        resp = _binance_get(
+            "/api/v3/ticker/price", params={"symbol": symbol}, timeout=6
+        )
+        return float(resp.json()["price"])
+    except Exception as exc:
+        logger.debug("_get_current_price %s failed: %s", symbol, exc)
+        return None
+
+
+def _format_elapsed(seconds: float) -> str:
+    m = int(seconds / 60)
+    if m >= 60:
+        return f"{m // 60} ч {m % 60} мин"
+    return f"{m} минут"
+
+
+def _send_exit_notification(
+    symbol: str,
+    direction: str,
+    result: str,         # "TP" | "SL" | "TIMEOUT"
+    entry: float,
+    exit_price: float,
+    elapsed_seconds: float,
+) -> None:
+    pnl_pct = (
+        (exit_price - entry) / entry * 100
+        if direction == "LONG"
+        else (entry - exit_price) / entry * 100
+    )
+    pnl_sign = "+" if pnl_pct >= 0 else ""
+    elapsed_str = _format_elapsed(elapsed_seconds)
+
+    if result == "TP":
+        emoji, header = "✅", "ВЫХОД ПО TP"
+    elif result == "SL":
+        emoji, header = "❌", "ВЫХОД ПО SL"
+    else:
+        emoji, header = "⏱️", "ТАЙМАУТ"
+
+    if result == "TIMEOUT":
+        body = (
+            f"{emoji} <b>{header}</b>\n"
+            f"{direction} <code>{symbol}</code>\n"
+            f"Вход: <b>${entry:,.6g}</b>  →  Текущая: <b>${exit_price:,.6g}</b>\n"
+            f"P&L: <b>{pnl_sign}{pnl_pct:.2f}%</b>\n"
+            f"Время удержания: <b>{elapsed_str}</b> (лимит)\n"
+            f"<i>Закрыта по таймауту</i>"
+        )
+    else:
+        body = (
+            f"{emoji} <b>{header}</b>\n"
+            f"{direction} <code>{symbol}</code>\n"
+            f"Вход: <b>${entry:,.6g}</b>  →  Выход: <b>${exit_price:,.6g}</b>\n"
+            f"P&L: <b>{pnl_sign}{pnl_pct:.2f}%</b>\n"
+            f"Время: <b>{elapsed_str}</b>"
+        )
+
+    try:
+        _telegram_send(TELEGRAM_CHAT_ID, body)
+    except Exception as exc:
+        logger.warning("_send_exit_notification failed: %s", exc)
+
+
+class PositionMonitor(threading.Thread):
+    """Daemon thread: polls spot price every MONITOR_POLL_INTERVAL seconds.
+    Closes on TP / SL hit or after MONITOR_TIMEOUT_HOURS, then sends a
+    Telegram exit notification and updates the DB row."""
+
+    def __init__(
+        self,
+        position_id: int,
+        alert_id: int | None,
+        symbol: str,
+        direction: str,     # "LONG" or "SHORT"
+        entry: float,
+        sl_price: float,
+        tp_price: float,
+        ts_open: int,
+    ) -> None:
+        super().__init__(name=f"pos-mon-{position_id}", daemon=True)
+        self.position_id = position_id
+        self.alert_id    = alert_id
+        self.symbol      = symbol
+        self.direction   = direction
+        self.entry       = entry
+        self.sl_price    = sl_price
+        self.tp_price    = tp_price
+        self.ts_open     = ts_open
+        self._stop_evt   = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_evt.set()
+
+    def run(self) -> None:
+        logger.info(
+            "PositionMonitor started: id=%d %s %s entry=%.6g sl=%.6g tp=%.6g",
+            self.position_id, self.direction, self.symbol,
+            self.entry, self.sl_price, self.tp_price,
+        )
+        prev_price: float | None = None
+
+        while not self._stop_evt.wait(timeout=MONITOR_POLL_INTERVAL):
+            try:
+                current = _get_current_price(self.symbol)
+                if current is None:
+                    continue
+
+                # Anti-slippage: if price moved >5 % since last tick, re-verify
+                if prev_price is not None:
+                    delta_pct = abs(current - prev_price) / prev_price * 100
+                    if delta_pct > MONITOR_SLIPPAGE_PCT:
+                        time.sleep(5)
+                        current2 = _get_current_price(self.symbol)
+                        if current2 is not None:
+                            current = current2
+                prev_price = current
+
+                # Evaluate TP / SL conditions
+                result: str | None = None
+                if self.direction == "LONG":
+                    if current >= self.tp_price:
+                        result = "TP"
+                    elif current <= self.sl_price:
+                        result = "SL"
+                else:   # SHORT
+                    if current <= self.tp_price:
+                        result = "TP"
+                    elif current >= self.sl_price:
+                        result = "SL"
+
+                elapsed = time.time() - self.ts_open
+                if result is None and elapsed >= MONITOR_TIMEOUT_HOURS * 3600:
+                    result = "TIMEOUT"
+
+                if result is not None:
+                    self._close(result, current, elapsed)
+                    return
+
+            except Exception as exc:
+                logger.warning("PositionMonitor %s: %s", self.symbol, exc)
+
+        logger.debug("PositionMonitor %s stopped externally", self.symbol)
+
+    def _close(self, result: str, exit_price: float, elapsed: float) -> None:
+        pnl_pct = (
+            (exit_price - self.entry) / self.entry * 100
+            if self.direction == "LONG"
+            else (self.entry - exit_price) / self.entry * 100
+        )
+        try:
+            with _db_lock:
+                conn = _get_db()
+                conn.execute(
+                    "UPDATE position_monitors "
+                    "SET status=?, ts_close=?, exit_price=?, pnl_pct=? "
+                    "WHERE id=?",
+                    (
+                        result.lower(), int(time.time()),
+                        exit_price, round(pnl_pct, 4),
+                        self.position_id,
+                    ),
+                )
+                conn.commit()
+        except Exception as exc:
+            logger.warning("PositionMonitor DB update failed: %s", exc)
+
+        _send_exit_notification(
+            self.symbol, self.direction, result,
+            self.entry, exit_price, elapsed,
+        )
+        with _monitors_lock:
+            _active_monitors.pop(self.position_id, None)
+
+        logger.info(
+            "PositionMonitor closed: id=%d %s %s result=%s exit=%.6g pnl=%.2f%%",
+            self.position_id, self.direction, self.symbol,
+            result, exit_price, pnl_pct,
+        )
+
+
+def _auto_start_monitor(
+    alert_id: int,
+    symbol: str,
+    direction: str,   # "LONG" or "SHORT"
+    entry: float,
+) -> None:
+    """Compute TP/SL from fixed percentages and launch a PositionMonitor."""
+    if os.environ.get("TESTING", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    if direction not in ("LONG", "SHORT"):
+        return
+    if direction == "LONG":
+        sl_price = entry * (1 - HIT_RATE_SL_PCT / 100)
+        tp_price = entry * (1 + HIT_RATE_TP_PCT / 100)
+    else:
+        sl_price = entry * (1 + HIT_RATE_SL_PCT / 100)
+        tp_price = entry * (1 - HIT_RATE_TP_PCT / 100)
+    ts_open = int(time.time())
+
+    try:
+        with _db_lock:
+            conn = _get_db()
+            cur = conn.execute(
+                "INSERT INTO position_monitors "
+                "(alert_id, ts_open, symbol, direction, "
+                "entry_price, sl_price, tp_price, status) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+                (alert_id, ts_open, symbol, direction,
+                 entry, sl_price, tp_price),
+            )
+            conn.commit()
+            pos_id = int(cur.lastrowid or 0)
+    except Exception as exc:
+        logger.warning("_auto_start_monitor DB insert failed: %s", exc)
+        return
+
+    monitor = PositionMonitor(
+        pos_id, alert_id, symbol, direction,
+        entry, sl_price, tp_price, ts_open,
+    )
+    monitor.start()
+    with _monitors_lock:
+        _active_monitors[pos_id] = monitor
+
+    logger.info(
+        "PositionMonitor launched: id=%d %s %s entry=%.6g sl=%.6g tp=%.6g",
+        pos_id, direction, symbol, entry, sl_price, tp_price,
+    )
+
+
+def restore_position_monitors() -> None:
+    """Called at startup: resume all positions still marked 'open' in the DB.
+    Positions that already passed the 4-hour timeout are closed immediately."""
+    if os.environ.get("TESTING", "").strip().lower() in {"1", "true", "yes"}:
+        return
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT id, alert_id, symbol, direction, "
+                "entry_price, sl_price, tp_price, ts_open "
+                "FROM position_monitors WHERE status='open'"
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("restore_position_monitors failed to read DB: %s", exc)
+        return
+
+    if not rows:
+        return
+
+    logger.info("Restoring %d open position monitor(s)…", len(rows))
+    for pos_id, alert_id, symbol, direction, entry, sl_price, tp_price, ts_open in rows:
+        elapsed = time.time() - ts_open
+        if elapsed >= MONITOR_TIMEOUT_HOURS * 3600:
+            # Expired while bot was down — close as timeout
+            current = _get_current_price(symbol) or entry
+            pnl_pct = (
+                (current - entry) / entry * 100 if direction == "LONG"
+                else (entry - current) / entry * 100
+            )
+            try:
+                with _db_lock:
+                    conn = _get_db()
+                    conn.execute(
+                        "UPDATE position_monitors "
+                        "SET status='timeout', ts_close=?, exit_price=?, pnl_pct=? "
+                        "WHERE id=?",
+                        (int(time.time()), current, round(pnl_pct, 4), pos_id),
+                    )
+                    conn.commit()
+            except Exception as exc:
+                logger.warning("restore timeout close failed: %s", exc)
+            _send_exit_notification(
+                symbol, direction, "TIMEOUT", entry, current, elapsed
+            )
+            logger.info(
+                "Restored monitor id=%d expired — sent TIMEOUT (elapsed=%.0fs)",
+                pos_id, elapsed,
+            )
+            continue
+
+        monitor = PositionMonitor(
+            pos_id, alert_id, symbol, direction,
+            entry, sl_price, tp_price, ts_open,
+        )
+        monitor.start()
+        with _monitors_lock:
+            _active_monitors[pos_id] = monitor
+        logger.info(
+            "Restored monitor: id=%d %s %s (%.0fs elapsed)",
+            pos_id, direction, symbol, elapsed,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Cycle logging
 # ---------------------------------------------------------------------------
 _CYCLE_LOG_PATH = os.path.join(os.path.dirname(__file__), "cycle_log.jsonl")
@@ -4145,6 +4482,7 @@ scheduler.add_job(
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
 # does NOT silently disable the workers.
 if os.environ.get("TESTING", "").strip().lower() not in {"1", "true", "yes"}:
+    restore_position_monitors()
     scheduler.start()
     start_command_polling()
     start_watchdog()
