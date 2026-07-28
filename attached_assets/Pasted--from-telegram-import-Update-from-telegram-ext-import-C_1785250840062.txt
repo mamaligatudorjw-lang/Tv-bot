@@ -1,0 +1,198 @@
+# Импорты (добавить в начало файла, если нет)
+from telegram import Update
+from telegram.ext import ContextTypes, CommandHandler
+import pandas as pd
+from binance.um_futures import UMFutures
+import ta  # pip install ta для индикаторов
+
+# Инициализация Binance клиента
+client = UMFutures()
+
+async def analyze_symbol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /analyze SYMBOL - полный анализ монеты"""
+    
+    # Проверка аргументов
+    if not context.args:
+        await update.message.reply_text("Использование: /analyze BTCUSDT\nПример: /analyze DEXEUSDT")
+        return
+    
+    symbol = context.args[0].upper()
+    
+    # Валидация символа
+    if not symbol.endswith("USDT"):
+        symbol = symbol + "USDT"
+    
+    try:
+        # ========== ПОЛУЧЕНИЕ ДАННЫХ ==========
+        
+        # 1. Текущая цена и инфо за 24ч
+        ticker = client.ticker(symbol=symbol)
+        current_price = float(ticker['lastPrice'])
+        change_24h = float(ticker['priceChangePercent'])
+        volume_24h = float(ticker['quoteAssetVolume'])
+        
+        # 2. Получить 4h свечи для EMA-200
+        klines_4h = client.klines(symbol=symbol, interval='4h', limit=200)
+        closes_4h = [float(k[4]) for k in klines_4h]
+        
+        # 3. Получить 5m свечи для RSI, Volume Spike, Supertrend
+        klines_5m = client.klines(symbol=symbol, interval='5m', limit=100)
+        closes_5m = [float(k[4]) for k in klines_5m]
+        volumes_5m = [float(k[7]) for k in klines_5m]  # Quote asset volume
+        
+        # ========== РАСЧЁТЫ ИНДИКАТОРОВ ==========
+        
+        # EMA-200 на 4h
+        ema_200 = ta.trend.ema_indicator(pd.Series(closes_4h), window=200).iloc[-1]
+        price_vs_ema = ((current_price - ema_200) / ema_200) * 100
+        ema_status = "выше" if current_price > ema_200 else "ниже"
+        
+        # RSI на 5m
+        rsi_5m = ta.momentum.rsi(pd.Series(closes_5m), window=14).iloc[-1]
+        
+        # Определить перекупленность/перепроданность
+        if rsi_5m > 70:
+            rsi_status = "🔴 Перекуплен"
+            rsi_desc = "возможен откат вниз"
+        elif rsi_5m < 30:
+            rsi_status = "🟢 Перепродан"
+            rsi_desc = "возможен отскок вверх"
+        else:
+            rsi_status = "⚪ Нейтраль"
+            rsi_desc = "ни перекуплен, ни перепродан"
+        
+        # Volume Spike 5m
+        avg_volume = sum(volumes_5m[:-1]) / len(volumes_5m[:-1])
+        current_volume = volumes_5m[-1]
+        volume_spike = current_volume / avg_volume if avg_volume > 0 else 0
+        
+        # Supertrend (используя ta библиотеку)
+        supertrend = ta.trend.supertrend(
+            high=pd.Series([float(k[2]) for k in klines_5m]),
+            low=pd.Series([float(k[3]) for k in klines_5m]),
+            close=pd.Series(closes_5m),
+            period=10,
+            multiplier=3
+        )
+        supertrend_status = "📈 UP" if supertrend.iloc[-1, 2] > 0 else "📉 DOWN"
+        
+        # ========== ЛОГИКА СИГНАЛОВ БОТА ==========
+        
+        signal = None
+        signal_strength = 0
+        reason = []
+        
+        # Проверка Перегрев 24ч SHORT (overheated)
+        if (rsi_5m > 70 and volume_spike > 5.0 and current_price > ema_200):
+            signal = "SHORT"
+            signal_strength = 75
+            reason.append("✅ RSI > 70 (перекуплен)")
+            reason.append("✅ Всплеск объёма > 5x")
+            reason.append("✅ Цена выше EMA-200")
+        
+        # Проверка Перепродан 24ч LONG (oversold)
+        elif (rsi_5m < 30 and volume_spike > 3.0 and current_price < ema_200):
+            signal = "LONG"
+            signal_strength = 65
+            reason.append("✅ RSI < 30 (перепродан)")
+            reason.append("✅ Всплеск объёма > 3x")
+            reason.append("✅ Цена ниже EMA-200")
+        
+        # Confluence
+        elif (rsi_5m > 60 and rsi_5m < 70 and current_price > ema_200):
+            signal = "LONG"
+            signal_strength = 50
+            reason.append("⚠️ Слабый сигнал confluence")
+        
+        elif (rsi_5m > 30 and rsi_5m < 40 and current_price < ema_200):
+            signal = "SHORT"
+            signal_strength = 50
+            reason.append("⚠️ Слабый сигнал confluence")
+        
+        else:
+            signal = "НЕТ СИГНАЛА"
+            signal_strength = 0
+            reason = ["Условия не совпадают с правилами бота"]
+        
+        # ========== УПРАВЛЕНИЕ РИСКОМ ==========
+        
+        if signal == "SHORT":
+            sl = current_price * 1.015  # SL на +1.5%
+            tp = current_price * 0.985  # TP на −1.5%
+            rr = abs((current_price - tp) / (sl - current_price)) if (sl - current_price) != 0 else 0
+            rr_ratio = f"1:{rr:.1f}"
+        elif signal == "LONG":
+            sl = current_price * 0.985  # SL на −1.5%
+            tp = current_price * 1.015  # TP на +1.5%
+            rr = abs((tp - current_price) / (current_price - sl)) if (current_price - sl) != 0 else 0
+            rr_ratio = f"1:{rr:.1f}"
+        else:
+            sl = "−"
+            tp = "−"
+            rr_ratio = "−"
+        
+        # ========== ФАЗА РЫНКА ==========
+        
+        # Получить BTC EMA-200
+        btc_klines = client.klines(symbol="BTCUSDT", interval='1d', limit=200)
+        btc_closes = [float(k[4]) for k in btc_klines]
+        btc_ema_200 = ta.trend.ema_indicator(pd.Series(btc_closes), window=200).iloc[-1]
+        btc_price = btc_closes[-1]
+        
+        if btc_price > btc_ema_200 * 1.015:
+            market_phase = "🟢 BULL"
+            phase_status = "✅ По тренду" if signal in ["LONG", "НЕТ СИГНАЛА"] else "⚠️ Против тренда"
+        elif btc_price < btc_ema_200 * 0.985:
+            market_phase = "🔴 BEAR"
+            phase_status = "✅ По тренду" if signal in ["SHORT", "НЕТ СИГНАЛА"] else "⚠️ Против тренда"
+        else:
+            market_phase = "⚪ NEUTRAL"
+            phase_status = "➖ Боковик"
+        
+        # ========== ФОРМАТИРОВАНИЕ ОТВЕТА ==========
+        
+        message = f"""
+🔍 <b>АНАЛИЗ {symbol}</b>
+
+📊 <b>ТЕКУЩИЕ ДАННЫЕ:</b>
+💰 Цена: <b>${current_price:.8g}</b>
+📈 Изменение 24ч: <b>{change_24h:+.2f}%</b>
+💵 Объём 24ч: <b>${volume_24h:,.0f}</b>
+
+📈 <b>ИНДИКАТОРЫ:</b>
+📊 RSI (5m): <b>{rsi_5m:.1f}</b> {rsi_status}
+   └─ {rsi_desc}
+📍 EMA-200 (4h): <b>${ema_200:.8g}</b>
+   └─ Цена {ema_status} на <b>{abs(price_vs_ema):.2f}%</b>
+🚀 Всплеск объёма 5m: <b>{volume_spike:.1f}x</b> от среднего
+📈 Supertrend: {supertrend_status}
+
+🎯 <b>РЕКОМЕНДАЦИЯ:</b>
+{'🔴 SHORT' if signal == 'SHORT' else '🟢 LONG' if signal == 'LONG' else '⚪ HOLD' if signal == 'НЕТ СИГНАЛА' else ''}  <b>Сила: {signal_strength}/100</b>
+
+<b>Причины:</b>
+{chr(10).join(['  ' + r for r in reason])}
+
+🛡️ <b>УПРАВЛЕНИЕ РИСКОМ:</b>
+{'Stop Loss: $' + f'{sl:.8g}' + f' (−1.5%)' if signal in ['SHORT', 'LONG'] else 'SL: −'}
+{'Take Profit: $' + f'{tp:.8g}' + f' (+1.5%)' if signal in ['SHORT', 'LONG'] else 'TP: −'}
+{'R/R: ' + rr_ratio if signal in ['SHORT', 'LONG'] else 'R/R: −'}
+
+🌍 <b>ФАЗА РЫНКА:</b> {market_phase}
+Статус: {phase_status}
+
+⚠️ <i>Анализ на основе текущих данных Binance Futures.
+Торговля на свой риск. Это не рекомендация.</i>
+"""
+        
+        await update.message.reply_text(message, parse_mode='HTML')
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка при анализе {symbol}:\n{str(e)}\n\nПроверьте корректность символа (например, BTCUSDT)")
+
+# ========== РЕГИСТРАЦИЯ КОМАНДЫ ==========
+
+# Добавить эту строку в функцию, где регистрируются команды:
+# (обычно в main() или setup_handlers())
+
+application.add_handler(CommandHandler("analyze", analyze_symbol, block=False))
