@@ -70,9 +70,10 @@ state = {
     "last_momentum_alerted": {},       # symbol -> {threshold: ts}
     "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
-    "last_breakdown_alerted": {},      # symbol -> ts (breakdown_short TEST cooldown)
-    "last_momentum_long_alerted": {},  # symbol -> ts (momentum_long TEST cooldown)
-    "sl_blocked": {},                  # symbol -> ts (12h re-entry block after SL hit)
+    "last_breakdown_alerted": {},           # symbol -> ts (breakdown_short TEST cooldown)
+    "last_momentum_long_alerted": {},       # symbol -> ts (momentum_long TEST cooldown)
+    "sl_blocked": {},                       # symbol -> ts (12h re-entry block after SL hit)
+    "last_new_listing_short_alerted": {},   # symbol -> ts (new_listing_short TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
@@ -97,6 +98,12 @@ WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
 SL_REENTRY_COOLDOWN  = 43200      # 12h block on ALL new signals after an SL hit
+
+# --- New listing pump→dump SHORT (TEST) ---
+NEW_LISTING_WINDOW_H     = 48     # only watch coins listed in last 48h
+NEW_LISTING_PUMP_PCT     = 20.0   # coin must be ≥+20% above its listing price
+NEW_LISTING_PUMP_RSI_MIN = 65.0   # RSI must confirm overheating
+NEW_LISTING_SHORT_COOLDOWN = 14400  # 4h cooldown per symbol
 
 # Volume-surge + CRSI combo alert (calendar-day vol vs yesterday)
 MIN_VOLUME_USDT_BROAD = 10_000     # lower floor so pairs like ORCAUSDT enter the daily refresh
@@ -1703,11 +1710,12 @@ MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "60"))
 # Per-type score minimums — override the global MIN_ALERT_SCORE for specific
 # signal types where historical data shows a higher bar improves quality.
 MIN_SCORE_BY_TYPE: dict[str, int] = {
-    "overheated_24h":   70,   # only strong setups (vs global 60)
-    "momentum_down_5":  65,
-    "momentum_down_10": 65,
-    "breakdown_short":  55,   # TEST signal — lower bar while calibrating
-    "momentum_long":    55,   # TEST signal — mirror of breakdown_short for longs
+    "overheated_24h":      70,   # only strong setups (vs global 60)
+    "momentum_down_5":     65,
+    "momentum_down_10":    65,
+    "breakdown_short":     55,   # TEST signal — lower bar while calibrating
+    "momentum_long":       55,   # TEST signal — mirror of breakdown_short for longs
+    "new_listing_short":   55,   # TEST signal — pump→dump after new listing
 }
 
 # --- Breakdown continuation SHORT (TEST) ---
@@ -2830,6 +2838,126 @@ def check_momentum_long(
     return sent
 
 
+def check_new_listing_pumps(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> int:
+    """🧪 ТЕСТ: New listing pump→dump SHORT.
+
+    Паттерн: новые монеты часто делают сильный памп при листинге,
+    после чего следует дамп. Сигнал срабатывает когда:
+      - Монета листалась в последние NEW_LISTING_WINDOW_H часов
+      - Текущая цена ≥ +NEW_LISTING_PUMP_PCT от цены листинга (+20%)
+      - RSI ≥ NEW_LISTING_PUMP_RSI_MIN (65) — перегрев подтверждён
+    Данные о листинге берутся из таблицы alerts (alert_type='new_listing').
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+    cutoff = int(now) - NEW_LISTING_WINDOW_H * 3600
+
+    # Fetch recently listed coins and their listing prices from DB
+    try:
+        with _db_lock:
+            conn = _get_db()
+            listings = conn.execute(
+                "SELECT symbol, price_at_alert, ts FROM alerts "
+                "WHERE alert_type='new_listing' AND ts >= ? AND price_at_alert > 0",
+                (cutoff,),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("check_new_listing_pumps DB query failed: %s", exc)
+        return 0
+
+    if not listings:
+        return 0
+
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24: float | None = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    for symbol, listing_price, listing_ts in listings:
+        if listing_price is None or listing_price <= 0:
+            continue
+
+        t = tickers.get(symbol)
+        if t is None:
+            continue
+        try:
+            price = float(t["lastPrice"])
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        rsi = rsi_map.get(symbol)
+        if rsi is None:
+            continue
+
+        # 1. Coin pumped ≥ +20% above listing price
+        pump_pct = (price - listing_price) / listing_price * 100.0
+        if pump_pct < NEW_LISTING_PUMP_PCT:
+            continue
+
+        # 2. RSI confirms overheating
+        if rsi < NEW_LISTING_PUMP_RSI_MIN:
+            continue
+
+        # 3. Minimum liquidity
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        # Cooldown
+        with state_lock:
+            last = state["last_new_listing_short_alerted"].get(symbol, 0)
+        if now - last < NEW_LISTING_SHORT_COOLDOWN:
+            continue
+
+        hours_since_listing = (now - listing_ts) / 3600.0
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+
+        score = compute_signal_score(
+            "new_listing_short", "sell",
+            rsi=rsi, btc_pct24=btc_pct24,
+        )
+        min_score = MIN_SCORE_BY_TYPE.get("new_listing_short", MIN_ALERT_SCORE)
+        if score < min_score:
+            continue
+
+        sl_tp = _format_sl_tp("sell", price, atr)
+        body = (
+            f"🧪 <b>[ТЕСТ] ПАМП НОВОГО ЛИСТИНГА — возможен шорт</b>\n"
+            f"Монета выросла от цены листинга, возможен разворот вниз\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"🆕 Листинг: <b>${listing_price:,.6g}</b> "
+            f"({hours_since_listing:.1f}ч назад)\n"
+            f"📈 Памп от листинга: <b>+{pump_pct:.1f}%</b>\n"
+            f"🔥 RSI: <b>{rsi:.1f}</b> — перегрет\n"
+            f"💰 Цена сейчас: <b>${price:,.6g}</b>\n"
+            f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
+        )
+        delivered, _aid = send_alert_with_log(
+            symbol, "new_listing_short", "SHORT", price, body, score,
+        )
+        if delivered:
+            with state_lock:
+                state["last_new_listing_short_alerted"][symbol] = now
+            logger.info(
+                "New-listing SHORT alert: %s listing=%.6g now=%.6g pump=+%.1f%% rsi=%.1f",
+                symbol, listing_price, price, pump_pct, rsi,
+            )
+            sent += 1
+
+    return sent
+
+
 def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     """Volume-spike + CRSI combo. For any pair in the cached
     state['volume_ranking'] (which is built from the broadened daily refresh,
@@ -2970,6 +3098,7 @@ def run_checks():
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
         "breakdown_alerts": 0,         # TEST: breakdown continuation SHORT
         "momentum_long_alerts": 0,     # TEST: momentum continuation LONG
+        "new_listing_short_alerts": 0, # TEST: new listing pump→dump SHORT
         "errors": [],
     }
 
@@ -3066,6 +3195,9 @@ def run_checks():
 
                 # 6e. TEST: Momentum continuation LONG (rise ≥10% + above EMA + RSI 42-68)
                 summary["momentum_long_alerts"] = check_momentum_long(tickers, rsi_map)
+
+                # 6f. TEST: New listing pump→dump SHORT (≥+20% from listing + RSI≥65)
+                summary["new_listing_short_alerts"] = check_new_listing_pumps(tickers, rsi_map)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 with state_lock:
