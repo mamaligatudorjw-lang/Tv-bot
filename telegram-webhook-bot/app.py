@@ -175,7 +175,7 @@ HIT_RATE_RETENTION_DAYS = 120
 HIT_RATE_SL_PCT = 2.5              # stop-loss % (raised from 2.0 to reduce noise SL hits)
 HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
 HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
-MAX_OPEN_POSITIONS = 10            # cap on simultaneous position monitors
+MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
 
 
 # ---------------------------------------------------------------------------
