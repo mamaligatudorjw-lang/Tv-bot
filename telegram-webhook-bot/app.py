@@ -4546,26 +4546,8 @@ def handle_trade_photo(chat_id: int, message: dict) -> None:
     handle_trade_command(chat_id, synthetic)
 
 
-def _fetch_prices_batch(symbols: list[str]) -> dict[str, float]:
-    """Fetch prices for multiple symbols in one Binance call."""
-    if not symbols:
-        return {}
-    try:
-        import json as _json
-        syms_json = _json.dumps(symbols)
-        resp = _binance_get(
-            "/api/v3/ticker/price",
-            params={"symbols": syms_json},
-            timeout=10,
-        )
-        return {item["symbol"]: float(item["price"]) for item in resp.json()}
-    except Exception as exc:
-        logger.debug("_fetch_prices_batch failed: %s", exc)
-        return {}
-
-
 def handle_positions_command(chat_id: int) -> None:
-    """Show all currently active position monitors with live PnL (compact, split)."""
+    """Show currently active position monitors with live PnL (max 20)."""
     with _monitors_lock:
         monitors = list(_active_monitors.values())
 
@@ -4574,45 +4556,39 @@ def handle_positions_command(chat_id: int) -> None:
         return
 
     monitors = sorted(monitors, key=lambda x: x.ts_open)
-    symbols = list({m.symbol for m in monitors})
-    prices = _fetch_prices_batch(symbols)
+    total = len(monitors)
+    shown = monitors[:20]
 
+    lines = [f"📊 <b>Открытые позиции: {total}</b> (показано {len(shown)})", ""]
     now = time.time()
-    header = f"📊 <b>Открытые позиции: {len(monitors)}</b>\n"
-    lines = []
-    for m in monitors:
-        current = prices.get(m.symbol)
+    for m in shown:
+        current = _get_current_price(m.symbol)
         elapsed_h = (now - m.ts_open) / 3600
         if current is not None:
             pnl_pct = (
                 (current - m.entry) / m.entry * 100 if m.direction == "LONG"
                 else (m.entry - current) / m.entry * 100
             )
-            pnl_emoji = "🟢" if pnl_pct > 0 else "🔴"
+            pnl_emoji = "🟢" if pnl_pct > 0 else ("🔴" if pnl_pct < 0 else "⚪️")
             pnl_str = f"{pnl_pct:+.2f}%"
         else:
             pnl_emoji, pnl_str = "⚪️", "—"
+            current = m.entry
 
         dir_emoji = "📈" if m.direction == "LONG" else "📉"
+        lines.append(f"{dir_emoji} <b>{m.symbol}</b>  {m.direction}")
         lines.append(
-            f"{dir_emoji}{pnl_emoji} <code>{m.symbol}</code> "
-            f"<b>{pnl_str}</b> ({elapsed_h:.1f}ч)"
+            f"   Вход: <code>${m.entry:,.6g}</code>  "
+            f"Сейчас: <code>${current:,.6g}</code>"
         )
+        lines.append(f"   PnL: {pnl_emoji} <b>{pnl_str}</b>  ({elapsed_h:.1f}ч)")
+        lines.append(
+            f"   SL: <code>${m.sl_price:,.6g}</code>  "
+            f"TP: <code>${m.tp_price:,.6g}</code>"
+        )
+        lines.append("")
 
-    # Split into chunks ≤ 4096 chars (Telegram limit)
-    chunk, chunks = header, []
-    for line in lines:
-        candidate = chunk + line + "\n"
-        if len(candidate) > 4000:
-            chunks.append(chunk)
-            chunk = line + "\n"
-        else:
-            chunk = candidate
-    if chunk.strip():
-        chunks.append(chunk)
-
-    for part in chunks:
-        _telegram_send(chat_id, part)
+    _telegram_send(chat_id, "\n".join(lines))
 
 
 def handle_mytrades_command(chat_id: int) -> None:
@@ -5490,24 +5466,21 @@ def api_signals_performance():
 
 @app.route("/bot-api/positions", methods=["GET"])
 def api_positions():
-    """Return all currently active position monitors with live PnL (batch prices)."""
+    """Return all currently active position monitors with live PnL."""
     with _monitors_lock:
         monitors = list(_active_monitors.values())
 
-    monitors = sorted(monitors, key=lambda x: x.ts_open)
-    symbols = list({m.symbol for m in monitors})
-    prices = _fetch_prices_batch(symbols)
-
     now = time.time()
     result = []
-    for m in monitors:
-        current = prices.get(m.symbol)
+    for m in sorted(monitors, key=lambda x: x.ts_open):
+        current = _get_current_price(m.symbol)
         if current is not None:
             pnl_pct = (
                 (current - m.entry) / m.entry * 100 if m.direction == "LONG"
                 else (m.entry - current) / m.entry * 100
             )
         else:
+            current = None
             pnl_pct = None
         result.append({
             "id":             m.position_id,
