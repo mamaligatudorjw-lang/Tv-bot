@@ -3608,6 +3608,53 @@ def _format_elapsed(seconds: float) -> str:
     return f"{m} минут"
 
 
+def _ensure_entry_notified(
+    alert_id: int | None,
+    symbol: str,
+    direction: str,
+    entry: float,
+    sl_price: float,
+    tp_price: float,
+) -> None:
+    """Before sending an exit notification, verify the entry alert was delivered.
+    If alert_id is missing or not found in the alerts table (entry was lost due
+    to a crash, Telegram failure, or silent drop), send a retroactive entry
+    message so the user always sees entry → exit in that order.
+    """
+    if alert_id:
+        try:
+            with _db_lock:
+                conn = _get_db()
+                row = conn.execute(
+                    "SELECT id FROM alerts WHERE id=?", (alert_id,)
+                ).fetchone()
+            if row:
+                return  # Entry was properly logged and delivered
+        except Exception as exc:
+            logger.warning("_ensure_entry_notified DB check failed: %s", exc)
+
+    # Entry alert was never logged or not delivered → send retroactively
+    direction_emoji = "📈" if direction == "LONG" else "📉"
+    rec_emoji       = "🟢" if direction == "LONG" else "🔴"
+    body = (
+        f"⚠️ <b>[ПРОПУЩЕННЫЙ ВХОД]</b>\n"
+        f"Бот открыл позицию, но входной сигнал не был доставлен вовремя\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{direction_emoji} {rec_emoji} <b>{direction}</b> <code>{symbol}</code>\n"
+        f"💰 Вход: <b>${entry:,.6g}</b>\n"
+        f"🛡️ Стоп: <b>${sl_price:,.6g}</b>  •  🎯 Цель: <b>${tp_price:,.6g}</b>\n"
+        f"<i>Это ретроактивное уведомление — позиция уже закрывается</i>"
+    )
+    try:
+        _telegram_send(TELEGRAM_CHAT_ID, body)
+        logger.info(
+            "Retroactive entry notification sent: %s %s @ %.6g",
+            direction, symbol, entry,
+        )
+    except Exception as exc:
+        logger.warning("_ensure_entry_notified telegram send failed: %s", exc)
+
+
 def _send_exit_notification(
     symbol: str,
     direction: str,
@@ -3758,6 +3805,13 @@ class PositionMonitor(threading.Thread):
         except Exception as exc:
             logger.warning("PositionMonitor DB update failed: %s", exc)
 
+        # Guard: if the entry signal was never delivered (Telegram failure,
+        # silent drop, or bot restart), send it now before the exit so the
+        # user always sees entry → exit in order, never exit alone.
+        _ensure_entry_notified(
+            self.alert_id, self.symbol, self.direction,
+            self.entry, self.sl_price, self.tp_price,
+        )
         _send_exit_notification(
             self.symbol, self.direction, result,
             self.entry, exit_price, elapsed,
