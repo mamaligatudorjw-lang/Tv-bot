@@ -1723,7 +1723,7 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     "momentum_down_5":     65,
     "momentum_down_10":    65,
     "breakdown_short":     55,   # TEST signal — lower bar while calibrating
-    "momentum_long":       55,   # TEST signal — mirror of breakdown_short for longs
+    "momentum_long":       55,   # TEST signal — fade SHORT: pump+10% 24h → reversal
     "new_listing_short":   55,   # TEST signal — pump→dump after new listing
 }
 
@@ -2767,17 +2767,18 @@ def check_momentum_long(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
 ) -> int:
-    """🧪 ТЕСТ: Momentum continuation LONG.
+    """🧪 ТЕСТ: Momentum fade SHORT («памп иссякает»).
 
-    Зеркало breakdown_short — ловит монеты в середине восходящего движения:
-      - 24h рост ≥ MOMENTUM_LONG_PCT (+10%)    — сильное дневное движение вверх
-      - Price > EMA-200 (4h)                   — подтверждённый восходящий тренд
+    Статистика показала: при росте +10% за 24ч с RSI 42-68 выше EMA-200
+    цена стабильно падает после сигнала — значит эти условия предсказывают
+    разворот, а не продолжение. Инвертируем в SHORT.
+
+    Условия входа (прежние — статистически работают против лонга):
+      - 24h рост ≥ MOMENTUM_LONG_PCT (+10%)    — монета уже сделала ход
+      - Price > EMA-200 (4h)                   — памп был сильным
       - RSI in (MOMENTUM_LONG_RSI_MIN, MOMENTUM_LONG_RSI_MAX) = (42, 68)
-          выше 42 = импульс подтверждён, не ложный отскок
-          ниже 68 = ещё не перекуплена, есть куда расти
-
-    В отличие от overheated_24h (ловит вершину +20%/RSI≥70 для шорта),
-    этот сигнал ловит середину восходящего движения для входа в лонг.
+          не перекуплена (RSI<68), но импульс уже есть (RSI>42) → fade-зона
+      - Цена ≥ 0.75% ниже 24ч-максимума        — первый откат подтверждён
     """
     if not tickers:
         return 0
@@ -2822,6 +2823,18 @@ def check_momentum_long(
         if ema is None or price <= ema:
             continue
 
+        # Reversal confirmation: price must be ≥ 0.75% below 24h high
+        # (same filter as overheated/confluence SHORTs)
+        high_24h = float(t.get("highPrice", 0) or 0)
+        if high_24h > 0:
+            pullback_pct = (high_24h - price) / high_24h * 100.0
+            if pullback_pct < SHORT_REVERSAL_CONFIRM_PCT:
+                logger.debug(
+                    "%s/momentum_long SHORT blocked: pullback=%.2f%% < %.2f%% (still near peak)",
+                    symbol, pullback_pct, SHORT_REVERSAL_CONFIRM_PCT,
+                )
+                continue
+
         # Cooldown
         with state_lock:
             last = state["last_momentum_long_alerted"].get(symbol, 0)
@@ -2831,7 +2844,7 @@ def check_momentum_long(
         ema_pct = (price - ema) / ema * 100.0   # how far above EMA (positive = above)
 
         score = compute_signal_score(
-            "momentum_long", "buy",
+            "momentum_long", "sell",
             rsi=rsi, above_ema=True, pct24=pct24, btc_pct24=btc_pct24,
         )
         min_score = MIN_SCORE_BY_TYPE.get("momentum_long", MIN_ALERT_SCORE)
@@ -2841,26 +2854,26 @@ def check_momentum_long(
             )
             continue
 
-        sl_tp = _format_sl_tp("buy", price, atr)
+        sl_tp = _format_sl_tp("sell", price, atr)
         body = (
-            f"🧪 <b>[ТЕСТ] ИМПУЛЬС ВВЕРХ — лонг продолжается</b>\n"
-            f"Монета в восходящем тренде, импульс не исчерпан\n"
+            f"🧪 <b>[ТЕСТ] ПАМП ИССЯКАЕТ — шорт на развороте</b>\n"
+            f"Монета выросла +{pct24:.1f}% за 24ч, но начинает откат\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<code>{symbol}</code>\n"
-            f"📈 24ч: <b>+{pct24:.1f}%</b>\n"
-            f"📊 RSI: <b>{rsi:.1f}</b> — импульс активен, не перекуплен\n"
-            f"📍 Выше EMA-200: <b>+{ema_pct:.1f}%</b>\n"
+            f"📉 24ч: <b>+{pct24:.1f}%</b> → откат подтверждён\n"
+            f"📊 RSI: <b>{rsi:.1f}</b> — fade-зона, импульс гаснет\n"
+            f"📍 Выше EMA-200: <b>+{ema_pct:.1f}%</b> (перерасширение)\n"
             f"💰 Цена: <b>${price:,.6g}</b>\n"
             f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
             + (f"\n{sl_tp}" if sl_tp else "")
         )
         delivered, _aid = send_alert_with_log(
-            symbol, "momentum_long", "LONG", price, body, score,
+            symbol, "momentum_long", "SHORT", price, body, score,
         )
         if delivered:
             with state_lock:
                 state["last_momentum_long_alerted"][symbol] = now
-            logger.info("Momentum LONG alert sent: %s pct24=%.1f rsi=%.1f", symbol, pct24, rsi)
+            logger.info("Momentum fade SHORT sent: %s pct24=%.1f rsi=%.1f", symbol, pct24, rsi)
             sent += 1
 
     return sent
@@ -3127,7 +3140,7 @@ def run_checks():
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
         "breakdown_alerts": 0,         # TEST: breakdown continuation SHORT
-        "momentum_long_alerts": 0,     # TEST: momentum continuation LONG
+        "momentum_long_alerts": 0,     # TEST: momentum fade SHORT (pamped +10% → reversal)
         "new_listing_short_alerts": 0, # TEST: new listing pump→dump SHORT
         "errors": [],
     }
@@ -5208,6 +5221,8 @@ def _label_alert_type(alert_type: str) -> str:
     }
     if a in base:
         return base[a]
+    if a == "momentum_long":
+        return "Памп иссякает (fade SHORT)"
     if a.startswith("momentum_up_"):
         return f"Импульс вверх ×{a.rsplit('_', 1)[-1]}"
     if a.startswith("momentum_down_"):
