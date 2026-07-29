@@ -450,6 +450,9 @@ _tg_poll_thread: threading.Thread | None = None
 
 
 def start_command_polling() -> None:
+    if os.environ.get("BOT_POLLING_DISABLED", "").strip().lower() in {"1", "true", "yes"}:
+        logger.info("Telegram polling disabled (BOT_POLLING_DISABLED=true) — running in send-only mode")
+        return
     global _tg_poll_thread
     _delete_telegram_webhook()
     _tg_poll_thread = threading.Thread(
@@ -2651,7 +2654,7 @@ def check_overheated_oversold(
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
-    return sent_oh, sent_os, ema_blocked_oh
+    return sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh
 
 
 def check_breakdown_short(
