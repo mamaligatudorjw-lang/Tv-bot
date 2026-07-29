@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type {
   BotStatus,
   PerformanceResponse,
+  PositionsResponse,
   SignalsResponse,
   StatsResponse,
 } from "../types/api";
@@ -46,6 +47,18 @@ export function useStats() {
       return res.json();
     },
     refetchInterval: 120000, // 2m
+  });
+}
+
+export function usePositions() {
+  return useQuery<PositionsResponse>({
+    queryKey: ["positions"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/positions`);
+      if (!res.ok) throw new Error("Failed to fetch positions");
+      return res.json();
+    },
+    refetchInterval: 15_000, // 15s — live PnL
   });
 }
 

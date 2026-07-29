@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Dashboard from "@/pages/dashboard";
 import Performance from "@/pages/performance";
+import Positions from "@/pages/positions";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -20,6 +21,7 @@ function Router() {
     <Switch>
       <Route path="/" component={Dashboard} />
       <Route path="/performance" component={Performance} />
+      <Route path="/positions" component={Positions} />
       <Route component={NotFound} />
     </Switch>
   );

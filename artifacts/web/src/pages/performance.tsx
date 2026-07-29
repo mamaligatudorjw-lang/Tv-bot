@@ -103,6 +103,13 @@ export default function Performance() {
               <span className="rounded-md bg-primary/10 px-3 py-1.5 font-medium text-primary">
                 Производительность
               </span>
+              <Link
+                href="/positions"
+                className="rounded-md px-3 py-1.5 text-slate-400 hover-elevate"
+                data-testid="link-positions"
+              >
+                Позиции
+              </Link>
             </nav>
           </div>
           {isFetching && (

@@ -350,6 +350,13 @@ export default function Dashboard() {
               >
                 Производительность
               </Link>
+              <Link
+                href="/positions"
+                className="rounded-md px-3 py-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-200"
+                data-testid="link-positions"
+              >
+                Позиции
+              </Link>
             </nav>
           </div>
           <StatusPill />

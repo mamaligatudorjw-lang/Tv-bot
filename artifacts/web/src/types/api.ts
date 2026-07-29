@@ -56,6 +56,24 @@ export interface PerformanceBucket {
   horizons: Record<Horizon, HorizonStat>;
 }
 
+export interface Position {
+  id: number;
+  symbol: string;
+  direction: "LONG" | "SHORT";
+  entry: number;
+  currentPrice: number | null;
+  slPrice: number;
+  tpPrice: number;
+  pnlPct: number | null;
+  tsOpen: number;
+  elapsedSeconds: number;
+}
+
+export interface PositionsResponse {
+  count: number;
+  positions: Position[];
+}
+
 export interface PerformanceResponse {
   windowDays: number;
   since: number;

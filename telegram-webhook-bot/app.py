@@ -102,7 +102,7 @@ SL_REENTRY_COOLDOWN  = 43200      # 12h block on ALL new signals after an SL hit
 # --- Reversal confirmation for SHORT signals ---
 # A SHORT is only sent if price has already pulled back ≥ this % from its
 # 24-hour high.  Prevents shorting a coin that is still actively rising.
-SHORT_REVERSAL_CONFIRM_PCT = 1.5  # price must be ≥ 1.5% below 24h high
+SHORT_REVERSAL_CONFIRM_PCT = 0.75  # price must be ≥ 0.75% below 24h high
 
 # --- New listing pump→dump SHORT (TEST) ---
 NEW_LISTING_WINDOW_H     = 48     # only watch coins listed in last 48h
@@ -381,7 +381,8 @@ def _poll_telegram_commands() -> None:
         "/signal":   handle_signal_command,
         "/stats":    handle_stats_command,
         "/trade":    handle_trade_command,
-        "/mytrades": handle_mytrades_command,
+        "/mytrades":   handle_mytrades_command,
+        "/positions":  handle_positions_command,
         "/analyze":  handle_analyze_command,
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
@@ -4517,6 +4518,47 @@ def handle_trade_photo(chat_id: int, message: dict) -> None:
     handle_trade_command(chat_id, synthetic)
 
 
+def handle_positions_command(chat_id: int) -> None:
+    """Show all currently active position monitors with live PnL."""
+    with _monitors_lock:
+        monitors = list(_active_monitors.values())
+
+    if not monitors:
+        _telegram_send(chat_id, "📭 <b>Нет открытых позиций</b>")
+        return
+
+    lines = [f"📊 <b>Открытые позиции: {len(monitors)}</b>", ""]
+    now = time.time()
+    for m in sorted(monitors, key=lambda x: x.ts_open):
+        current = _get_current_price(m.symbol)
+        elapsed_h = (now - m.ts_open) / 3600
+        if current is not None:
+            pnl_pct = (
+                (current - m.entry) / m.entry * 100 if m.direction == "LONG"
+                else (m.entry - current) / m.entry * 100
+            )
+            pnl_emoji = "🟢" if pnl_pct > 0 else ("🔴" if pnl_pct < 0 else "⚪️")
+            pnl_str = f"{pnl_pct:+.2f}%"
+        else:
+            pnl_emoji, pnl_str = "⚪️", "—"
+            current = m.entry
+
+        dir_emoji = "📈" if m.direction == "LONG" else "📉"
+        lines.append(f"{dir_emoji} <b>{m.symbol}</b>  {m.direction}")
+        lines.append(
+            f"   Вход: <code>${m.entry:,.6g}</code>  "
+            f"Сейчас: <code>${current:,.6g}</code>"
+        )
+        lines.append(f"   PnL: {pnl_emoji} <b>{pnl_str}</b>  ({elapsed_h:.1f}ч)")
+        lines.append(
+            f"   SL: <code>${m.sl_price:,.6g}</code>  "
+            f"TP: <code>${m.tp_price:,.6g}</code>"
+        )
+        lines.append("")
+
+    _telegram_send(chat_id, "\n".join(lines))
+
+
 def handle_mytrades_command(chat_id: int) -> None:
     """Show the user's last 10 trades + W/L statistics."""
     try:
@@ -5386,6 +5428,40 @@ def api_signals_performance():
         "totalSignals": sum(e["count"] for e in out),
         "byType": out,
     })
+
+
+@app.route("/bot-api/positions", methods=["GET"])
+def api_positions():
+    """Return all currently active position monitors with live PnL."""
+    with _monitors_lock:
+        monitors = list(_active_monitors.values())
+
+    now = time.time()
+    result = []
+    for m in sorted(monitors, key=lambda x: x.ts_open):
+        current = _get_current_price(m.symbol)
+        if current is not None:
+            pnl_pct = (
+                (current - m.entry) / m.entry * 100 if m.direction == "LONG"
+                else (m.entry - current) / m.entry * 100
+            )
+        else:
+            current = None
+            pnl_pct = None
+        result.append({
+            "id":             m.position_id,
+            "symbol":         m.symbol,
+            "direction":      m.direction,
+            "entry":          m.entry,
+            "currentPrice":   current,
+            "slPrice":        m.sl_price,
+            "tpPrice":        m.tp_price,
+            "pnlPct":         round(pnl_pct, 4) if pnl_pct is not None else None,
+            "tsOpen":         m.ts_open,
+            "elapsedSeconds": int(now - m.ts_open),
+        })
+
+    return jsonify({"count": len(result), "positions": result})
 
 
 @app.route("/bot-api/status", methods=["GET"])
