@@ -72,7 +72,7 @@ state = {
     "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
     "last_breakdown_alerted": {},           # symbol -> ts (breakdown_short TEST cooldown)
     "last_momentum_long_alerted": {},       # symbol -> ts (momentum_long TEST cooldown)
-    "sl_blocked": {},                       # symbol -> ts (12h re-entry block after SL hit)
+    "sl_blocked": {},                       # unused — SL re-entry cooldown disabled
     "last_new_listing_short_alerted": {},   # symbol -> ts (new_listing_short TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
@@ -97,7 +97,7 @@ COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
-SL_REENTRY_COOLDOWN  = 21600      # 6h block on ALL new signals after an SL hit
+# SL_REENTRY_COOLDOWN — disabled (no block after SL hit)
 
 # --- Reversal confirmation for SHORT signals ---
 # A SHORT is only sent if price has already pulled back ≥ this % from its
@@ -3833,11 +3833,7 @@ class PositionMonitor(threading.Thread):
             self.symbol, self.direction, result,
             self.entry, exit_price, elapsed,
         )
-        # After SL hit: block all new signals on this symbol for SL_REENTRY_COOLDOWN
-        if result == "SL":
-            with state_lock:
-                state["sl_blocked"][self.symbol] = time.time()
-            logger.info("SL block set for %s (12h re-entry cooldown)", self.symbol)
+        # SL re-entry cooldown disabled — no block after SL hit
         with _monitors_lock:
             _active_monitors.pop(self.position_id, None)
 
