@@ -1716,7 +1716,7 @@ def _strength_label(score: int) -> str:
 # Alert send with inline buttons
 # ---------------------------------------------------------------------------
 
-MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "60"))
+MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "50"))
 
 # Per-type score minimums — override the global MIN_ALERT_SCORE for specific
 # signal types where historical data shows a higher bar improves quality.
@@ -3416,8 +3416,10 @@ def run_checks():
                     )
                     summary["confluence_ema_blocked"] += 1
                     continue
-                # LONG: suppress if price is below EMA-200 (downtrend — don't catch falling knives)
-                if rec_label == "LONG" and above_ema is False:
+                # LONG: suppress if price is below EMA-200 (downtrend)
+                # Exception: oversold bounce (RSI ≤ 30) is a reversal — fires naturally below EMA
+                is_conf_oversold = b["rsi"] is not None and b["rsi"] <= RSI_OVERSOLD
+                if rec_label == "LONG" and above_ema is False and not is_conf_oversold:
                     logger.debug(
                         "Confluence LONG suppressed by EMA-200 filter: "
                         "%s price=%.6g ema=%.6g (below EMA)",
