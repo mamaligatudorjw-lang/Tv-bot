@@ -175,6 +175,7 @@ HIT_RATE_RETENTION_DAYS = 120
 HIT_RATE_SL_PCT = 2.5              # stop-loss % (raised from 2.0 to reduce noise SL hits)
 HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
 HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
+MAX_OPEN_POSITIONS = 10            # cap on simultaneous position monitors
 
 
 # ---------------------------------------------------------------------------
@@ -3858,9 +3859,15 @@ def _auto_start_monitor(
         return
     if direction not in ("LONG", "SHORT"):
         return
-    # One active position per symbol: skip if a monitor for this symbol is already running
+    # One active position per symbol + global cap
     with _monitors_lock:
+        open_count = len(_active_monitors)
         open_symbols = {m.symbol for m in _active_monitors.values()}
+    if open_count >= MAX_OPEN_POSITIONS:
+        logger.info(
+            "_auto_start_monitor blocked: cap reached (%d/%d open)", open_count, MAX_OPEN_POSITIONS,
+        )
+        return
     if symbol in open_symbols:
         logger.info(
             "_auto_start_monitor blocked: %s already has an open position monitor", symbol,
