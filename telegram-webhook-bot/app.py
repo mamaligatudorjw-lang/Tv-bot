@@ -90,14 +90,14 @@ state = {
 # ---------------------------------------------------------------------------
 RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
-CONFLUENCE_MIN_SIGNALS = 3         # only alert when ≥ this many signals fire on same coin in one cycle
+CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
 COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
 COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
 COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 WEEKLY_HIGH_COOLDOWN = 3600
 MONTHLY_HIGH_COOLDOWN = 3600
 VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
-SL_REENTRY_COOLDOWN  = 43200      # 12h block on ALL new signals after an SL hit
+SL_REENTRY_COOLDOWN  = 21600      # 6h block on ALL new signals after an SL hit
 
 # --- Reversal confirmation for SHORT signals ---
 # A SHORT is only sent if price has already pulled back ≥ this % from its
@@ -137,10 +137,10 @@ MOMENTUM_THRESHOLDS_DOWN = (-2.0, -3.0, -5.0, -10.0)
 MOMENTUM_COOLDOWN = 1800           # 30 min per (symbol, threshold-tier)
 
 # Overheated / oversold 24h combo alerts (price + RSI confirmation)
-OVERHEATED_24H_PCT = 20.0
-OVERSOLD_24H_PCT = -20.0
+OVERHEATED_24H_PCT = 15.0
+OVERSOLD_24H_PCT = -15.0
 OVERHEATED_COOLDOWN = 14400        # 4h
-OVERSOLD_COOLDOWN = 14400          # 4h
+OVERSOLD_COOLDOWN = 7200           # 2h
 
 # Top-gainers list threshold (used by /top30 — pure +X% mover, no alert).
 # The pump_24h *alert* itself was removed in favor of volume_surge_{short,long}.
@@ -1731,13 +1731,13 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
 BREAKDOWN_SHORT_PCT  = -10.0   # 24h drop must be ≤ this to qualify
 BREAKDOWN_RSI_MIN    = 30.0    # RSI must be above (oversold coins excluded — different setup)
 BREAKDOWN_RSI_MAX    = 58.0    # RSI must be below (confirms selling pressure, not neutral)
-BREAKDOWN_COOLDOWN   = 28800   # 8h cooldown per coin
+BREAKDOWN_COOLDOWN   = 14400   # 4h cooldown per coin
 
 # --- Momentum continuation LONG (TEST) ---
 MOMENTUM_LONG_PCT    = 10.0    # 24h rise must be ≥ this to qualify
 MOMENTUM_LONG_RSI_MIN = 42.0   # RSI must be above (confirms momentum, not dead-cat)
 MOMENTUM_LONG_RSI_MAX = 68.0   # RSI must be below overbought (still room to grow)
-MOMENTUM_LONG_COOLDOWN = 28800 # 8h cooldown per coin
+MOMENTUM_LONG_COOLDOWN = 14400 # 4h cooldown per coin
 
 # Dynamic cooldown for overheated_24h based on market regime:
 # in a bull market the same coin can re-trigger quickly — use longer gap.
