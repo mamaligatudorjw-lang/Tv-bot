@@ -138,7 +138,7 @@ MOMENTUM_COOLDOWN = 1800           # 30 min per (symbol, threshold-tier)
 
 # Overheated / oversold 24h combo alerts (price + RSI confirmation)
 OVERHEATED_24H_PCT = 15.0
-OVERSOLD_24H_PCT = -15.0
+OVERSOLD_24H_PCT = -10.0
 OVERHEATED_COOLDOWN = 14400        # 4h
 OVERSOLD_COOLDOWN = 7200           # 2h
 
@@ -1188,11 +1188,13 @@ def make_recommendation(
     short_signal = is_overbought and near_24h_high
 
     # EMA-200 4h trend filter — don't fight the dominant trend
+    # Exception: pure oversold bounce (RSI ≤ 30) is a REVERSAL signal —
+    # it naturally fires below EMA-200, so we allow it through.
     short_blocked_by_ema = above_ema200 is True and short_signal
-    long_blocked_by_ema = above_ema200 is False and long_signal
+    long_blocked_by_ema = above_ema200 is False and long_signal and not is_oversold
     if above_ema200 is True:
         short_signal = False
-    if above_ema200 is False:
+    if above_ema200 is False and not is_oversold:
         long_signal = False
 
     if long_signal and not short_signal:
