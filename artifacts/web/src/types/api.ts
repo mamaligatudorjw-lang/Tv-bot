@@ -90,3 +90,18 @@ export interface PerformanceResponse {
   totalSignals: number;
   byType: PerformanceBucket[];
 }
+
+export interface AnalyticsPeriod {
+  views: number;
+  unique: number;
+  returning: number;
+  returnRate: number;
+}
+
+export interface AnalyticsResponse {
+  "1d":  AnalyticsPeriod;
+  "7d":  AnalyticsPeriod;
+  "30d": AnalyticsPeriod;
+  pages: { page: string; views: number }[];
+  daily: { date: string; views: number; unique: number }[];
+}

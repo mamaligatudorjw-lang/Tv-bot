@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import type {
+  AnalyticsResponse,
   BotStatus,
   PerformanceResponse,
   PositionsResponse,
@@ -8,6 +9,18 @@ import type {
 } from "../types/api";
 
 const API_BASE = "/bot-api";
+
+/** Fire-and-forget page-view beacon. Never throws. */
+export function trackPageView(page: string): void {
+  try {
+    const body = JSON.stringify({ page });
+    if (typeof navigator !== "undefined" && navigator.sendBeacon) {
+      navigator.sendBeacon(`${API_BASE}/track`, new Blob([body], { type: "application/json" }));
+    } else {
+      fetch(`${API_BASE}/track`, { method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true }).catch(() => {});
+    }
+  } catch { /* ignore */ }
+}
 
 export function useBotStatus() {
   return useQuery<BotStatus>({
@@ -59,6 +72,18 @@ export function usePositions() {
       return res.json();
     },
     refetchInterval: 15_000, // 15s — live PnL
+  });
+}
+
+export function useAnalytics() {
+  return useQuery<AnalyticsResponse>({
+    queryKey: ["analytics"],
+    queryFn: async () => {
+      const res = await fetch(`${API_BASE}/analytics`);
+      if (!res.ok) throw new Error("Failed to fetch analytics");
+      return res.json();
+    },
+    refetchInterval: 60_000, // 1m
   });
 }
 

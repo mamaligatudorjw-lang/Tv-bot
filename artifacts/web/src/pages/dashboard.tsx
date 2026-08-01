@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
-import { useBotStatus, useSignals, useStats } from "@/hooks/use-api";
+import { useBotStatus, useSignals, useStats, useAnalytics } from "@/hooks/use-api";
 import type { Signal } from "@/types/api";
 import {
   calcDeltaPercent,
@@ -9,6 +9,144 @@ import {
   formatSymbol,
   formatTimeAgo,
 } from "@/lib/format";
+
+// ── Analytics widget ────────────────────────────────────────────────────────
+
+const PAGE_LABELS: Record<string, string> = {
+  "/":            "Лента",
+  "/performance": "Производительность",
+  "/positions":   "Позиции",
+};
+
+function AnalyticsWidget() {
+  const { data, isLoading } = useAnalytics();
+
+  const bar = (v: number, max: number) => {
+    const pct = max > 0 ? Math.round((v / max) * 100) : 0;
+    return (
+      <div className="mt-1 h-1 w-full rounded-full bg-muted/40">
+        <div className="h-1 rounded-full bg-primary/60" style={{ width: `${pct}%` }} />
+      </div>
+    );
+  };
+
+  const maxViews = Math.max(...(data?.daily ?? []).map((d) => d.views), 1);
+
+  return (
+    <section className="mt-8">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          Посетители сайта
+        </span>
+        <span className="rounded-full border border-card-border px-2 py-0.5 text-[10px] text-muted-foreground/60">
+          данные с этой страницы
+        </span>
+      </div>
+
+      {/* KPI row */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        {(
+          [
+            { label: "Сегодня",           period: "1d",  key: "unique"    as const },
+            { label: "Повторные / 7д",    period: "7d",  key: "returning" as const },
+            { label: "Уникальных / 7д",   period: "7d",  key: "unique"    as const },
+            { label: "Просмотров / 30д",  period: "30d", key: "views"     as const },
+          ] as const
+        ).map(({ label, period, key }) => {
+          const val = isLoading ? null : (data as any)?.[period]?.[key] ?? 0;
+          const sub =
+            key === "returning" && data
+              ? `${(data as any)[period]?.returnRate ?? 0}% от уникальных`
+              : key === "unique" && period === "7d" && data
+              ? `из ${data["7d"].views} просмотров`
+              : undefined;
+          return (
+            <div
+              key={`${period}-${key}`}
+              className="rounded-2xl border border-card-border bg-card/60 p-4 backdrop-blur-sm"
+            >
+              <div className="text-[11px] uppercase tracking-[0.15em] text-muted-foreground">
+                {label}
+              </div>
+              <div className="mt-2 font-mono text-2xl tabular-nums leading-none">
+                {val === null ? "—" : val.toLocaleString("ru-RU")}
+              </div>
+              {sub && (
+                <div className="mt-1.5 text-[11px] text-muted-foreground">{sub}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Daily sparkline + page breakdown */}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {/* Sparkline — 14 days */}
+        <div className="rounded-2xl border border-card-border bg-card/40 p-4 backdrop-blur-sm">
+          <div className="mb-3 text-[11px] uppercase tracking-[0.15em] text-muted-foreground">
+            Активность (14 дней)
+          </div>
+          {isLoading ? (
+            <div className="h-20 animate-pulse rounded-lg bg-muted/30" />
+          ) : (
+            <div className="space-y-1">
+              {(data?.daily ?? []).slice(-14).map((d) => (
+                <div key={d.date} className="flex items-center gap-2">
+                  <span className="w-16 text-right font-mono text-[10px] text-muted-foreground/70">
+                    {d.date.slice(5)}
+                  </span>
+                  <div className="flex-1">
+                    {bar(d.views, maxViews)}
+                  </div>
+                  <span className="w-6 text-right font-mono text-[10px] tabular-nums text-muted-foreground">
+                    {d.views}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Page breakdown */}
+        <div className="rounded-2xl border border-card-border bg-card/40 p-4 backdrop-blur-sm">
+          <div className="mb-3 text-[11px] uppercase tracking-[0.15em] text-muted-foreground">
+            Страницы (30 дней)
+          </div>
+          {isLoading ? (
+            <div className="space-y-2">
+              {[1,2,3].map(i => (
+                <div key={i} className="h-6 animate-pulse rounded bg-muted/30" />
+              ))}
+            </div>
+          ) : (data?.pages ?? []).length === 0 ? (
+            <p className="text-sm text-muted-foreground">Нет данных пока</p>
+          ) : (
+            <div className="space-y-2">
+              {(data?.pages ?? []).map((p) => {
+                const maxP = Math.max(...(data?.pages ?? []).map(x => x.views), 1);
+                return (
+                  <div key={p.page}>
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs text-foreground/80">
+                        {PAGE_LABELS[p.page] ?? p.page}
+                      </span>
+                      <span className="font-mono text-xs tabular-nums text-muted-foreground">
+                        {p.views}
+                      </span>
+                    </div>
+                    {bar(p.views, maxP)}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
 
 type SideFilter = "all" | "buy" | "sell";
 
@@ -508,6 +646,8 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+
+        <AnalyticsWidget />
 
         <footer className="mt-16 border-t border-card-border pt-6 text-center text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
           Сканирование каждые 5 минут · Источник: Binance

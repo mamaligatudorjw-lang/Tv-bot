@@ -1351,6 +1351,22 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_posmon_status "
             "ON position_monitors(status)"
         )
+        # ── Visitor analytics ───────────────────────────────────────────────
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS page_views (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           INTEGER NOT NULL,
+                page         TEXT    NOT NULL,
+                visitor_hash TEXT    NOT NULL,
+                user_agent   TEXT
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pv_ts      ON page_views(ts)"
+        )
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_pv_visitor ON page_views(visitor_hash)"
+        )
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -5624,6 +5640,116 @@ def api_positions():
         })
 
     return jsonify({"count": len(result), "positions": result})
+
+
+@app.route("/bot-api/track", methods=["POST"])
+def api_track():
+    """Record a page-view beacon from the web dashboard.
+
+    Body (JSON): { "page": "/", "referrer": "..." }
+    The visitor is identified by a salted SHA-256 of IP + User-Agent —
+    no raw IP address is ever stored.
+    """
+    import hashlib
+    try:
+        body     = request.get_json(silent=True) or {}
+        page     = (body.get("page") or "/")[:200]
+        ua       = (request.headers.get("User-Agent") or "")[:300]
+        ip       = request.headers.get("X-Forwarded-For", request.remote_addr or "")
+        ip       = ip.split(",")[0].strip()
+        raw      = f"v1:{ip}:{ua}"
+        visitor  = hashlib.sha256(raw.encode()).hexdigest()[:32]
+        with _db_lock:
+            conn = _get_db()
+            conn.execute(
+                "INSERT INTO page_views (ts, page, visitor_hash, user_agent) VALUES (?,?,?,?)",
+                (int(time.time()), page, visitor, ua[:200]),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.debug("api_track error: %s", e)
+    return "", 204
+
+
+@app.route("/bot-api/analytics", methods=["GET"])
+def api_analytics():
+    """Visitor analytics for the web dashboard.
+
+    Returns daily views (last 14 days), totals for 1d / 7d / 30d,
+    unique-visitor counts, returning-visitor rate, and page breakdown.
+    """
+    now = int(time.time())
+    try:
+        with _db_lock:
+            conn = _get_db()
+
+            def _q(since: int):
+                return conn.execute(
+                    "SELECT page, visitor_hash FROM page_views WHERE ts >= ?",
+                    (since,),
+                ).fetchall()
+
+            rows_1d  = _q(now - 86400)
+            rows_7d  = _q(now - 7  * 86400)
+            rows_30d = _q(now - 30 * 86400)
+
+            # Daily buckets — last 14 days
+            daily_rows = conn.execute(
+                "SELECT ts, visitor_hash FROM page_views WHERE ts >= ?",
+                (now - 14 * 86400,),
+            ).fetchall()
+
+    except Exception as e:
+        logger.warning("api_analytics error: %s", e)
+        return jsonify({"error": "db_error"}), 500
+
+    def _summary(rows):
+        visitors = [r[1] for r in rows]
+        unique   = len(set(visitors))
+        total    = len(rows)
+        # returning = visitors seen more than once in this window
+        from collections import Counter
+        counts   = Counter(visitors)
+        returning = sum(1 for c in counts.values() if c > 1)
+        return {
+            "views":     total,
+            "unique":    unique,
+            "returning": returning,
+            "returnRate": round(returning / unique * 100, 1) if unique else 0,
+        }
+
+    # Pages breakdown (30d)
+    from collections import Counter
+    page_counts = Counter(r[0] for r in rows_30d)
+    pages = [
+        {"page": p, "views": c}
+        for p, c in page_counts.most_common(10)
+    ]
+
+    # Daily buckets
+    from collections import defaultdict
+    day_views    = defaultdict(int)
+    day_visitors = defaultdict(set)
+    for ts, vh in daily_rows:
+        day = time.strftime("%Y-%m-%d", time.gmtime(ts))
+        day_views[day]    += 1
+        day_visitors[day].add(vh)
+    daily = []
+    for i in range(13, -1, -1):
+        day = time.strftime("%Y-%m-%d", time.gmtime(now - i * 86400))
+        daily.append({
+            "date":    day,
+            "views":   day_views.get(day, 0),
+            "unique":  len(day_visitors.get(day, set())),
+        })
+
+    return jsonify({
+        "1d":   _summary(rows_1d),
+        "7d":   _summary(rows_7d),
+        "30d":  _summary(rows_30d),
+        "pages": pages,
+        "daily": daily,
+    })
 
 
 @app.route("/bot-api/status", methods=["GET"])
