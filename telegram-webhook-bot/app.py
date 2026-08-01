@@ -2179,12 +2179,10 @@ def check_new_listings(current_pairs: set[str]) -> list[str]:
 
 
 def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
-    """Send the dedicated eye-catching new-listing alert (always — bypasses the confluence rule)."""
+    """Send the dedicated eye-catching new-listing alert (always — bypasses the confluence rule).
+    Direction is always SHORT: new listings pump on listing day → fade the pump."""
     price_str = "—"
     volume_str = "—"
-    rsi_v: float | None = None
-    spike_v: float | None = None
-    near_high = False
     if ticker:
         try:
             price_str = f"${float(ticker['lastPrice']):,.6g}"
@@ -2194,23 +2192,6 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
             volume_str = f"${float(ticker['quoteVolume']):,.0f}"
         except (ValueError, KeyError):
             pass
-        near_high = _near_24h_high(ticker)
-
-    # Fresh listings rarely have 14h of klines yet, but try anyway
-    try:
-        rsi_v = get_klines_rsi(symbol)
-    except Exception:
-        pass
-    try:
-        spike_v, _pct_unused = get_5m_signals(symbol)
-    except Exception:
-        pass
-
-    rec_line, _reason = make_recommendation(
-        rsi=rsi_v, spike_ratio=spike_v, near_24h_high=near_high,
-    )
-    # Strip the prefix to fit it onto the template's single recommendation line
-    rec_short = rec_line.replace("📊 Рекомендация: ", "")
 
     body = (
         f"🚨🚨🚨 <b>НОВЫЙ ЛИСТИНГ НА BINANCE</b> 🚨🚨🚨\n"
@@ -2218,7 +2199,7 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
         f"🆕 <code>{symbol}</code> появился на Binance!\n"
         f"💰 Цена: <b>{price_str}</b>\n"
         f"📊 Объём 24ч: {volume_str}\n"
-        f"🎯 Рекомендация: <b>{rec_short}</b>\n"
+        f"📉 Рекомендация: <b>SHORT — памп на листинге → шорт</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡️ <b>ДЕЙСТВУЙ БЫСТРО — первые минуты самые важные!</b>"
     )
@@ -2229,7 +2210,7 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
                 price_for_log = float(ticker["lastPrice"])
             except (ValueError, KeyError):
                 pass
-        log_alert(symbol, "new_listing", _rec_label(rec_line), price_for_log)
+        log_alert(symbol, "new_listing", "SHORT", price_for_log)
     logger.info("New-listing alert sent: %s", symbol)
 
 
@@ -2345,6 +2326,7 @@ def check_coingecko_new_coins() -> None:
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"🌕 <b>{safe_name}</b> (<code>{safe_symbol}</code>) есть на CoinGecko но <b>ЕЩЁ НЕТ на Binance</b>!\n"
             f"🔗 Следи — возможен скорый листинг на Binance\n"
+            f"📉 При листинге план: <b>SHORT — памп при листинге → шорт</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"👀 Изучи проект заранее!"
         )
