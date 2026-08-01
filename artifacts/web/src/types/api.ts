@@ -48,7 +48,7 @@ export interface StatsResponse {
   }[];
 }
 
-export type Horizon = "3m" | "5m" | "15m" | "1h" | "4h";
+export type Horizon = "3m" | "5m" | "15m" | "1h" | "4h" | "1d" | "2d" | "3d" | "7d";
 
 export interface HorizonStat {
   followups: number;

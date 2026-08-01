@@ -18,6 +18,10 @@ const HORIZONS: { key: Horizon; label: string }[] = [
   { key: "15m", label: "15м" },
   { key: "1h",  label: "1ч"  },
   { key: "4h",  label: "4ч"  },
+  { key: "1d",  label: "1д"  },
+  { key: "2d",  label: "2д"  },
+  { key: "3d",  label: "3д"  },
+  { key: "7d",  label: "7д"  },
 ];
 
 /** Sort by win-rate for a horizon, or by count. */
@@ -69,12 +73,13 @@ export default function Performance() {
     return copy;
   }, [data, sortKey]);
 
-  /** KPI summary uses the 4h horizon as the "canonical" quality metric */
+  /** KPI summary uses the 1d horizon as the "canonical" quality metric */
   const summary = useMemo(() => {
     if (!data?.byType?.length) return null;
     let totalFollowups = 0, totalWins = 0, sumReturn = 0;
     for (const e of data.byType) {
-      const h = e.horizons["4h"];
+      // prefer 1d; fall back to 4h for recent signals that don't have 1d yet
+      const h = e.horizons["1d"]?.followups ? e.horizons["1d"] : e.horizons["4h"];
       if (!h) continue;
       totalFollowups += h.followups;
       totalWins      += h.winRate  !== null ? h.winRate  * h.followups : 0;

@@ -168,7 +168,17 @@ ALERTS_DB_BACKUP_KEEP = 24
 BOT_STATE_PATH = os.path.join(
     os.path.dirname(__file__) or ".", ".bot_state.json"
 )
-HIT_RATE_INTERVALS = ((180, "3м"), (300, "5м"), (900, "15м"), (3600, "1ч"), (14400, "4ч"))
+HIT_RATE_INTERVALS = (
+    (180,    "3м"),
+    (300,    "5м"),
+    (900,    "15м"),
+    (3600,   "1ч"),
+    (14400,  "4ч"),
+    (86400,  "1д"),
+    (172800, "2д"),
+    (259200, "3д"),
+    (604800, "7д"),
+)
 HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win (legacy, kept for compat)
 HIT_RATE_RETENTION_DAYS = 120
 # SL/TP for simulated P&L in hit-rate stats (matches backtest defaults)
@@ -1276,6 +1286,10 @@ def _get_db() -> sqlite3.Connection:
             ("score",    "INTEGER"),
             ("price_3m", "REAL"),
             ("price_5m", "REAL"),
+            ("price_1d", "REAL"),
+            ("price_2d", "REAL"),
+            ("price_3d", "REAL"),
+            ("price_7d", "REAL"),
         ):
             try:
                 _db_conn.execute(f"ALTER TABLE alerts ADD COLUMN {_col} {_coltype}")
@@ -1370,35 +1384,44 @@ def log_alert(symbol: str, alert_type: str, recommendation: str | None, price: f
 def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
     """Back-fill follow-up prices for past alerts whose time windows have
     elapsed, using the just-fetched tickers map. Cheap to call every cycle.
-    Supports five snapshot horizons: 3м / 5м / 15м / 1ч / 4ч.
-    Note: 3m/5m prices are captured at the first cycle tick *after* the
-    threshold passes (≈ 3–10 min after the signal), which is a known
-    approximation inherent in the 5-min polling architecture.
+    Horizons: 3м / 5м / 15м / 1ч / 4ч / 1д / 2д / 3д / 7д.
+    Prices are captured at the first cycle tick *after* the threshold passes
+    (≈ 5 min approximation for short horizons, negligible for daily ones).
     """
     if not tickers:
         return
     now_ts = int(time.time())
-    c3m  = now_ts - HIT_RATE_INTERVALS[0][0]   # 180 s
-    c5m  = now_ts - HIT_RATE_INTERVALS[1][0]   # 300 s
-    c15  = now_ts - HIT_RATE_INTERVALS[2][0]   # 900 s
-    c1h  = now_ts - HIT_RATE_INTERVALS[3][0]   # 3 600 s
-    c4h  = now_ts - HIT_RATE_INTERVALS[4][0]   # 14 400 s
+    c3m  = now_ts - 180
+    c5m  = now_ts - 300
+    c15  = now_ts - 900
+    c1h  = now_ts - 3_600
+    c4h  = now_ts - 14_400
+    c1d  = now_ts - 86_400
+    c2d  = now_ts - 172_800
+    c3d  = now_ts - 259_200
+    c7d  = now_ts - 604_800
     retain_cutoff = now_ts - HIT_RATE_RETENTION_DAYS * 86400
     try:
         with _db_lock:
             conn = _get_db()
             rows = conn.execute(
-                "SELECT id, symbol, price_3m, price_5m, price_15m, price_1h, price_4h, ts "
+                "SELECT id, symbol, "
+                "price_3m, price_5m, price_15m, price_1h, price_4h, "
+                "price_1d, price_2d, price_3d, price_7d, ts "
                 "FROM alerts "
                 "WHERE (price_3m  IS NULL AND ts <= ?) "
                 "   OR (price_5m  IS NULL AND ts <= ?) "
                 "   OR (price_15m IS NULL AND ts <= ?) "
                 "   OR (price_1h  IS NULL AND ts <= ?) "
-                "   OR (price_4h  IS NULL AND ts <= ?)",
-                (c3m, c5m, c15, c1h, c4h),
+                "   OR (price_4h  IS NULL AND ts <= ?) "
+                "   OR (price_1d  IS NULL AND ts <= ?) "
+                "   OR (price_2d  IS NULL AND ts <= ?) "
+                "   OR (price_3d  IS NULL AND ts <= ?) "
+                "   OR (price_7d  IS NULL AND ts <= ?)",
+                (c3m, c5m, c15, c1h, c4h, c1d, c2d, c3d, c7d),
             ).fetchall()
             updates: list[tuple] = []
-            for row_id, symbol, p3m, p5m, p15, p1h, p4h, ts in rows:
+            for row_id, symbol, p3m, p5m, p15, p1h, p4h, p1d, p2d, p3d, p7d, ts in rows:
                 t = tickers.get(symbol)
                 if not t:
                     continue
@@ -1406,16 +1429,23 @@ def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
                     cur = float(t["lastPrice"])
                 except (ValueError, KeyError):
                     continue
-                new_p3m  = cur if (p3m  is None and ts <= c3m)  else p3m
-                new_p5m  = cur if (p5m  is None and ts <= c5m)  else p5m
-                new_p15  = cur if (p15  is None and ts <= c15)  else p15
-                new_p1h  = cur if (p1h  is None and ts <= c1h)  else p1h
-                new_p4h  = cur if (p4h  is None and ts <= c4h)  else p4h
-                updates.append((new_p3m, new_p5m, new_p15, new_p1h, new_p4h, row_id))
+                updates.append((
+                    cur if (p3m is None and ts <= c3m)  else p3m,
+                    cur if (p5m is None and ts <= c5m)  else p5m,
+                    cur if (p15 is None and ts <= c15)  else p15,
+                    cur if (p1h is None and ts <= c1h)  else p1h,
+                    cur if (p4h is None and ts <= c4h)  else p4h,
+                    cur if (p1d is None and ts <= c1d)  else p1d,
+                    cur if (p2d is None and ts <= c2d)  else p2d,
+                    cur if (p3d is None and ts <= c3d)  else p3d,
+                    cur if (p7d is None and ts <= c7d)  else p7d,
+                    row_id,
+                ))
             if updates:
                 conn.executemany(
                     "UPDATE alerts SET "
-                    "price_3m=?, price_5m=?, price_15m=?, price_1h=?, price_4h=? "
+                    "price_3m=?, price_5m=?, price_15m=?, price_1h=?, price_4h=?, "
+                    "price_1d=?, price_2d=?, price_3d=?, price_7d=? "
                     "WHERE id=?",
                     updates,
                 )
@@ -5411,7 +5441,8 @@ def api_signals_performance():
             conn = _get_db()
             rows = conn.execute(
                 "SELECT alert_type, recommendation, price_at_alert, "
-                "price_3m, price_5m, price_15m, price_1h, price_4h "
+                "price_3m, price_5m, price_15m, price_1h, price_4h, "
+                "price_1d, price_2d, price_3d, price_7d "
                 "FROM alerts WHERE ts >= ? AND ts <= ?",
                 (since, settled_before),
             ).fetchall()
@@ -5420,7 +5451,7 @@ def api_signals_performance():
         return jsonify({"error": "db_error"}), 500
 
     buckets: dict[tuple[str, str], dict] = {}
-    for alert_type, rec, p0, p3m, p5m, p15, p1h, p4h in rows:
+    for alert_type, rec, p0, p3m, p5m, p15, p1h, p4h, p1d, p2d, p3d, p7d in rows:
         side = _classify_side(alert_type, rec)
         if side == "neutral":
             continue
@@ -5434,12 +5465,13 @@ def api_signals_performance():
             "count": 0,
             "horizons": {
                 h: {"followups": 0, "wins": 0, "sumReturn": 0.0}
-                for h in ("3m", "5m", "15m", "1h", "4h")
+                for h in ("3m", "5m", "15m", "1h", "4h", "1d", "2d", "3d", "7d")
             },
         })
         b["count"] += 1
         for horizon, pf in (
-            ("3m", p3m), ("5m", p5m), ("15m", p15), ("1h", p1h), ("4h", p4h)
+            ("3m", p3m), ("5m", p5m), ("15m", p15), ("1h", p1h), ("4h", p4h),
+            ("1d", p1d), ("2d", p2d), ("3d", p3d), ("7d", p7d),
         ):
             if pf is None or pf <= 0:
                 continue
