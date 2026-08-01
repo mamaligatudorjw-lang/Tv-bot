@@ -3685,7 +3685,7 @@ def run_checks():
                     f"• ⚠️ Перегрета (+20% за 24ч + RSI ≥ 70 — возможен шорт)\n"
                     f"• 💎 Перепродана (-20% за 24ч + RSI ≤ 30 — возможен лонг)\n\n"
                     f"<b>Фильтр тренда:</b> EMA-200 (4ч) — блокирует шорт выше EMA и лонг ниже EMA.\n\n"
-                    f"<b>Команды:</b> /status /top10 /signal /stats /trade /mytrades /silence /unmute"
+                    f"<b>Команды:</b> /status · /top10 · /top30 · /signal · /stats · /trade · /mytrades · /silence · /unmute"
                 )
 
     except Exception as e:
