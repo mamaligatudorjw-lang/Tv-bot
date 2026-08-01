@@ -1798,7 +1798,6 @@ def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
             [
                 {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
                 {"text": "Скрыть тип", "callback_data": f"ht:{alert_type}"},
-                {"text": "Открыть в Binance", "url": _binance_url(symbol)},
             ],
         ]
     }
@@ -1809,9 +1808,79 @@ def _build_voted_buttons(alert_id: int, symbol: str, vote: int) -> dict:
     return {
         "inline_keyboard": [
             [{"text": mark, "callback_data": f"noop:{alert_id}"}],
-            [{"text": "Открыть в Binance", "url": _binance_url(symbol)}],
         ]
     }
+
+
+def _get_signal_edge_label(alert_type: str, recommendation: str) -> str | None:
+    """Query 30-day historical performance for this (alert_type, recommendation).
+
+    Checks 2d, 3d, 7d horizons. If the best horizon has avg aligned return ≥ 2%
+    with ≥ 5 follow-ups, returns a formatted recommendation label.
+    Returns None when data is insufficient or edge is below the threshold.
+    """
+    side = "buy" if recommendation == "LONG" else "sell"
+    since = int(time.time()) - 30 * 86400
+    settled_before = int(time.time()) - 5 * 60
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT price_at_alert, price_2d, price_3d, price_7d "
+                "FROM alerts "
+                "WHERE alert_type=? AND recommendation=? AND ts >= ? AND ts <= ?",
+                (alert_type, recommendation, since, settled_before),
+            ).fetchall()
+    except Exception as e:
+        logger.debug("_get_signal_edge_label query failed: %s", e)
+        return None
+
+    if not rows:
+        return None
+
+    bucket: dict[str, list[float]] = {"2d": [], "3d": [], "7d": []}
+    for p0, p2d, p3d, p7d in rows:
+        if not p0 or p0 <= 0:
+            continue
+        for key, pf in (("2d", p2d), ("3d", p3d), ("7d", p7d)):
+            if pf and pf > 0:
+                change = (pf - p0) / p0
+                aligned = change if side == "buy" else -change
+                bucket[key].append(aligned)
+
+    # Pick the best horizon: highest avg return with ≥ 5 completed samples
+    best_horizon: str | None = None
+    best_avg = 0.0
+    for h, vals in bucket.items():
+        if len(vals) < 5:
+            continue
+        avg = sum(vals) / len(vals)
+        if avg > best_avg:
+            best_avg = avg
+            best_horizon = h
+
+    if best_horizon is None or best_avg < 0.02:
+        return None
+
+    vals = bucket[best_horizon]
+    wins = sum(1 for v in vals if v > 0)
+    win_rate = wins / len(vals)
+    h_label = {"2d": "2 дня", "3d": "3 дня", "7d": "7 дней"}[best_horizon]
+
+    if best_avg >= 0.10:
+        badge = "🔥 Очень сильный сигнал"
+    elif best_avg >= 0.05:
+        badge = "💪 Сильный сигнал"
+    else:
+        badge = "📈 Умеренный сигнал"
+
+    action = "Держите SHORT" if side == "sell" else "Держите LONG"
+    return (
+        f"\n\n{badge}\n"
+        f"📊 По статистике 30 дней: {action} — "
+        f"среднее движение <b>+{best_avg * 100:.1f}%</b> за {h_label}\n"
+        f"Win-rate: <b>{win_rate * 100:.0f}%</b> · Выборка: <b>{len(vals)} сигнала</b>"
+    )
 
 
 def send_alert_with_log(
@@ -1892,24 +1961,12 @@ def send_alert_with_log(
         return (False, None)
     if _regime_label:
         body_text = f"{body_text}\n{_regime_label}"
-    # C. Leverage warning appended to every SHORT alert.
-    if recommendation == "SHORT":
-        body_text = (
-            body_text
-            + "\n\n⚠️ <i>Горизонт сигнала: 1-4 ч, ожидаемое движение 2-7%. "
-            "Плечо выше 5× может привести к ликвидации раньше, "
-            "чем сигнал отработает. Управляйте размером позиции.</i>"
-        )
-    # Duplicate the Binance link inside the message text so the user can
-    # long-press → "Открыть во внешнем браузере", which lets the OS resolve
-    # the universal-link and hand it to the Binance app. Inline-button taps
-    # always go through Telegram's in-app browser and skip universal-links.
-    body_with_link = (
-        f"{body_text}\n\n"
-        f"🔗 <a href=\"{_binance_url(symbol)}\">Открыть в приложении Binance</a> "
-        f"<i>(зажмите ссылку → «Открыть во внешнем браузере»)</i>"
-    )
-    if not _telegram_send(TELEGRAM_CHAT_ID, body_with_link, reply_markup=markup):
+    # C. Historical edge label — appended when 30-day stats show ≥2% avg return
+    #    in the signal's direction at any 2d/3d/7d horizon with ≥5 samples.
+    edge_label = _get_signal_edge_label(alert_type, recommendation)
+    if edge_label:
+        body_text = body_text + edge_label
+    if not _telegram_send(TELEGRAM_CHAT_ID, body_text, reply_markup=markup):
         # Rollback so cooldowns don't suppress retries
         try:
             with _db_lock:
