@@ -2526,7 +2526,7 @@ def check_rsi_and_spikes(
 # ---------------------------------------------------------------------------
 
 _MOMENTUM_EMOJI = {
-    2.0: "🟢",    3.0: "🟢🟢",   5.0: "🟢🟢🟢",  10.0: "🚀🚀🚀",
+    2.0: "🔴",    3.0: "🔴🔴",   5.0: "🔴🔴🔴",  10.0: "💥💥💥",   # pump → SHORT (fade)
     -2.0: "🔴",  -3.0: "🔴🔴",  -5.0: "🔴🔴🔴",  -10.0: "💥💥💥",
 }
 
@@ -2612,9 +2612,9 @@ def check_momentum(
 
         emoji = _MOMENTUM_EMOJI.get(threshold, "📊")
         sign = "+" if pct > 0 else ""
-        rec = "LONG" if pct > 0 else "SHORT"
+        rec = "SHORT"   # momentum_up now fades the pump — always SHORT
         kind = f"momentum_{'up' if pct > 0 else 'down'}_{int(abs(threshold))}"
-        side = "buy" if pct > 0 else "sell"
+        side = "sell"
         btc_t = tickers.get("BTCUSDT") if tickers else None
         btc_pct24 = None
         if btc_t:
@@ -2626,12 +2626,21 @@ def check_momentum(
         with state_lock:
             atr = state["atr_4h"].get(symbol)
         sl_tp = _format_sl_tp(side, price, atr)
-        body = (
-            f"{emoji} <b><code>{symbol}</code> {sign}{pct:.1f}% за 15 минут</b>\n"
-            f"💰 Цена: {price_str}\n"
-            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
-            + (f"\n{sl_tp}" if sl_tp else "")
-        )
+        if pct > 0:
+            body = (
+                f"{emoji} <b><code>{symbol}</code> памп +{pct:.1f}% за 15м → SHORT</b>\n"
+                f"💰 Цена: {price_str}\n"
+                f"📉 Фейд памп — входим в шорт\n"
+                f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+                + (f"\n{sl_tp}" if sl_tp else "")
+            )
+        else:
+            body = (
+                f"{emoji} <b><code>{symbol}</code> {sign}{pct:.1f}% за 15 минут</b>\n"
+                f"💰 Цена: {price_str}\n"
+                f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+                + (f"\n{sl_tp}" if sl_tp else "")
+            )
         delivered, _aid = send_alert_with_log(symbol, kind, rec, price, body, score)
         if not delivered:
             continue
@@ -5365,7 +5374,7 @@ def _label_alert_type(alert_type: str) -> str:
     if a == "momentum_long":
         return "Памп иссякает (fade SHORT)"
     if a.startswith("momentum_up_"):
-        return f"Импульс вверх ×{a.rsplit('_', 1)[-1]}"
+        return f"Памп ×{a.rsplit('_', 1)[-1]} → SHORT"
     if a.startswith("momentum_down_"):
         return f"Импульс вниз ×{a.rsplit('_', 1)[-1]}"
     return a
