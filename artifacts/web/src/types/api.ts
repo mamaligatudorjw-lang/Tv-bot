@@ -32,6 +32,14 @@ export interface SignalsResponse {
 export interface StatsResponse {
   total: number;
   last24h: number;
+  periodCounts: {
+    "18h": number;
+    "24h": number;
+    "3d":  number;
+    "6d":  number;
+    "12d": number;
+    "30d": number;
+  };
   byTypeLast7d: {
     alertType: string;
     label: string;

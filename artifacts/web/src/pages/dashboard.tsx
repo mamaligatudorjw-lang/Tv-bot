@@ -395,6 +395,50 @@ export default function Dashboard() {
           />
         </section>
 
+        {/* Period breakdown */}
+        <section className="mt-4">
+          <div className="rounded-2xl border border-card-border bg-card/40 p-4 backdrop-blur-sm">
+            <div className="mb-3 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+              Сигналов по периодам
+            </div>
+            {stats.isLoading ? (
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="h-12 animate-pulse rounded-lg bg-muted/40" />
+                ))}
+              </div>
+            ) : (
+              <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+                {(
+                  [
+                    { key: "18h",  label: "18 часов" },
+                    { key: "24h",  label: "24 часа"  },
+                    { key: "3d",   label: "3 дня"    },
+                    { key: "6d",   label: "6 дней"   },
+                    { key: "12d",  label: "12 дней"  },
+                    { key: "30d",  label: "30 дней"  },
+                  ] as const
+                ).map(({ key, label }) => {
+                  const cnt = stats.data?.periodCounts?.[key] ?? 0;
+                  return (
+                    <div
+                      key={key}
+                      className="flex flex-col items-center rounded-xl border border-card-border bg-card/60 px-2 py-3"
+                    >
+                      <span className="font-mono text-xl font-semibold tabular-nums leading-none">
+                        {cnt.toLocaleString("ru-RU")}
+                      </span>
+                      <span className="mt-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+                        {label}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+
         <section className="mt-10">
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div>

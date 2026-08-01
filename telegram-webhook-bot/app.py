@@ -5318,15 +5318,27 @@ def api_signals_recent():
 
 @app.route("/bot-api/signals/stats", methods=["GET"])
 def api_signals_stats():
+    PERIODS = [
+        ("18h",  int(18 * 3600)),
+        ("24h",  int(24 * 3600)),
+        ("3d",   int(3  * 86400)),
+        ("6d",   int(6  * 86400)),
+        ("12d",  int(12 * 86400)),
+        ("30d",  int(30 * 86400)),
+    ]
     try:
         with _db_lock:
             conn = _get_db()
-            total = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
             now_ts = int(time.time())
-            last_24h = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE ts >= ?",
-                (now_ts - 86400,),
-            ).fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
+            # Count per period
+            period_counts: dict[str, int] = {}
+            for label, seconds in PERIODS:
+                cnt = conn.execute(
+                    "SELECT COUNT(*) FROM alerts WHERE ts >= ?",
+                    (now_ts - seconds,),
+                ).fetchone()[0]
+                period_counts[label] = cnt
             grouped = conn.execute(
                 "SELECT alert_type, recommendation, COUNT(*) FROM alerts "
                 "WHERE ts >= ? GROUP BY alert_type, recommendation",
@@ -5360,7 +5372,8 @@ def api_signals_stats():
 
     return jsonify({
         "total": total,
-        "last24h": last_24h,
+        "last24h": period_counts.get("24h", 0),
+        "periodCounts": period_counts,
         "byTypeLast7d": rows_out,
     })
 
