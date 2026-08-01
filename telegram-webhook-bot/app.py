@@ -5390,15 +5390,17 @@ def api_signals_performance():
     """
     try:
         window_arg = (request.args.get("window") or "30d").strip().lower()
-        if window_arg.endswith("d"):
-            window_days = max(1, min(int(window_arg[:-1]), 365))
+        if window_arg.endswith("h"):
+            window_seconds = max(3600, min(int(window_arg[:-1]) * 3600, 365 * 86400))
+        elif window_arg.endswith("d"):
+            window_seconds = max(86400, min(int(window_arg[:-1]) * 86400, 365 * 86400))
         else:
-            window_days = max(1, min(int(window_arg), 365))
+            window_seconds = max(86400, min(int(window_arg) * 86400, 365 * 86400))
     except (TypeError, ValueError):
-        window_days = 30
+        window_seconds = 30 * 86400
 
     now_ts = int(time.time())
-    since = now_ts - 86400 * window_days
+    since = now_ts - window_seconds
     # require at least 4h of settle time so the 4h follow-up could be filled
     # 5-minute settle so even 3m/5m follow-ups can appear; longer horizons
     # naturally have fewer follow-ups for recent signals — that is expected.
@@ -5469,7 +5471,8 @@ def api_signals_performance():
     out.sort(key=lambda e: e["count"], reverse=True)
 
     return jsonify({
-        "windowDays": window_days,
+        "window": window_arg,
+        "windowSeconds": window_seconds,
         "since": since,
         "until": settled_before,
         "totalSignals": sum(e["count"] for e in out),

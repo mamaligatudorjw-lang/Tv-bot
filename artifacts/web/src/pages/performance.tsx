@@ -4,10 +4,12 @@ import { usePerformance } from "@/hooks/use-api";
 import type { Horizon, PerformanceBucket } from "@/types/api";
 
 const WINDOWS = [
-  { days: 7,  label: "7 дней"  },
-  { days: 14, label: "14 дней" },
-  { days: 30, label: "30 дней" },
-  { days: 90, label: "90 дней" },
+  { key: "18h", label: "18ч"    },
+  { key: "24h", label: "24ч"    },
+  { key: "3d",  label: "3 дня"  },
+  { key: "6d",  label: "6 дней" },
+  { key: "12d", label: "12 дней"},
+  { key: "30d", label: "30 дней"},
 ];
 
 const HORIZONS: { key: Horizon; label: string }[] = [
@@ -46,9 +48,9 @@ function returnClass(v: number | null): string {
 }
 
 export default function Performance() {
-  const [windowDays, setWindowDays] = useState(30);
+  const [window, setWindow] = useState("30d");
   const [sortKey, setSortKey]       = useState<SortKey>("count");
-  const { data, isLoading, error, isFetching } = usePerformance(windowDays);
+  const { data, isLoading, error, isFetching } = usePerformance(window);
 
   const sorted = useMemo(() => {
     if (!data?.byType) return [];
@@ -138,17 +140,17 @@ export default function Performance() {
           >
             {WINDOWS.map((w) => (
               <button
-                key={w.days}
+                key={w.key}
                 type="button"
                 role="radio"
-                aria-checked={windowDays === w.days}
-                onClick={() => setWindowDays(w.days)}
+                aria-checked={window === w.key}
+                onClick={() => setWindow(w.key)}
                 className={`rounded px-3 py-1.5 text-sm transition ${
-                  windowDays === w.days
+                  window === w.key
                     ? "bg-primary text-primary-foreground"
                     : "text-slate-300 hover:bg-white/5"
                 }`}
-                data-testid={`button-window-${w.days}`}
+                data-testid={`button-window-${w.key}`}
               >
                 {w.label}
               </button>
@@ -162,7 +164,7 @@ export default function Performance() {
             <SummaryCard
               label="Данных 4ч"
               value={`${summary.totalFollowups}`}
-              hint={`из ${data?.totalSignals ?? 0} всего за ${windowDays} дн.`}
+              hint={`из ${data?.totalSignals ?? 0} всего за ${data?.window ?? window}`}
               testId="kpi-followups"
             />
             <SummaryCard

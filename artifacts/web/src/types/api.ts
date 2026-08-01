@@ -83,7 +83,8 @@ export interface PositionsResponse {
 }
 
 export interface PerformanceResponse {
-  windowDays: number;
+  window: string;
+  windowSeconds: number;
   since: number;
   until: number;
   totalSignals: number;

@@ -62,12 +62,12 @@ export function usePositions() {
   });
 }
 
-export function usePerformance(windowDays: number) {
+export function usePerformance(window: string) {
   return useQuery<PerformanceResponse>({
-    queryKey: ["performance", windowDays],
+    queryKey: ["performance", window],
     queryFn: async () => {
-      const url = new URL(`${API_BASE}/signals/performance`, window.location.origin);
-      url.searchParams.set("window", `${windowDays}d`);
+      const url = new URL(`${API_BASE}/signals/performance`, globalThis.location.origin);
+      url.searchParams.set("window", window);
       const res = await fetch(url.toString());
       if (!res.ok) throw new Error("Failed to fetch performance");
       return res.json();
