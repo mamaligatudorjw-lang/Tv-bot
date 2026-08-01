@@ -3592,6 +3592,19 @@ def run_checks():
             # 10. Hit-rate: back-fill follow-up prices for past alerts (15м / 1ч / 4ч)
             fill_alert_followups(tickers)
 
+            # 11. Update in-memory price cache from tickers snapshot
+            if tickers:
+                global _price_cache, _price_cache_ts
+                new_cache: dict[str, float] = {}
+                for sym, t in tickers.items():
+                    try:
+                        new_cache[sym] = float(t["lastPrice"])
+                    except (ValueError, KeyError):
+                        pass
+                with _price_cache_lock:
+                    _price_cache = new_cache
+                    _price_cache_ts = time.time()
+
         # Mark as initialized after first successful run
         with state_lock:
             if not state["initialized"] and current_pairs:
@@ -3647,6 +3660,12 @@ MONITOR_SLIPPAGE_PCT  = 5.0         # re-verify if price moves >5 % in one tick
 
 _active_monitors: dict[int, "PositionMonitor"] = {}
 _monitors_lock = threading.Lock()
+
+# In-memory price cache — updated every check cycle from the tickers snapshot.
+# Used by api_positions() so it never makes individual Binance calls per position.
+_price_cache: dict[str, float] = {}
+_price_cache_lock = threading.Lock()
+_price_cache_ts: float = 0.0   # unix timestamp of last update
 
 
 def _get_current_price(symbol: str) -> float | None:
@@ -5514,14 +5533,18 @@ def api_signals_performance():
 
 @app.route("/bot-api/positions", methods=["GET"])
 def api_positions():
-    """Return all currently active position monitors with live PnL."""
+    """Return all currently active position monitors with live PnL (from price cache)."""
     with _monitors_lock:
         monitors = list(_active_monitors.values())
+
+    with _price_cache_lock:
+        prices = dict(_price_cache)
+        cache_age = int(time.time() - _price_cache_ts) if _price_cache_ts else None
 
     now = time.time()
     result = []
     for m in sorted(monitors, key=lambda x: x.ts_open):
-        current = _get_current_price(m.symbol)
+        current = prices.get(m.symbol) or _get_current_price(m.symbol)
         if current is not None:
             pnl_pct = (
                 (current - m.entry) / m.entry * 100 if m.direction == "LONG"
