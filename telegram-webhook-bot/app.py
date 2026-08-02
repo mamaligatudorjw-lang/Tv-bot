@@ -90,8 +90,8 @@ state = {
 # ---------------------------------------------------------------------------
 RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
-CONFLUENCE_MIN_SIGNALS = 3         # only alert when ≥ this many signals fire on same coin in one cycle
-CONFLUENCE_LONG_MIN_SCORE = 55    # skip confluence LONG when signal score is below this threshold
+CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
+CONFLUENCE_LONG_MIN_SCORE = 52    # skip confluence LONG when signal score is below this threshold
 COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
 COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
 COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
