@@ -4,6 +4,7 @@ import { usePerformance } from "@/hooks/use-api";
 import type { Horizon, PerformanceBucket } from "@/types/api";
 
 const WINDOWS = [
+  { key: "4h",  label: "4ч"     },
   { key: "18h", label: "18ч"    },
   { key: "24h", label: "24ч"    },
   { key: "3d",  label: "3 дня"  },
