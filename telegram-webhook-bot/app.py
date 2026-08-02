@@ -5627,7 +5627,10 @@ def api_positions():
     now = time.time()
     result = []
     for m in sorted(monitors, key=lambda x: x.ts_open):
-        current = prices.get(m.symbol) or _get_current_price(m.symbol)
+        # Never call _get_current_price here — it makes one Binance request per
+        # position and with 10+ monitors this easily exceeds gunicorn's worker
+        # timeout.  The 5-min cycle updates the cache; stale data is acceptable.
+        current = prices.get(m.symbol) or None
         if current is not None:
             pnl_pct = (
                 (current - m.entry) / m.entry * 100 if m.direction == "LONG"
