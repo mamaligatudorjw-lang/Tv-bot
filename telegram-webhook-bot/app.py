@@ -562,7 +562,7 @@ def _save_bot_state(updates: dict) -> None:
         logger.warning("Could not persist bot state: %s", e)
 
 
-def _binance_get(path: str, params: dict | None = None, timeout: int = 15):
+def _binance_get(path: str, params: dict | None = None, timeout: int = 8):
     """Try each Binance host in turn; persist the last working host both in
     memory (for this process) and on disk (so restarts don't redo the 4s
     451-carousel on every boot)."""
@@ -628,7 +628,7 @@ def get_all_usdt_pairs() -> list[str]:
 
 
 def get_24h_tickers(symbols: list[str]) -> dict[str, dict]:
-    resp = _binance_get("/api/v3/ticker/24hr", timeout=20)
+    resp = _binance_get("/api/v3/ticker/24hr", timeout=10)
     all_tickers = resp.json()
     symbol_set = set(symbols)
     return {t["symbol"]: t for t in all_tickers if t["symbol"] in symbol_set}
@@ -3216,9 +3216,13 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
 # Main job
 # ---------------------------------------------------------------------------
 
+_CYCLE_HARD_LIMIT = 240  # seconds — abort cycle if it runs longer than this
+
+
 def run_checks():
     logger.info("Starting Binance check cycle...")
     start = time.time()
+    _deadline = start + _CYCLE_HARD_LIMIT
     summary = {
         "new_listings": 0, "high_breaks": 0,
         "rsi_overbought": 0, "rsi_oversold": 0,
@@ -3292,6 +3296,11 @@ def run_checks():
             for sym in new_listings:
                 send_new_listing_alert(sym, tickers.get(sym) if tickers else None)
 
+            # Deadline check after heavy fetches (pairs + tickers)
+            if time.time() > _deadline:
+                logger.warning("Cycle deadline exceeded after tickers fetch — aborting early")
+                return
+
             # 5. Detect 24h high breaks (cooldown not yet marked)
             high_24h: list[tuple[str, float, float, float]] = []
             if tickers:
@@ -3313,6 +3322,11 @@ def run_checks():
                 summary["rsi_overbought"] = len(overbought)
                 summary["rsi_oversold"] = len(oversold)
                 summary["vol_spikes"] = len(vol_spikes)
+
+                # Deadline check after RSI/spikes (most expensive per-symbol pass)
+                if time.time() > _deadline:
+                    logger.warning("Cycle deadline exceeded after RSI/spikes — aborting early")
+                    return
 
                 # 6a. Standalone momentum alerts (15-min price change tiers)
                 mom_sent, mom_ema_blocked = check_momentum(pct_15m_map, tickers, rsi_map)
@@ -3340,6 +3354,11 @@ def run_checks():
                 summary["new_listing_short_alerts"] = check_new_listing_pumps(tickers, rsi_map)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
+                # Skip heavy refresh passes if we're already close to the deadline
+                if time.time() > _deadline:
+                    logger.warning("Cycle deadline exceeded before weekly/EMA refresh — aborting early")
+                    return
+
                 with state_lock:
                     needs_refresh = (
                         time.time() - state["last_weekly_monthly_refresh"]
