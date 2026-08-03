@@ -75,6 +75,7 @@ state = {
     "sl_blocked": {},                       # unused — SL re-entry cooldown disabled
     "last_new_listing_short_alerted": {},   # symbol -> ts (new_listing_short TEST cooldown)
     "last_listing_dump_alerted": {},        # symbol -> ts (listing_dump_long TEST cooldown)
+    "last_listing_peak_alerted": {},        # symbol -> ts (listing_peak_short TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
@@ -120,6 +121,17 @@ NEW_LISTING_DUMP_FROM_PEAK_PCT = 40.0  # price must be ≥40% below 30d high
 NEW_LISTING_DUMP_RSI_MAX       = 35.0  # RSI must confirm oversold
 NEW_LISTING_DUMP_MIN_VOL       = 50_000  # minimum 24h USDT volume
 NEW_LISTING_DUMP_COOLDOWN      = 14400  # 4h cooldown per symbol
+
+# --- New listing ATH peak → SHORT (long-duration dump trade) ---
+# Fires when a recently listed coin (≤72h) has pumped hard AND RSI is very
+# overbought — entry at the peak, then held for weeks/months as it dumps.
+NEW_LISTING_PEAK_WINDOW_H    = 72     # listing within last 72 hours
+NEW_LISTING_PEAK_PUMP_MIN    = 30.0   # pumped ≥30% from listing price
+NEW_LISTING_PEAK_RSI_MIN     = 70.0   # RSI ≥ 70 — very overbought
+NEW_LISTING_PEAK_SL_PCT      = 15.0   # SL 15% above entry (wide, avoids noise)
+NEW_LISTING_PEAK_TP_PCT      = 60.0   # TP 60% below entry (massive dump target)
+NEW_LISTING_PEAK_TIMEOUT_H   = 720    # hold up to 30 days (720 hours)
+NEW_LISTING_PEAK_COOLDOWN    = 86400  # 24h cooldown per symbol
 
 # Volume-surge + CRSI combo alert (calendar-day vol vs yesterday)
 MIN_VOLUME_USDT_BROAD = 10_000     # lower floor so pairs like ORCAUSDT enter the daily refresh
@@ -1362,6 +1374,14 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_posmon_status "
             "ON position_monitors(status)"
         )
+        # Migrate: per-position custom timeout (long-duration trades)
+        try:
+            _db_conn.execute(
+                "ALTER TABLE position_monitors "
+                "ADD COLUMN timeout_hours REAL DEFAULT 4"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # ── Visitor analytics ───────────────────────────────────────────────
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS page_views (
@@ -1785,6 +1805,7 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     "momentum_long":       55,   # TEST signal — fade SHORT: pump+10% 24h → reversal
     "new_listing_short":   55,   # TEST signal — pump→dump after new listing
     "listing_dump_long":   50,   # TEST signal — listing dump recovery bounce
+    "listing_peak_short":  55,   # TEST signal — new listing ATH peak → long-duration SHORT
 }
 
 # --- Breakdown continuation SHORT (TEST) ---
@@ -3349,6 +3370,145 @@ def check_listing_dump_long(
     return sent
 
 
+def check_listing_peak_short(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> int:
+    """🧪 ТЕСТ: Пик нового листинга → ШОРТ (долгосрочная позиция).
+
+    Паттерн: новые монеты (≤72ч) часто делают памп ≥30% от цены листинга,
+    после чего следует многонедельный или многомесячный дамп на 60-90%.
+    Сигнал срабатывает на пике:
+      - Монета листалась в последние NEW_LISTING_PEAK_WINDOW_H часов (72)
+      - Текущая цена ≥ +NEW_LISTING_PEAK_PUMP_MIN от цены листинга (+30%)
+      - RSI ≥ NEW_LISTING_PEAK_RSI_MIN (70) — очень перегрета
+      - 24ч кулдаун на монету
+
+    Позиция открывается с широким SL/TP и держится до 30 дней:
+      SL = +15% от входа (не выбьет на шуме)
+      TP = −60% от входа (цель — массивный дамп)
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+    cutoff = int(now) - NEW_LISTING_PEAK_WINDOW_H * 3600
+
+    try:
+        with _db_lock:
+            conn = _get_db()
+            listings = conn.execute(
+                "SELECT symbol, price_at_alert, ts FROM alerts "
+                "WHERE alert_type='new_listing' AND ts >= ? AND price_at_alert > 0 "
+                "GROUP BY symbol ORDER BY ts ASC",
+                (cutoff,),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("check_listing_peak_short DB query failed: %s", exc)
+        return 0
+
+    if not listings:
+        return 0
+
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24: float | None = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    for symbol, listing_price, listing_ts in listings:
+        if listing_price is None or listing_price <= 0:
+            continue
+        t = tickers.get(symbol)
+        if t is None:
+            continue
+        try:
+            price  = float(t["lastPrice"])
+            vol24  = float(t["quoteVolume"])
+            pct24  = float(t["priceChangePercent"])
+        except (ValueError, KeyError):
+            continue
+        if price <= 0 or not math.isfinite(price):
+            continue
+
+        # Volume filter
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        # RSI must confirm extreme overheating
+        rsi = rsi_map.get(symbol)
+        if rsi is None or rsi < NEW_LISTING_PEAK_RSI_MIN:
+            continue
+
+        # Coin must have pumped enough from listing price
+        pump_pct = (price - listing_price) / listing_price * 100.0
+        if pump_pct < NEW_LISTING_PEAK_PUMP_MIN:
+            continue
+
+        # Cooldown
+        with state_lock:
+            last = state["last_listing_peak_alerted"].get(symbol, 0)
+        if now - last < NEW_LISTING_PEAK_COOLDOWN:
+            continue
+
+        hours_since = (now - listing_ts) / 3600.0
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+
+        score = compute_signal_score(
+            "listing_peak_short", "sell",
+            rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
+        )
+        min_score = MIN_SCORE_BY_TYPE.get("listing_peak_short", MIN_ALERT_SCORE)
+        if score < min_score:
+            continue
+
+        # Format wide SL/TP for display
+        sl_price_disp = price * (1 + NEW_LISTING_PEAK_SL_PCT / 100)
+        tp_price_disp = price * (1 - NEW_LISTING_PEAK_TP_PCT / 100)
+
+        body = (
+            f"🧪 <b>[ТЕСТ] ПИК ЛИСТИНГА — ШОРТ (долгосрочный)</b>\n"
+            f"Монета на пике после листинга — цель дамп −60%\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"🆕 Листинг: {hours_since:.1f}ч назад  |  "
+            f"Цена листинга: <b>${listing_price:,.6g}</b>\n"
+            f"📈 Памп от листинга: <b>+{pump_pct:.1f}%</b>\n"
+            f"🔥 RSI: <b>{rsi:.1f}</b> — сильно перегрет\n"
+            f"💰 Вход: <b>${price:,.6g}</b>  |  24ч: {pct24:+.1f}%\n"
+            f"🛡️ Стоп: <b>${sl_price_disp:,.6g}</b> (+{NEW_LISTING_PEAK_SL_PCT:.0f}%)\n"
+            f"🎯 Цель: <b>${tp_price_disp:,.6g}</b> (−{NEW_LISTING_PEAK_TP_PCT:.0f}%)\n"
+            f"⏳ Удерживать до <b>30 дней</b>\n"
+            f"📊 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+        )
+        delivered, aid = send_alert_with_log(
+            symbol, "listing_peak_short", "SHORT", price, body, score,
+        )
+        if delivered and aid:
+            # Open a long-duration position with wide SL/TP
+            _auto_start_monitor(
+                aid, symbol, "SHORT", price,
+                sl_pct=NEW_LISTING_PEAK_SL_PCT,
+                tp_pct=NEW_LISTING_PEAK_TP_PCT,
+                timeout_hours=NEW_LISTING_PEAK_TIMEOUT_H,
+            )
+            with state_lock:
+                state["last_listing_peak_alerted"][symbol] = now
+            logger.info(
+                "Listing-peak SHORT: %s listing=%.6g pump=+%.1f%% "
+                "rsi=%.1f sl=%.0f%% tp=%.0f%% timeout=%.0fh",
+                symbol, listing_price, pump_pct, rsi,
+                NEW_LISTING_PEAK_SL_PCT, NEW_LISTING_PEAK_TP_PCT,
+                NEW_LISTING_PEAK_TIMEOUT_H,
+            )
+            sent += 1
+
+    return sent
+
+
 # NOTE: `check_24h_pumps` was removed — it was a pure "WATCH" alert (no
 # directional bias), so the LONG/SHORT-only filter in `send_alert_with_log`
 # would have suppressed every fire. The same coins now surface through
@@ -3500,6 +3660,9 @@ def run_checks():
 
                 # 6g. TEST: Listing dump → LONG recovery (≥−40% from 30d peak + RSI≤35)
                 summary["listing_dump_long_alerts"] = check_listing_dump_long(tickers, rsi_map)
+
+                # 6h. TEST: New listing ATH peak → SHORT long-duration (pump≥30% + RSI≥70)
+                summary["listing_peak_short_alerts"] = check_listing_peak_short(tickers, rsi_map)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
@@ -4055,17 +4218,19 @@ class PositionMonitor(threading.Thread):
         sl_price: float,
         tp_price: float,
         ts_open: int,
+        timeout_hours: float = MONITOR_TIMEOUT_HOURS,
     ) -> None:
         super().__init__(name=f"pos-mon-{position_id}", daemon=True)
-        self.position_id = position_id
-        self.alert_id    = alert_id
-        self.symbol      = symbol
-        self.direction   = direction
-        self.entry       = entry
-        self.sl_price    = sl_price
-        self.tp_price    = tp_price
-        self.ts_open     = ts_open
-        self._stop_evt   = threading.Event()
+        self.position_id   = position_id
+        self.alert_id      = alert_id
+        self.symbol        = symbol
+        self.direction     = direction
+        self.entry         = entry
+        self.sl_price      = sl_price
+        self.tp_price      = tp_price
+        self.ts_open       = ts_open
+        self.timeout_hours = timeout_hours
+        self._stop_evt     = threading.Event()
 
     def stop(self) -> None:
         self._stop_evt.set()
@@ -4108,7 +4273,7 @@ class PositionMonitor(threading.Thread):
                         result = "SL"
 
                 elapsed = time.time() - self.ts_open
-                if result is None and elapsed >= MONITOR_TIMEOUT_HOURS * 3600:
+                if result is None and elapsed >= self.timeout_hours * 3600:
                     result = "TIMEOUT"
 
                 if result is not None:
@@ -4170,8 +4335,17 @@ def _auto_start_monitor(
     symbol: str,
     direction: str,   # "LONG" or "SHORT"
     entry: float,
+    *,
+    sl_pct: float | None = None,
+    tp_pct: float | None = None,
+    timeout_hours: float = MONITOR_TIMEOUT_HOURS,
 ) -> None:
-    """Compute TP/SL from fixed percentages and launch a PositionMonitor."""
+    """Compute TP/SL and launch a PositionMonitor.
+
+    sl_pct / tp_pct override the global defaults — pass explicit values for
+    long-duration trades (e.g. listing_peak_short uses SL=15%, TP=60%).
+    timeout_hours controls the forced-exit deadline (default 4h).
+    """
     if os.environ.get("TESTING", "").strip().lower() in {"1", "true", "yes"}:
         return
     if direction not in ("LONG", "SHORT"):
@@ -4190,12 +4364,18 @@ def _auto_start_monitor(
             "_auto_start_monitor blocked: %s already has an open position monitor", symbol,
         )
         return
+
+    # Resolve SL/TP percentages (explicit override or global defaults)
+    _sl = sl_pct if sl_pct is not None else HIT_RATE_SL_PCT
+    _tp = tp_pct if tp_pct is not None else (
+        HIT_RATE_TP_PCT_SHORT if direction == "SHORT" else HIT_RATE_TP_PCT
+    )
     if direction == "LONG":
-        sl_price = entry * (1 - HIT_RATE_SL_PCT / 100)
-        tp_price = entry * (1 + HIT_RATE_TP_PCT / 100)
+        sl_price = entry * (1 - _sl / 100)
+        tp_price = entry * (1 + _tp / 100)
     else:
-        sl_price = entry * (1 + HIT_RATE_SL_PCT / 100)
-        tp_price = entry * (1 - HIT_RATE_TP_PCT_SHORT / 100)
+        sl_price = entry * (1 + _sl / 100)
+        tp_price = entry * (1 - _tp / 100)
     ts_open = int(time.time())
 
     try:
@@ -4204,10 +4384,10 @@ def _auto_start_monitor(
             cur = conn.execute(
                 "INSERT INTO position_monitors "
                 "(alert_id, ts_open, symbol, direction, "
-                "entry_price, sl_price, tp_price, status) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open')",
+                "entry_price, sl_price, tp_price, status, timeout_hours) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?)",
                 (alert_id, ts_open, symbol, direction,
-                 entry, sl_price, tp_price),
+                 entry, sl_price, tp_price, timeout_hours),
             )
             conn.commit()
             pos_id = int(cur.lastrowid or 0)
@@ -4218,14 +4398,15 @@ def _auto_start_monitor(
     monitor = PositionMonitor(
         pos_id, alert_id, symbol, direction,
         entry, sl_price, tp_price, ts_open,
+        timeout_hours=timeout_hours,
     )
     monitor.start()
     with _monitors_lock:
         _active_monitors[pos_id] = monitor
 
     logger.info(
-        "PositionMonitor launched: id=%d %s %s entry=%.6g sl=%.6g tp=%.6g",
-        pos_id, direction, symbol, entry, sl_price, tp_price,
+        "PositionMonitor launched: id=%d %s %s entry=%.6g sl=%.6g tp=%.6g timeout=%.0fh",
+        pos_id, direction, symbol, entry, sl_price, tp_price, timeout_hours,
     )
 
 
@@ -4251,8 +4432,17 @@ def restore_position_monitors() -> None:
 
     logger.info("Restoring %d open position monitor(s)…", len(rows))
     for pos_id, alert_id, symbol, direction, entry, sl_price, tp_price, ts_open in rows:
+        # Per-position timeout stored in DB; fall back to global default
+        try:
+            with _db_lock:
+                _th_row = _get_db().execute(
+                    "SELECT timeout_hours FROM position_monitors WHERE id=?", (pos_id,)
+                ).fetchone()
+            _timeout_h = float(_th_row[0]) if _th_row and _th_row[0] else MONITOR_TIMEOUT_HOURS
+        except Exception:
+            _timeout_h = MONITOR_TIMEOUT_HOURS
         elapsed = time.time() - ts_open
-        if elapsed >= MONITOR_TIMEOUT_HOURS * 3600:
+        if elapsed >= _timeout_h * 3600:
             # Expired while bot was down — close as timeout
             current = _get_current_price(symbol) or entry
             pnl_pct = (
@@ -4283,13 +4473,14 @@ def restore_position_monitors() -> None:
         monitor = PositionMonitor(
             pos_id, alert_id, symbol, direction,
             entry, sl_price, tp_price, ts_open,
+            timeout_hours=_timeout_h,
         )
         monitor.start()
         with _monitors_lock:
             _active_monitors[pos_id] = monitor
         logger.info(
-            "Restored monitor: id=%d %s %s (%.0fs elapsed)",
-            pos_id, direction, symbol, elapsed,
+            "Restored monitor: id=%d %s %s (%.0fs elapsed, timeout=%.0fh)",
+            pos_id, direction, symbol, elapsed, _timeout_h,
         )
 
 
