@@ -677,7 +677,7 @@ def get_5m_signals(symbol: str) -> tuple[float | None, float | None]:
     """Return (spike_ratio, pct_change_15m) from a single 5m kline fetch.
     - spike_ratio: latest-complete 5m base-volume vs 12-candle avg
     - pct_change_15m: pct change between close of latest-complete candle and
-      the candle 3 slots earlier (~15-minute window).
+      the candle 2 slots earlier (~10-minute window).
     """
     try:
         resp = _binance_get(
@@ -697,7 +697,7 @@ def get_5m_signals(symbol: str) -> tuple[float | None, float | None]:
 
         closes = [float(k[4]) for k in candles]
         price_now = closes[-2]
-        price_15m = closes[-5] if len(closes) >= 5 else None
+        price_15m = closes[-4] if len(closes) >= 4 else None
         if price_15m is not None and price_15m > 0:
             pct = (price_now - price_15m) / price_15m * 100.0
         else:
@@ -2643,7 +2643,7 @@ def check_momentum(
         sl_tp = _format_sl_tp(side, price, atr)
         if pct > 0:
             body = (
-                f"{emoji} <b><code>{symbol}</code> памп +{pct:.1f}% за 15м → SHORT</b>\n"
+                f"{emoji} <b><code>{symbol}</code> памп +{pct:.1f}% за 10м → SHORT</b>\n"
                 f"💰 Цена: {price_str}\n"
                 f"📉 Фейд памп — входим в шорт\n"
                 f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
