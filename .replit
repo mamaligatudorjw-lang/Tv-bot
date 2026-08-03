@@ -2,7 +2,10 @@ modules = ["nodejs-24", "python-3.11"]
 
 [deployment]
 router = "application"
-deploymentTarget = "autoscale"
+deploymentTarget = "vm"
+
+[deployment.run]
+args = ["bash", "-c", "cd telegram-webhook-bot && gunicorn --bind 0.0.0.0:5000 app:app --log-level info --timeout 0 --keep-alive 5"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]
