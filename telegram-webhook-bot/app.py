@@ -74,6 +74,7 @@ state = {
     "last_momentum_long_alerted": {},       # symbol -> ts (momentum_long TEST cooldown)
     "sl_blocked": {},                       # unused — SL re-entry cooldown disabled
     "last_new_listing_short_alerted": {},   # symbol -> ts (new_listing_short TEST cooldown)
+    "last_listing_dump_alerted": {},        # symbol -> ts (listing_dump_long TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
@@ -110,6 +111,15 @@ NEW_LISTING_WINDOW_H     = 48     # only watch coins listed in last 48h
 NEW_LISTING_PUMP_PCT     = 20.0   # coin must be ≥+20% above its listing price
 NEW_LISTING_PUMP_RSI_MIN = 65.0   # RSI must confirm overheating
 NEW_LISTING_SHORT_COOLDOWN = 14400  # 4h cooldown per symbol
+
+# --- Listing dump → LONG recovery signal ---
+# Catches coins like MUUUSDT/SOXLUSDT: listed in last 90 days, already dumped
+# ≥40% from their post-listing 30d peak, RSI confirms oversold → likely bounce.
+NEW_LISTING_DUMP_WINDOW_DAYS  = 90     # listing must be within this many days
+NEW_LISTING_DUMP_FROM_PEAK_PCT = 40.0  # price must be ≥40% below 30d high
+NEW_LISTING_DUMP_RSI_MAX       = 35.0  # RSI must confirm oversold
+NEW_LISTING_DUMP_MIN_VOL       = 50_000  # minimum 24h USDT volume
+NEW_LISTING_DUMP_COOLDOWN      = 14400  # 4h cooldown per symbol
 
 # Volume-surge + CRSI combo alert (calendar-day vol vs yesterday)
 MIN_VOLUME_USDT_BROAD = 10_000     # lower floor so pairs like ORCAUSDT enter the daily refresh
@@ -1774,6 +1784,7 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     "breakdown_short":     55,   # TEST signal — lower bar while calibrating
     "momentum_long":       55,   # TEST signal — fade SHORT: pump+10% 24h → reversal
     "new_listing_short":   55,   # TEST signal — pump→dump after new listing
+    "listing_dump_long":   50,   # TEST signal — listing dump recovery bounce
 }
 
 # --- Breakdown continuation SHORT (TEST) ---
@@ -3205,6 +3216,139 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     return sent
 
 
+def check_listing_dump_long(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> int:
+    """🧪 ТЕСТ: Листинг-дамп → LONG восстановление.
+
+    Паттерн: монеты вроде MUUUSDT / SOXLUSDT — листинг ≤90 дней назад,
+    сильный памп после листинга, затем падение ≥40% от месячного пика.
+    RSI подтверждает перепроданность → высокая вероятность отскока.
+
+    Условия:
+      - Монета листалась в последние NEW_LISTING_DUMP_WINDOW_DAYS дней (90)
+      - Текущая цена ≥ −NEW_LISTING_DUMP_FROM_PEAK_PCT от 30d максимума (−40%)
+      - RSI ≤ NEW_LISTING_DUMP_RSI_MAX (35) — зона перепроданности
+      - Объём ≥ NEW_LISTING_DUMP_MIN_VOL USDT за 24ч
+      - 4ч кулдаун на монету
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+    cutoff = int(now) - NEW_LISTING_DUMP_WINDOW_DAYS * 86400
+
+    # Fetch coins that were listed within the window
+    try:
+        with _db_lock:
+            conn = _get_db()
+            listings = conn.execute(
+                "SELECT symbol, price_at_alert, ts FROM alerts "
+                "WHERE alert_type='new_listing' AND ts >= ? AND price_at_alert > 0 "
+                "GROUP BY symbol ORDER BY ts ASC",
+                (cutoff,),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("check_listing_dump_long DB query failed: %s", exc)
+        return 0
+
+    if not listings:
+        return 0
+
+    with state_lock:
+        monthly_highs = dict(state["monthly_highs"])
+        weekly_highs  = dict(state["weekly_highs"])
+
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24: float | None = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    for symbol, listing_price, listing_ts in listings:
+        t = tickers.get(symbol)
+        if t is None:
+            continue
+        try:
+            price  = float(t["lastPrice"])
+            vol24  = float(t["quoteVolume"])
+            pct24  = float(t["priceChangePercent"])
+        except (ValueError, KeyError):
+            continue
+        if price <= 0 or not math.isfinite(price):
+            continue
+
+        # Volume filter
+        if vol24 < NEW_LISTING_DUMP_MIN_VOL:
+            continue
+
+        # RSI must be oversold
+        rsi = rsi_map.get(symbol)
+        if rsi is None or rsi > NEW_LISTING_DUMP_RSI_MAX:
+            continue
+
+        # Use 30d high; fall back to 7d high if not yet populated
+        peak = monthly_highs.get(symbol) or weekly_highs.get(symbol)
+        if peak is None or peak <= 0:
+            continue
+
+        dump_pct = (peak - price) / peak * 100.0
+        if dump_pct < NEW_LISTING_DUMP_FROM_PEAK_PCT:
+            continue
+
+        # Cooldown
+        with state_lock:
+            last = state["last_listing_dump_alerted"].get(symbol, 0)
+        if now - last < NEW_LISTING_DUMP_COOLDOWN:
+            continue
+
+        days_since = (now - listing_ts) / 86400.0
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+
+        score = compute_signal_score(
+            "listing_dump_long", "buy",
+            rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
+        )
+        min_score = MIN_SCORE_BY_TYPE.get("listing_dump_long", MIN_ALERT_SCORE)
+        if score < min_score:
+            continue
+
+        sl_tp = _format_sl_tp("buy", price, atr)
+        body = (
+            f"🧪 <b>[ТЕСТ] ЛИСТИНГ-ДАМП — возможен отскок (ЛОНГ)</b>\n"
+            f"Монета упала далеко от пика после листинга\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"🆕 Листинг: {days_since:.0f} дн. назад  |  "
+            f"Цена листинга: <b>${listing_price:,.6g}</b>\n"
+            f"📉 Дамп от пика: <b>−{dump_pct:.1f}%</b>  "
+            f"(пик ${peak:,.6g} → сейчас ${price:,.6g})\n"
+            f"🧊 RSI: <b>{rsi:.1f}</b> — перепродан\n"
+            f"📊 24ч изменение: {pct24:+.1f}%  |  "
+            f"Объём: ${vol24:,.0f}\n"
+            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
+        )
+        delivered, _aid = send_alert_with_log(
+            symbol, "listing_dump_long", "LONG", price, body, score,
+        )
+        if delivered:
+            with state_lock:
+                state["last_listing_dump_alerted"][symbol] = now
+            logger.info(
+                "Listing-dump LONG: %s listing=%.6g peak=%.6g now=%.6g "
+                "dump=−%.1f%% rsi=%.1f",
+                symbol, listing_price, peak, price, dump_pct, rsi,
+            )
+            sent += 1
+
+    return sent
+
+
 # NOTE: `check_24h_pumps` was removed — it was a pure "WATCH" alert (no
 # directional bias), so the LONG/SHORT-only filter in `send_alert_with_log`
 # would have suppressed every fire. The same coins now surface through
@@ -3353,6 +3497,9 @@ def run_checks():
 
                 # 6f. TEST: New listing pump→dump SHORT (≥+20% from listing + RSI≥65)
                 summary["new_listing_short_alerts"] = check_new_listing_pumps(tickers, rsi_map)
+
+                # 6g. TEST: Listing dump → LONG recovery (≥−40% from 30d peak + RSI≤35)
+                summary["listing_dump_long_alerts"] = check_listing_dump_long(tickers, rsi_map)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
