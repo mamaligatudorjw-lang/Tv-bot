@@ -1,0 +1,1 @@
+- [Gate.io Futures migration](gateio-migration.md) — bot uses Gate.io Futures as primary data source; Binance blocked from Replit.

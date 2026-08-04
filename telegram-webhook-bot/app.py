@@ -43,6 +43,74 @@ BINANCE_FUTURES_HOSTS = [
 BINANCE_FUTURES_BASE = BINANCE_FUTURES_HOSTS[0]
 
 # ---------------------------------------------------------------------------
+# Gate.io Futures — primary data source (replaces Binance Spot).
+# Binance Spot is blocked on many Futures symbols; Gate.io Futures API is
+# accessible from Replit and covers a wider set of USDT perpetuals.
+# ---------------------------------------------------------------------------
+GATEIO_BASE = "https://api.gateio.ws/api/v4/futures/usdt"
+
+def _to_gate(symbol: str) -> str:
+    """Convert internal symbol 'AKEUSDT' → Gate.io contract 'AKE_USDT'."""
+    if symbol.endswith("USDT"):
+        return symbol[:-4] + "_USDT"
+    return symbol
+
+def _from_gate(symbol: str) -> str:
+    """Convert Gate.io contract 'AKE_USDT' → internal symbol 'AKEUSDT'."""
+    if symbol.endswith("_USDT"):
+        return symbol[:-5] + "USDT"
+    return symbol
+
+def _gateio_get(path: str, params: dict | None = None, timeout: int = 10):
+    """GET request to Gate.io Futures REST API."""
+    url = f"{GATEIO_BASE}{path}"
+    resp = requests.get(url, params=params, timeout=timeout,
+                        headers={"Accept": "application/json"})
+    resp.raise_for_status()
+    return resp
+
+def _gateio_klines(symbol: str, interval: str, limit: int) -> list:
+    """Fetch Gate.io candlesticks and return them in Binance-compatible format.
+
+    Binance kline indices used by this bot:
+      [0] open_time   [2] high   [3] low   [4] close
+      [5] base_volume [7] quote_volume_usdt
+    Gate.io fields: t(ts) o(open) h(high) l(low) c(close) v(base) sum(quote USDT)
+    """
+    resp = _gateio_get(
+        "/candlesticks",
+        params={"contract": _to_gate(symbol), "interval": interval, "limit": limit},
+        timeout=10,
+    )
+    raw = resp.json()
+    # Convert to Binance-compatible list: [ts, o, h, l, c, v, ts, sum, ...]
+    return [
+        [c["t"], c["o"], c["h"], c["l"], c["c"], str(c["v"]), c["t"], c["sum"]]
+        for c in raw
+    ]
+
+def _gateio_ticker(symbol: str) -> dict | None:
+    """Fetch single contract ticker from Gate.io and return in Binance-compatible format."""
+    try:
+        resp = _gateio_get("/tickers", params={"contract": _to_gate(symbol)}, timeout=8)
+        data = resp.json()
+        if not data:
+            return None
+        t = data[0]
+        return {
+            "symbol":             symbol,
+            "lastPrice":          t.get("last", "0"),
+            "price":              t.get("last", "0"),
+            "priceChangePercent": t.get("change_percentage", "0"),
+            "quoteVolume":        t.get("volume_24h_quote", "0"),
+            "highPrice":          t.get("high_24h", "0"),
+            "lowPrice":           t.get("low_24h", "0"),
+        }
+    except Exception as e:
+        logger.warning("_gateio_ticker %s failed: %s", symbol, e)
+        return None
+
+# ---------------------------------------------------------------------------
 # In-memory state
 # ---------------------------------------------------------------------------
 state_lock = threading.RLock()  # reentrant: same thread may re-acquire (e.g. send_telegram called from inside a state_lock block)
@@ -660,32 +728,44 @@ def _binance_futures_get(path: str, params: dict | None = None, timeout: int = 1
 
 
 def get_all_usdt_pairs() -> list[str]:
-    resp = _binance_get("/api/v3/exchangeInfo", timeout=15)
-    data = resp.json()
+    """Return all active USDT perpetual contracts from Gate.io Futures."""
+    resp = _gateio_get("/contracts", timeout=15)
+    contracts = resp.json()
     return [
-        s["symbol"]
-        for s in data["symbols"]
-        if s["symbol"].endswith("USDT")
-        and s["status"] == "TRADING"
-        and s["isSpotTradingAllowed"]
+        _from_gate(c["name"])
+        for c in contracts
+        if c["name"].endswith("_USDT")
+        and c.get("status") == "trading"
+        and not c.get("in_delisting", False)
     ]
 
 
 def get_24h_tickers(symbols: list[str]) -> dict[str, dict]:
-    resp = _binance_get("/api/v3/ticker/24hr", timeout=10)
+    """Fetch all Gate.io Futures tickers and return in Binance-compatible format."""
+    resp = _gateio_get("/tickers", timeout=10)
     all_tickers = resp.json()
     symbol_set = set(symbols)
-    return {t["symbol"]: t for t in all_tickers if t["symbol"] in symbol_set}
+    result = {}
+    for t in all_tickers:
+        sym = _from_gate(t.get("contract", ""))
+        if sym not in symbol_set:
+            continue
+        result[sym] = {
+            "symbol":             sym,
+            "lastPrice":          t.get("last", "0"),
+            "price":              t.get("last", "0"),
+            "priceChangePercent": t.get("change_percentage", "0"),
+            "quoteVolume":        t.get("volume_24h_quote", "0"),
+            "highPrice":          t.get("high_24h", "0"),
+            "lowPrice":           t.get("low_24h", "0"),
+        }
+    return result
 
 
 def get_klines_rsi(symbol: str) -> float | None:
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": symbol, "interval": "1h", "limit": RSI_PERIOD + 1},
-            timeout=10,
-        )
-        closes = [float(k[4]) for k in resp.json()]
+        candles = _gateio_klines(symbol, "1h", RSI_PERIOD + 1)
+        closes = [float(k[4]) for k in candles]
         if len(closes) < RSI_PERIOD + 1:
             return None
         return _calculate_rsi(closes, RSI_PERIOD)
@@ -701,12 +781,7 @@ def get_5m_signals(symbol: str) -> tuple[float | None, float | None]:
       the candle 2 slots earlier (~10-minute window).
     """
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": symbol, "interval": "5m", "limit": 14},
-            timeout=10,
-        )
-        candles = resp.json()
+        candles = _gateio_klines(symbol, "5m", 14)
         if len(candles) < 13:
             return None, None
 
@@ -736,16 +811,9 @@ def get_daily_highs(symbol: str, limit: int = 31) -> list[float] | None:
 
 
 def get_daily_data(symbol: str, limit: int = 31) -> dict | None:
-    """Return {"highs": [...], "yesterday_vol": float, "today_vol": float} from daily klines.
-    Kline tuple index 2 = high, index 7 = quoteAssetVolume (USDT for USDT pairs).
-    """
+    """Return {"highs": [...], "yesterday_vol": float, "today_vol": float} from daily klines."""
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": symbol, "interval": "1d", "limit": limit},
-            timeout=10,
-        )
-        candles = resp.json()
+        candles = _gateio_klines(symbol, "1d", limit)
         if not candles:
             return None
         highs = [float(k[2]) for k in candles]
@@ -760,15 +828,9 @@ def get_daily_data(symbol: str, limit: int = 31) -> dict | None:
 def get_two_day_volumes(symbol: str) -> tuple[float, float] | None:
     """Return (yesterday_usdt_vol, today_usdt_vol) from the last 2 daily candles."""
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": symbol, "interval": "1d", "limit": 2},
-            timeout=10,
-        )
-        candles = resp.json()
+        candles = _gateio_klines(symbol, "1d", 2)
         if len(candles) < 2:
             return None
-        # k[7] = quoteAssetVolume (USDT volume for USDT pairs)
         return float(candles[0][7]), float(candles[1][7])
     except Exception as e:
         logger.warning("2-day volume fetch failed for %s: %s", symbol, e)
@@ -787,12 +849,7 @@ def _fetch_daily_closes_for_crsi(symbol: str) -> list[float] | None:
     if cached and now - cached[0] < _CRSI_KLINES_CACHE_TTL:
         return cached[1]
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": symbol, "interval": "1d", "limit": CRSI_KLINES_LIMIT},
-            timeout=10,
-        )
-        candles = resp.json()
+        candles = _gateio_klines(symbol, "1d", CRSI_KLINES_LIMIT)
     except Exception as e:
         logger.warning("CRSI daily klines fetch failed for %s: %s", symbol, e)
         return None
@@ -995,12 +1052,7 @@ def get_4h_stats(symbol: str) -> dict | None:
     """Fetch 4h klines once; derive EMA-200, ATR-14, and approximate daily σ
     from the same data. Returns a dict or None on failure."""
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
-            timeout=10,
-        )
-        raw = resp.json()
+        raw = _gateio_klines(symbol, "4h", EMA200_FETCH_LIMIT)
         if len(raw) < EMA200_PERIOD:
             return None
         highs = [float(k[2]) for k in raw]
@@ -1022,49 +1074,22 @@ def get_ema200_4h(symbol: str) -> float | None:
     return stats["ema200"] if stats else None
 
 
-# --- Futures fallbacks (used by /trade when a symbol isn't on spot) ---
+# --- Futures fallbacks (now use Gate.io — same data source as primary) ---
 
 def get_klines_rsi_futures(symbol: str) -> float | None:
-    try:
-        resp = _binance_futures_get(
-            "/fapi/v1/klines",
-            params={"symbol": symbol, "interval": "1h", "limit": RSI_PERIOD + 1},
-            timeout=10,
-        )
-        closes = [float(k[4]) for k in resp.json()]
-        if len(closes) < RSI_PERIOD + 1:
-            return None
-        return _calculate_rsi(closes, RSI_PERIOD)
-    except Exception as e:
-        logger.warning("Futures RSI kline fetch failed for %s: %s", symbol, e)
-        return None
+    """RSI via Gate.io (unified data source — no separate futures endpoint needed)."""
+    return get_klines_rsi(symbol)
 
 
 def get_ema200_4h_futures(symbol: str) -> float | None:
-    try:
-        resp = _binance_futures_get(
-            "/fapi/v1/klines",
-            params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
-            timeout=10,
-        )
-        closes = [float(k[4]) for k in resp.json()]
-        if len(closes) < EMA200_PERIOD:
-            return None
-        return _calculate_ema(closes, EMA200_PERIOD)
-    except Exception as e:
-        logger.warning("Futures EMA-200 4h fetch failed for %s: %s", symbol, e)
-        return None
+    """EMA-200 via Gate.io (unified data source)."""
+    stats = get_4h_stats(symbol)
+    return stats["ema200"] if stats else None
 
 
 def get_24h_ticker_futures(symbol: str) -> dict | None:
-    try:
-        resp = _binance_futures_get(
-            "/fapi/v1/ticker/24hr", params={"symbol": symbol}, timeout=10,
-        )
-        return resp.json()
-    except Exception as e:
-        logger.warning("Futures 24h ticker fetch failed for %s: %s", symbol, e)
-        return None
+    """24h ticker via Gate.io (unified data source)."""
+    return _gateio_ticker(symbol)
 
 
 def refresh_ema200_4h(symbols: list[str]) -> int:
@@ -1124,12 +1149,7 @@ def get_market_regime() -> str:
         return cached_val
 
     try:
-        resp = _binance_get(
-            "/api/v3/klines",
-            params={"symbol": "BTCUSDT", "interval": "1d", "limit": 300},
-            timeout=10,
-        )
-        data   = resp.json()
+        data   = _gateio_klines("BTCUSDT", "1d", 300)
         closes = [float(c[4]) for c in data]
         if len(closes) < 12:
             return cached_val  # not enough data — keep last known
@@ -4118,12 +4138,13 @@ _price_cache_ts: float = 0.0   # unix timestamp of last update
 
 
 def _get_current_price(symbol: str) -> float | None:
-    """Fetch the latest spot price via the lightweight /ticker/price endpoint."""
+    """Fetch the latest price from Gate.io Futures."""
     try:
-        resp = _binance_get(
-            "/api/v3/ticker/price", params={"symbol": symbol}, timeout=6
-        )
-        return float(resp.json()["price"])
+        resp = _gateio_get("/tickers", params={"contract": _to_gate(symbol)}, timeout=6)
+        data = resp.json()
+        if data:
+            return float(data[0]["last"])
+        return None
     except Exception as exc:
         logger.debug("_get_current_price %s failed: %s", symbol, exc)
         return None
@@ -4945,29 +4966,18 @@ def handle_trade_command(chat_id: int, raw_text: str) -> None:
     with state_lock:
         ema200 = state["ema200_4h"].get(symbol)
 
-    def _fetch_24h_ticker_spot(sym: str) -> dict | None:
-        try:
-            resp = _binance_get(
-                "/api/v3/ticker/24hr", params={"symbol": sym}, timeout=10,
-            )
-            return resp.json()
-        except Exception as e:
-            logger.warning("Trade /trade: spot 24h ticker fetch failed for %s: %s", sym, e)
-            return None
-
     volume_24h: float | None = None
-    ticker = _fetch_24h_ticker_spot(symbol)
+    ticker = _gateio_ticker(symbol)
     if ticker is not None:
         try:
             volume_24h = float(ticker.get("quoteVolume", 0)) or None
         except (TypeError, ValueError):
             volume_24h = None
 
-    data_source = "spot"
-    # Futures fallback: if NOTHING came back from spot (the symbol probably
-    # isn't listed there), try the USDⓈ-M futures endpoints.
+    data_source = "futures"
+    # Futures fallback: if NOTHING came back (the symbol probably isn't on Gate.io)
     if rsi is None and ema200 is None and volume_24h is None:
-        logger.info("Trade /trade: no spot data for %s, trying futures fallback", symbol)
+        logger.info("Trade /trade: no Gate.io data for %s", symbol)
         rsi = get_klines_rsi_futures(symbol)
         ema200 = get_ema200_4h_futures(symbol)
         f_ticker = get_24h_ticker_futures(symbol)
@@ -5328,25 +5338,11 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
 
     # ── Parallel data fetch ────────────────────────────────────────────────
     def fetch_ticker():
-        try:
-            resp = _binance_get(
-                "/api/v3/ticker/24hr", params={"symbol": symbol}, timeout=10,
-            )
-            d = resp.json()
-            # Binance returns {"code": -1121} for unknown symbols
-            return None if "code" in d else d
-        except Exception as e:
-            logger.warning("analyze ticker failed %s: %s", symbol, e)
-            return None
+        return _gateio_ticker(symbol)
 
     def fetch_4h_klines():
         try:
-            resp = _binance_get(
-                "/api/v3/klines",
-                params={"symbol": symbol, "interval": "4h", "limit": EMA200_FETCH_LIMIT},
-                timeout=10,
-            )
-            return resp.json()
+            return _gateio_klines(symbol, "4h", EMA200_FETCH_LIMIT)
         except Exception as e:
             logger.warning("analyze 4h klines failed %s: %s", symbol, e)
             return None
@@ -5381,8 +5377,8 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
     if price is None:
         _telegram_send(
             chat_id,
-            f"❌ Монета <code>{symbol}</code> не найдена на Binance Spot.\n"
-            "Проверьте название (пример: <code>BTCUSDT</code>, <code>DEXEUSDT</code>).",
+            f"❌ Монета <code>{symbol}</code> не найдена на Gate.io Futures.\n"
+            "Проверьте название (пример: <code>AKEUSDT</code>, <code>BTCUSDT</code>).",
         )
         return
 
