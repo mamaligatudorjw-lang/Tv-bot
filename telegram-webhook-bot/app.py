@@ -208,6 +208,16 @@ HIT_RATE_RETENTION_DAYS = 120
 HIT_RATE_SL_PCT = 2.5              # stop-loss % (raised from 2.0 to reduce noise SL hits)
 HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
 HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
+
+# --- Long-duration SHORT regime (2026-08-04) ---
+# Backtest on 522+ historical signals from alerts.db: SHORT signals held
+# 3–7 days average +7…+10% PnL with 73–80% win rate, while the old 4-hour
+# scalp closed at −0.05%. LONG signals only work on the short horizon, so
+# these overrides apply to SHORT positions only (LONG keeps the 4h scalp).
+# listing_peak_short keeps its own explicit wider params (SL15/TP60/720h).
+SHORT_HOLD_TIMEOUT_HOURS = 168.0   # hold SHORTs up to 7 days
+SHORT_HOLD_SL_PCT        = 15.0    # wide stop above entry — survives noise
+SHORT_HOLD_TP_PCT        = 20.0    # take-profit 20% below entry
 MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
 
 
@@ -4338,13 +4348,17 @@ def _auto_start_monitor(
     *,
     sl_pct: float | None = None,
     tp_pct: float | None = None,
-    timeout_hours: float = MONITOR_TIMEOUT_HOURS,
+    timeout_hours: float | None = None,
 ) -> None:
     """Compute TP/SL and launch a PositionMonitor.
 
-    sl_pct / tp_pct override the global defaults — pass explicit values for
-    long-duration trades (e.g. listing_peak_short uses SL=15%, TP=60%).
-    timeout_hours controls the forced-exit deadline (default 4h).
+    sl_pct / tp_pct / timeout_hours override the per-direction defaults —
+    pass explicit values for special trades (e.g. listing_peak_short uses
+    SL=15%, TP=60%, 720h).
+
+    Direction defaults (backtest-driven, see SHORT_HOLD_* constants):
+    - LONG:  4h scalp, SL=HIT_RATE_SL_PCT, TP=HIT_RATE_TP_PCT
+    - SHORT: 7-day hold, SL=SHORT_HOLD_SL_PCT, TP=SHORT_HOLD_TP_PCT
     """
     if os.environ.get("TESTING", "").strip().lower() in {"1", "true", "yes"}:
         return
@@ -4365,11 +4379,21 @@ def _auto_start_monitor(
         )
         return
 
-    # Resolve SL/TP percentages (explicit override or global defaults)
-    _sl = sl_pct if sl_pct is not None else HIT_RATE_SL_PCT
-    _tp = tp_pct if tp_pct is not None else (
-        HIT_RATE_TP_PCT_SHORT if direction == "SHORT" else HIT_RATE_TP_PCT
-    )
+    # Resolve SL/TP/timeout (explicit override or per-direction defaults).
+    # SHORT positions default to the long-hold regime (7d, wide SL/TP) —
+    # backtest showed +7…+10% at 3–7d vs −0.05% on the old 4h scalp.
+    if direction == "SHORT":
+        _sl = sl_pct if sl_pct is not None else SHORT_HOLD_SL_PCT
+        _tp = tp_pct if tp_pct is not None else SHORT_HOLD_TP_PCT
+        timeout_hours = (
+            timeout_hours if timeout_hours is not None else SHORT_HOLD_TIMEOUT_HOURS
+        )
+    else:
+        _sl = sl_pct if sl_pct is not None else HIT_RATE_SL_PCT
+        _tp = tp_pct if tp_pct is not None else HIT_RATE_TP_PCT
+        timeout_hours = (
+            timeout_hours if timeout_hours is not None else MONITOR_TIMEOUT_HOURS
+        )
     if direction == "LONG":
         sl_price = entry * (1 - _sl / 100)
         tp_price = entry * (1 + _tp / 100)
