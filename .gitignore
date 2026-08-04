@@ -47,3 +47,4 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+telegram-webhook-bot/cycle_log.jsonl
