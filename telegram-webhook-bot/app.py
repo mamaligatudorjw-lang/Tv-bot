@@ -226,6 +226,11 @@ MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
 MAX_OPEN_LONG_POSITIONS = 25       # квота для LONG (быстрые 4ч скальпы)
 MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (до 7-30 дней)
 
+# --- Display leverage for ROI calculation in Telegram messages ---
+# All P&L / SL / TP percentages shown to the user are multiplied by this
+# factor so the user sees ROI at their preferred leverage, not raw price move.
+DISPLAY_LEVERAGE = 10
+
 
 # ---------------------------------------------------------------------------
 # Telegram helpers
@@ -1774,9 +1779,13 @@ def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
         return ""
     if sl <= 0 or tp <= 0:
         return ""
+    sl_roi = abs(sl - entry) / entry * 100 * DISPLAY_LEVERAGE
+    tp_roi = abs(tp - entry) / entry * 100 * DISPLAY_LEVERAGE
+    sl_sign = "−" if s in ("buy", "long") else "+"
+    tp_sign = "+" if s in ("buy", "long") else "−"
     return (
-        f"🛡️ Стоп: <code>${sl:,.6g}</code>  •  "
-        f"🎯 Цель: <code>${tp:,.6g}</code>  •  R/R 1:2"
+        f"🛡️ Стоп: <code>${sl:,.6g}</code> ({sl_sign}{sl_roi:.0f}% ROI)  •  "
+        f"🎯 Цель: <code>${tp:,.6g}</code> ({tp_sign}{tp_roi:.0f}% ROI)  •  R/R 1:2"
     )
 
 
@@ -3484,6 +3493,8 @@ def check_listing_peak_short(
         # Format wide SL/TP for display
         sl_price_disp = price * (1 + NEW_LISTING_PEAK_SL_PCT / 100)
         tp_price_disp = price * (1 - NEW_LISTING_PEAK_TP_PCT / 100)
+        sl_roi_disp = NEW_LISTING_PEAK_SL_PCT * DISPLAY_LEVERAGE
+        tp_roi_disp = NEW_LISTING_PEAK_TP_PCT * DISPLAY_LEVERAGE
 
         body = (
             f"🧪 <b>[ТЕСТ] ПИК ЛИСТИНГА — ШОРТ (долгосрочный)</b>\n"
@@ -3495,8 +3506,8 @@ def check_listing_peak_short(
             f"📈 Памп от листинга: <b>+{pump_pct:.1f}%</b>\n"
             f"🔥 RSI: <b>{rsi:.1f}</b> — сильно перегрет\n"
             f"💰 Вход: <b>${price:,.6g}</b>  |  24ч: {pct24:+.1f}%\n"
-            f"🛡️ Стоп: <b>${sl_price_disp:,.6g}</b> (+{NEW_LISTING_PEAK_SL_PCT:.0f}%)\n"
-            f"🎯 Цель: <b>${tp_price_disp:,.6g}</b> (−{NEW_LISTING_PEAK_TP_PCT:.0f}%)\n"
+            f"🛡️ Стоп: <b>${sl_price_disp:,.6g}</b> (+{sl_roi_disp:.0f}% ROI ×{DISPLAY_LEVERAGE})\n"
+            f"🎯 Цель: <b>${tp_price_disp:,.6g}</b> (−{tp_roi_disp:.0f}% ROI ×{DISPLAY_LEVERAGE})\n"
             f"⏳ Удерживать до <b>30 дней</b>\n"
             f"📊 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
         )
@@ -4185,6 +4196,7 @@ def _send_exit_notification(
         if direction == "LONG"
         else (entry - exit_price) / entry * 100
     )
+    roi_pct = pnl_pct * DISPLAY_LEVERAGE
     pnl_sign = "+" if pnl_pct >= 0 else ""
     elapsed_str = _format_elapsed(elapsed_seconds)
 
@@ -4200,7 +4212,8 @@ def _send_exit_notification(
             f"{emoji} <b>{header}</b>\n"
             f"{direction} <code>{symbol}</code>\n"
             f"Вход: <b>${entry:,.6g}</b>  →  Текущая: <b>${exit_price:,.6g}</b>\n"
-            f"P&L: <b>{pnl_sign}{pnl_pct:.2f}%</b>\n"
+            f"ROI ×{DISPLAY_LEVERAGE}: <b>{pnl_sign}{roi_pct:.1f}%</b>  "
+            f"<i>({pnl_sign}{pnl_pct:.2f}% цена)</i>\n"
             f"Время удержания: <b>{elapsed_str}</b> (лимит)\n"
             f"<i>Закрыта по таймауту</i>"
         )
@@ -4209,7 +4222,8 @@ def _send_exit_notification(
             f"{emoji} <b>{header}</b>\n"
             f"{direction} <code>{symbol}</code>\n"
             f"Вход: <b>${entry:,.6g}</b>  →  Выход: <b>${exit_price:,.6g}</b>\n"
-            f"P&L: <b>{pnl_sign}{pnl_pct:.2f}%</b>\n"
+            f"ROI ×{DISPLAY_LEVERAGE}: <b>{pnl_sign}{roi_pct:.1f}%</b>  "
+            f"<i>({pnl_sign}{pnl_pct:.2f}% цена)</i>\n"
             f"Время: <b>{elapsed_str}</b>"
         )
 
@@ -5112,11 +5126,17 @@ def handle_positions_command(chat_id: int) -> None:
                 (current - m.entry) / m.entry * 100 if m.direction == "LONG"
                 else (m.entry - current) / m.entry * 100
             )
+            roi_pct = pnl_pct * DISPLAY_LEVERAGE
             pnl_emoji = "🟢" if pnl_pct > 0 else ("🔴" if pnl_pct < 0 else "⚪️")
-            pnl_str = f"{pnl_pct:+.2f}%"
+            pnl_str = f"ROI ×{DISPLAY_LEVERAGE}: {roi_pct:+.1f}%  ({pnl_pct:+.2f}% цена)"
         else:
             pnl_emoji, pnl_str = "⚪️", "—"
             current = m.entry
+
+        sl_roi = abs(m.sl_price - m.entry) / m.entry * 100 * DISPLAY_LEVERAGE
+        tp_roi = abs(m.tp_price - m.entry) / m.entry * 100 * DISPLAY_LEVERAGE
+        sl_sign = "−" if m.direction == "LONG" else "+"
+        tp_sign = "+" if m.direction == "LONG" else "−"
 
         dir_emoji = "📈" if m.direction == "LONG" else "📉"
         lines.append(f"{dir_emoji} <b>{m.symbol}</b>  {m.direction}")
@@ -5124,10 +5144,10 @@ def handle_positions_command(chat_id: int) -> None:
             f"   Вход: <code>${m.entry:,.6g}</code>  "
             f"Сейчас: <code>${current:,.6g}</code>"
         )
-        lines.append(f"   PnL: {pnl_emoji} <b>{pnl_str}</b>  ({elapsed_h:.1f}ч)")
+        lines.append(f"   {pnl_emoji} <b>{pnl_str}</b>  ({elapsed_h:.1f}ч)")
         lines.append(
-            f"   SL: <code>${m.sl_price:,.6g}</code>  "
-            f"TP: <code>${m.tp_price:,.6g}</code>"
+            f"   🛡️ SL: <code>${m.sl_price:,.6g}</code> ({sl_sign}{sl_roi:.0f}%)  "
+            f"🎯 TP: <code>${m.tp_price:,.6g}</code> ({tp_sign}{tp_roi:.0f}%)"
         )
         lines.append("")
 
@@ -5644,10 +5664,12 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
     if sl_price and tp_price and rr and direction and price:
         sl_pct_val = abs(sl_price - price) / price * 100
         tp_pct_val = abs(tp_price - price) / price * 100
+        sl_roi_val = sl_pct_val * DISPLAY_LEVERAGE
+        tp_roi_val = tp_pct_val * DISPLAY_LEVERAGE
         sl_sign = "+" if direction == "SHORT" else "−"
         tp_sign = "+" if direction == "LONG" else "−"
-        lines.append(f"Stop Loss: <b>${sl_price:,.6g}</b> ({sl_sign}{sl_pct_val:.2f}%)")
-        lines.append(f"Take Profit: <b>${tp_price:,.6g}</b> ({tp_sign}{tp_pct_val:.2f}%)")
+        lines.append(f"Stop Loss: <b>${sl_price:,.6g}</b> ({sl_sign}{sl_roi_val:.0f}% ROI ×{DISPLAY_LEVERAGE})")
+        lines.append(f"Take Profit: <b>${tp_price:,.6g}</b> ({tp_sign}{tp_roi_val:.0f}% ROI ×{DISPLAY_LEVERAGE})")
         lines.append(f"R/R: 1:{rr:.1f}")
     else:
         lines.append("Stop Loss / Take Profit: нет активного сигнала")
