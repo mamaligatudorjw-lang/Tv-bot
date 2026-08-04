@@ -219,6 +219,12 @@ SHORT_HOLD_TIMEOUT_HOURS = 168.0   # hold SHORTs up to 7 days
 SHORT_HOLD_SL_PCT        = 15.0    # wide stop above entry — survives noise
 SHORT_HOLD_TP_PCT        = 20.0    # take-profit 20% below entry
 MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
+# Раздельные лимиты по направлениям (2026-08-04): SHORT-ы теперь живут до
+# 7 дней (listing_peak_short — до 30), поэтому без квоты они могут занять
+# весь общий лимит и заблокировать 4ч LONG-скальпы. LONG-ам гарантирована
+# своя квота, SHORT-ам — своя; сумма квот равна MAX_OPEN_POSITIONS.
+MAX_OPEN_LONG_POSITIONS = 25       # квота для LONG (быстрые 4ч скальпы)
+MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (до 7-30 дней)
 
 
 # ---------------------------------------------------------------------------
@@ -4368,9 +4374,23 @@ def _auto_start_monitor(
     with _monitors_lock:
         open_count = len(_active_monitors)
         open_symbols = {m.symbol for m in _active_monitors.values()}
+        open_by_dir = sum(
+            1 for m in _active_monitors.values() if m.direction == direction
+        )
     if open_count >= MAX_OPEN_POSITIONS:
         logger.info(
             "_auto_start_monitor blocked: cap reached (%d/%d open)", open_count, MAX_OPEN_POSITIONS,
+        )
+        return
+    # Per-direction quota: long-hold SHORTs (7-30d) must not starve
+    # short-lived LONG scalps of monitor slots (and vice versa).
+    dir_cap = (
+        MAX_OPEN_SHORT_POSITIONS if direction == "SHORT" else MAX_OPEN_LONG_POSITIONS
+    )
+    if open_by_dir >= dir_cap:
+        logger.info(
+            "_auto_start_monitor blocked: %s quota reached (%d/%d open %s, %d/%d total)",
+            direction, open_by_dir, dir_cap, direction, open_count, MAX_OPEN_POSITIONS,
         )
         return
     if symbol in open_symbols:
