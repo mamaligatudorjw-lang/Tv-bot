@@ -1894,6 +1894,29 @@ def _binance_url(symbol: str) -> str:
     return f"https://www.binance.com/ru/futures/{symbol.upper()}"
 
 
+def _coin_trend_label(symbol: str) -> str:
+    """Return a one-line coin trend summary based on yesterday's close-to-close %
+    change (cached in state["prior_day_pct"] during the hourly refresh).
+
+    Examples:
+      📊 Тренд монеты (вчера): ↗️ +48.9%   ← strong up-day before this signal
+      📊 Тренд монеты (вчера): ↘️ -12.3%
+      📊 Тренд монеты (вчера): ➡️ +0.8%
+    """
+    with state_lock:
+        pct = state["prior_day_pct"].get(symbol)
+    if pct is None:
+        return ""
+    if pct >= 5:
+        arrow = "↗️"
+    elif pct <= -5:
+        arrow = "↘️"
+    else:
+        arrow = "➡️"
+    sign = "+" if pct >= 0 else ""
+    return f"\n📊 Тренд монеты (вчера): {arrow} {sign}{pct:.1f}%"
+
+
 def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
     return {
         "inline_keyboard": [
@@ -2067,6 +2090,11 @@ def send_alert_with_log(
         return (False, None)
     if _regime_label:
         body_text = f"{body_text}\n{_regime_label}"
+    # Coin trend: show yesterday's % change so the trader sees if the move is
+    # part of a multi-day trend or a single-day spike.
+    coin_trend = _coin_trend_label(symbol)
+    if coin_trend:
+        body_text = f"{body_text}{coin_trend}"
     # C. Historical edge label — appended when 30-day stats show ≥2% avg return
     #    in the signal's direction at any 2d/3d/7d horizon with ≥5 samples.
     edge_label = _get_signal_edge_label(alert_type, recommendation)
