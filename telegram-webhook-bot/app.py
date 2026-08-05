@@ -4138,16 +4138,28 @@ _price_cache_ts: float = 0.0   # unix timestamp of last update
 
 
 def _get_current_price(symbol: str) -> float | None:
-    """Fetch the latest price from Gate.io Futures."""
-    try:
-        resp = _gateio_get("/tickers", params={"contract": _to_gate(symbol)}, timeout=6)
-        data = resp.json()
-        if data:
-            return float(data[0]["last"])
+    """Fetch the latest price from Gate.io Futures.
+
+    Falls back to stripping a trailing 'B' before 'USDT' for symbols that were
+    originally opened on Binance (e.g. KORUBUSDT → KORU_USDT on Gate.io).
+    """
+    def _try(sym: str) -> float | None:
+        try:
+            resp = _gateio_get("/tickers", params={"contract": _to_gate(sym)}, timeout=6)
+            data = resp.json()
+            if data and float(data[0].get("last", 0)):
+                return float(data[0]["last"])
+        except Exception as exc:
+            logger.debug("_get_current_price %s failed: %s", sym, exc)
         return None
-    except Exception as exc:
-        logger.debug("_get_current_price %s failed: %s", symbol, exc)
-        return None
+
+    price = _try(symbol)
+    if price is not None:
+        return price
+    # Binance symbols like KORUBUSDT → Gate.io KORU_USDT (drop 'B' before USDT)
+    if symbol.endswith("BUSDT") and len(symbol) > 6:
+        return _try(symbol[:-5] + "USDT")
+    return None
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -6045,20 +6057,49 @@ def api_signals_performance():
 
 @app.route("/bot-api/positions", methods=["GET"])
 def api_positions():
-    """Return all currently active position monitors with live PnL (from price cache)."""
+    """Return all currently active position monitors with live PnL.
+
+    Primary source: the 5-min price cache populated by run_checks.
+    Fallback: one Gate.io batch call for symbols missing from the cache
+    (handles freshly-started bot and symbols with Binance-style 'B' suffix).
+    """
     with _monitors_lock:
         monitors = list(_active_monitors.values())
 
     with _price_cache_lock:
         prices = dict(_price_cache)
-        cache_age = int(time.time() - _price_cache_ts) if _price_cache_ts else None
+
+    # ── Batch-fetch prices for any symbol not in the 5-min cache ────────────
+    missing = [m.symbol for m in monitors if not prices.get(m.symbol)]
+    if missing:
+        try:
+            live = get_24h_tickers(missing)
+            # Binance 'B'-suffix fallback: KORUBUSDT → KORU_USDT on Gate.io
+            still_missing = [s for s in missing if s not in live]
+            alt_map: dict[str, str] = {}  # alt_sym → original_sym
+            for s in still_missing:
+                if s.endswith("BUSDT") and len(s) > 6:
+                    alt = s[:-5] + "USDT"
+                    alt_map[alt] = s
+            if alt_map:
+                alt_live = get_24h_tickers(list(alt_map))
+                for alt, orig in alt_map.items():
+                    if alt in alt_live:
+                        live[orig] = alt_live[alt]
+            for sym, t in live.items():
+                try:
+                    p = float(t["lastPrice"])
+                    if p:
+                        prices[sym] = p
+                except (ValueError, KeyError):
+                    pass
+        except Exception as e:
+            logger.warning("api_positions: live fetch failed: %s", e)
+    # ────────────────────────────────────────────────────────────────────────
 
     now = time.time()
     result = []
     for m in sorted(monitors, key=lambda x: x.ts_open):
-        # Never call _get_current_price here — it makes one Binance request per
-        # position and with 10+ monitors this easily exceeds gunicorn's worker
-        # timeout.  The 5-min cycle updates the cache; stale data is acceptable.
         current = prices.get(m.symbol) or None
         if current is not None:
             pnl_pct = (
