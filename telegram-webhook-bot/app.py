@@ -2770,6 +2770,28 @@ def check_overheated_oversold(
         return 0, 0, 0, 0
     sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh = 0, 0, 0, 0
     now = time.time()
+
+    # ── Pre-scan: collect co-movers for "also rising / also falling" note ───
+    # These lists contain ALL coins that crossed the same directional threshold
+    # in this cycle — regardless of RSI/EMA/cooldown filters.  They are shown
+    # in the signal body so the trader can spot correlated pumps/dumps.
+    oh_peers: list[tuple[str, float]] = []   # (symbol, pct24) — overheated
+    os_peers: list[tuple[str, float]] = []   # (symbol, pct24) — oversold
+    for _sym, _t in tickers.items():
+        try:
+            _p = float(_t["priceChangePercent"])
+            _thresh_oh = _vol_threshold(_sym, OVERHEATED_24H_PCT, 2.5)
+            _thresh_os = _vol_threshold(_sym, OVERSOLD_24H_PCT, 2.5)
+        except (ValueError, KeyError):
+            continue
+        if _p >= _thresh_oh:
+            oh_peers.append((_sym, _p))
+        elif _p <= _thresh_os:
+            os_peers.append((_sym, _p))
+    oh_peers.sort(key=lambda x: x[1], reverse=True)   # strongest pump first
+    os_peers.sort(key=lambda x: x[1])                  # strongest dump first
+    # ────────────────────────────────────────────────────────────────────────
+
     for symbol, t in tickers.items():
         rsi = rsi_map.get(symbol)
         if rsi is None:
@@ -2849,6 +2871,15 @@ def check_overheated_oversold(
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
                 sl_tp = _format_sl_tp("sell", price, atr)
+                # Co-movers: up to 3 other coins also in the overheated zone
+                _oh_others = [
+                    f"<code>{s}</code> +{p:.1f}%"
+                    for s, p in oh_peers if s != symbol
+                ][:3]
+                _co_line = (
+                    f"\n🔗 Также растут: {', '.join(_oh_others)}"
+                    if _oh_others else ""
+                )
                 body = (
                     f"⚠️ <b>ПЕРЕГРЕТА — возможен шорт</b>\n"
                     f"Монета выросла слишком быстро\n"
@@ -2859,6 +2890,7 @@ def check_overheated_oversold(
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
+                    + _co_line
                 )
                 delivered, _aid = send_alert_with_log(symbol, "overheated_24h", "SHORT", price, body, score)
                 if delivered:
@@ -2875,6 +2907,15 @@ def check_overheated_oversold(
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
                 sl_tp = _format_sl_tp("buy", price, atr)
+                # Co-movers: up to 3 other coins also in the oversold zone
+                _os_others = [
+                    f"<code>{s}</code> {p:.1f}%"
+                    for s, p in os_peers if s != symbol
+                ][:3]
+                _co_line_os = (
+                    f"\n🔗 Также падают: {', '.join(_os_others)}"
+                    if _os_others else ""
+                )
                 body = (
                     f"💎 <b>ПЕРЕПРОДАНА — возможен лонг</b>\n"
                     f"Монета упала слишком сильно\n"
@@ -2885,6 +2926,7 @@ def check_overheated_oversold(
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
+                    + _co_line_os
                 )
                 delivered, _aid = send_alert_with_log(symbol, "oversold_24h", "LONG", price, body, score)
                 if delivered:
