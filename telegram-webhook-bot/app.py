@@ -146,6 +146,7 @@ state = {
     "last_listing_peak_alerted": {},        # symbol -> ts (listing_peak_short TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
+    "prior_day_pct": {},               # symbol -> float: yesterday's close-to-close % change
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
     "market_regime_ts": 0,             # unix ts of last regime refresh
     "initialized": False,
@@ -174,6 +175,10 @@ VOLUME_SPIKE_COOLDOWN = 300        # allow once per 5-min cycle
 # A SHORT is only sent if price has already pulled back ≥ this % from its
 # 24-hour high.  Prevents shorting a coin that is still actively rising.
 SHORT_REVERSAL_CONFIRM_PCT = 0.75  # price must be ≥ 0.75% below 24h high
+# Suppress overheated SHORT when the coin was already trending up the day before.
+# If yesterday's close-to-close change > this threshold the move is a multi-day
+# trend, not a single-day spike ripe for reversal.
+PRIOR_TREND_BLOCK_PCT = 15.0        # yesterday up >15% → it's a trend, don't fade
 
 # --- New listing pump→dump SHORT (TEST) ---
 NEW_LISTING_WINDOW_H     = 48     # only watch coins listed in last 48h
@@ -811,15 +816,22 @@ def get_daily_highs(symbol: str, limit: int = 31) -> list[float] | None:
 
 
 def get_daily_data(symbol: str, limit: int = 31) -> dict | None:
-    """Return {"highs": [...], "yesterday_vol": float, "today_vol": float} from daily klines."""
+    """Return daily kline summary from Gate.io.
+
+    Keys: highs, closes, yesterday_vol, today_vol.
+    - highs/closes: list[float], oldest→newest, length = number of complete candles
+    - yesterday_vol / today_vol: 24h quote volume (USDT)
+    """
     try:
         candles = _gateio_klines(symbol, "1d", limit)
         if not candles:
             return None
-        highs = [float(k[2]) for k in candles]
+        highs  = [float(k[2]) for k in candles]
+        closes = [float(k[4]) for k in candles]
         yesterday_vol = float(candles[-2][7]) if len(candles) >= 2 else 0.0
         today_vol = float(candles[-1][7])
-        return {"highs": highs, "yesterday_vol": yesterday_vol, "today_vol": today_vol}
+        return {"highs": highs, "closes": closes,
+                "yesterday_vol": yesterday_vol, "today_vol": today_vol}
     except Exception as e:
         logger.warning("Daily klines failed for %s: %s", symbol, e)
         return None
@@ -2501,12 +2513,19 @@ def refresh_weekly_monthly_highs(liquid_symbols: list[str]) -> int:
             symbol, data = future.result()
             if not data:
                 continue
-            highs = data["highs"]
+            highs  = data["highs"]
+            closes = data.get("closes", [])
             weekly_high = max(highs[-7:]) if len(highs) >= 7 else max(highs)
             monthly_high = max(highs)
             with state_lock:
                 state["weekly_highs"][symbol] = weekly_high
                 state["monthly_highs"][symbol] = monthly_high
+                # Cache yesterday's close-to-close % change for trend detection.
+                # closes[-1] = today (incomplete), closes[-2] = yesterday,
+                # closes[-3] = day before yesterday.
+                if len(closes) >= 3 and closes[-3] > 0:
+                    prior_pct = (closes[-2] - closes[-3]) / closes[-3] * 100
+                    state["prior_day_pct"][symbol] = prior_pct
             updated += 1
 
             yest = data["yesterday_vol"]
@@ -2758,6 +2777,21 @@ def check_overheated_oversold(
                     symbol, price, ema_oh,
                 )
                 ema_blocked_oh += 1
+                continue
+
+            # Multi-day trend filter: if the coin was already rising strongly
+            # YESTERDAY, today's surge is a trend continuation, not a reversal.
+            # Example: HEIUSDT +48.9% on day 1 → bot shorted. Wrong.
+            # Day 2 prior_day_pct = +48.9% → SHORT suppressed.
+            with state_lock:
+                prior_pct = state["prior_day_pct"].get(symbol)
+            if prior_pct is not None and prior_pct >= PRIOR_TREND_BLOCK_PCT:
+                logger.debug(
+                    "Overheated short suppressed by multi-day trend filter: "
+                    "%s prior_day=+%.1f%% >= %.1f%%",
+                    symbol, prior_pct, PRIOR_TREND_BLOCK_PCT,
+                )
+                ema_blocked_oh += 1   # reuse the same counter for summary
                 continue
 
             # Reversal confirmation: price must have pulled back ≥ 1.5% from
@@ -4070,6 +4104,17 @@ def run_checks():
                         new_cache[sym] = float(t["lastPrice"])
                     except (ValueError, KeyError):
                         pass
+                # Also populate Binance-style 'B'-suffix variants for active
+                # monitors (e.g. KORUBUSDT → KORU_USDT on Gate.io).
+                # This prevents the positions endpoint from making a live
+                # API call on every request for these symbols.
+                with _monitors_lock:
+                    monitored_syms = {m.symbol for m in _active_monitors.values()}
+                for msym in monitored_syms:
+                    if msym not in new_cache and msym.endswith("BUSDT") and len(msym) > 6:
+                        alt = msym[:-5] + "USDT"   # KORUBUSDT → KORUSDT
+                        if alt in new_cache:
+                            new_cache[msym] = new_cache[alt]
                 with _price_cache_lock:
                     _price_cache = new_cache
                     _price_cache_ts = time.time()
@@ -6069,32 +6114,37 @@ def api_positions():
     with _price_cache_lock:
         prices = dict(_price_cache)
 
-    # ── Batch-fetch prices for any symbol not in the 5-min cache ────────────
-    missing = [m.symbol for m in monitors if not prices.get(m.symbol)]
-    if missing:
-        try:
-            live = get_24h_tickers(missing)
-            # Binance 'B'-suffix fallback: KORUBUSDT → KORU_USDT on Gate.io
-            still_missing = [s for s in missing if s not in live]
-            alt_map: dict[str, str] = {}  # alt_sym → original_sym
-            for s in still_missing:
-                if s.endswith("BUSDT") and len(s) > 6:
-                    alt = s[:-5] + "USDT"
-                    alt_map[alt] = s
-            if alt_map:
-                alt_live = get_24h_tickers(list(alt_map))
-                for alt, orig in alt_map.items():
-                    if alt in alt_live:
-                        live[orig] = alt_live[alt]
-            for sym, t in live.items():
-                try:
-                    p = float(t["lastPrice"])
-                    if p:
-                        prices[sym] = p
-                except (ValueError, KeyError):
-                    pass
-        except Exception as e:
-            logger.warning("api_positions: live fetch failed: %s", e)
+    # ── Batch-fetch prices when the 5-min cache is still empty (startup) ───
+    # After the first run_checks cycle the cache has 878 symbols + B-suffix
+    # variants for active monitors, so this block is skipped on every normal
+    # request and only fires during the first ~5 minutes after a restart.
+    cache_is_empty = not prices  # True only before first cycle completes
+    if cache_is_empty:
+        missing = [m.symbol for m in monitors]
+        if missing:
+            try:
+                live = get_24h_tickers(missing)   # single Gate.io call
+                # Binance 'B'-suffix fallback: KORUBUSDT → KORU_USDT
+                still_missing = [s for s in missing if s not in live]
+                alt_map: dict[str, str] = {}
+                for s in still_missing:
+                    if s.endswith("BUSDT") and len(s) > 6:
+                        alt = s[:-5] + "USDT"
+                        alt_map[alt] = s
+                if alt_map:
+                    alt_live = get_24h_tickers(list(alt_map))
+                    for alt, orig in alt_map.items():
+                        if alt in alt_live:
+                            live[orig] = alt_live[alt]
+                for sym, t in live.items():
+                    try:
+                        p = float(t["lastPrice"])
+                        if p:
+                            prices[sym] = p
+                    except (ValueError, KeyError):
+                        pass
+            except Exception as e:
+                logger.warning("api_positions: startup live fetch failed: %s", e)
     # ────────────────────────────────────────────────────────────────────────
 
     now = time.time()
