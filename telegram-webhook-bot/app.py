@@ -5252,9 +5252,53 @@ def handle_positions_command(chat_id: int) -> None:
     monitors = sorted(monitors, key=lambda x: x.ts_open)
     total = len(monitors)
     shown = monitors[:20]
-
-    lines = [f"📊 <b>Открытые позиции: {total}</b> (показано {len(shown)})", ""]
     now = time.time()
+
+    # ── Direction summary block ──────────────────────────────────────────────
+    def _dir_summary(direction: str) -> str:
+        group = [m for m in monitors if m.direction == direction]
+        if not group:
+            return ""
+        in_profit = in_loss = sum_profit = sum_loss = 0
+        for m in group:
+            cur = _get_current_price(m.symbol)
+            if cur is None:
+                continue
+            pnl = (
+                (cur - m.entry) / m.entry * 100 if direction == "LONG"
+                else (m.entry - cur) / m.entry * 100
+            )
+            if pnl > 0:
+                in_profit += 1; sum_profit += pnl
+            elif pnl < 0:
+                in_loss += 1; sum_loss += pnl
+        net = sum_profit + sum_loss
+        net_emoji = "🟢" if net > 0 else ("🔴" if net < 0 else "⚪️")
+        icon = "📈" if direction == "LONG" else "📉"
+        profit_line = f"   ✅ В прибыли: {in_profit}  (+{sum_profit:.1f}%)" if in_profit else ""
+        loss_line   = f"   ❌ В убытке:  {in_loss}  ({sum_loss:.1f}%)"   if in_loss   else ""
+        return (
+            f"{icon} <b>{direction}: {len(group)} поз.</b>\n"
+            + (profit_line + "\n" if profit_line else "")
+            + (loss_line   + "\n" if loss_line   else "")
+            + f"   {net_emoji} Итог: {net:+.1f}%"
+        )
+
+    short_block = _dir_summary("SHORT")
+    long_block  = _dir_summary("LONG")
+    divider = "━━━━━━━━━━━━━━━━━━━━"
+
+    lines = [
+        f"📊 <b>Открытые позиции: {total}</b>",
+        "",
+    ]
+    if short_block:
+        lines += [short_block, ""]
+    if long_block:
+        lines += [long_block, ""]
+    lines += [divider, f"<i>Детали (последние {len(shown)}):</i>", ""]
+    # ────────────────────────────────────────────────────────────────────────
+
     for m in shown:
         current = _get_current_price(m.symbol)
         elapsed_h = (now - m.ts_open) / 3600
