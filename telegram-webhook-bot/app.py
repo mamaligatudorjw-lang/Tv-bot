@@ -1855,14 +1855,22 @@ MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "50"))
 # Per-type score minimums — override the global MIN_ALERT_SCORE for specific
 # signal types where historical data shows a higher bar improves quality.
 MIN_SCORE_BY_TYPE: dict[str, int] = {
-    "overheated_24h":      70,   # only strong setups (vs global 60)
-    "momentum_down_5":     65,
-    "momentum_down_10":    65,
-    "breakdown_short":     55,   # TEST signal — lower bar while calibrating
-    "momentum_long":       55,   # TEST signal — fade SHORT: pump+10% 24h → reversal
-    "new_listing_short":   55,   # TEST signal — pump→dump after new listing
-    "listing_dump_long":   50,   # TEST signal — listing dump recovery bounce
-    "listing_peak_short":  55,   # TEST signal — new listing ATH peak → long-duration SHORT
+    # ── SHORT / SELL — backtest 30d: score≥70 → 63% WR at 1д (vs 52% unfiltered) ──
+    "overheated_24h":      70,
+    "confluence":          70,   # fires LONG+SHORT; raise both — LONG quality also low
+    "breakdown_short":     70,   # raised from 55
+    "momentum_up_2":       70,   # raised from default 50
+    "momentum_up_3":       70,   # raised from default 50
+    "momentum_up_5":       70,   # raised from default 50
+    "momentum_up_10":      70,   # raised from default 50
+    "momentum_down_5":     70,   # raised from 65
+    "momentum_down_10":    70,   # raised from 65
+    "volume_surge_short":  70,   # raised from default 50
+    "new_listing_short":   70,   # raised from 55
+    "listing_peak_short":  70,   # raised from 55
+    # ── LONG / BUY — score filter doesn't improve quality; keep lower bar ──
+    "momentum_long":       55,
+    "listing_dump_long":   50,
 }
 
 # --- Breakdown continuation SHORT (TEST) ---
