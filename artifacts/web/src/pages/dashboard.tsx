@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
-import { useBotStatus, useSignals, useStats, useAnalytics } from "@/hooks/use-api";
-import type { Signal } from "@/types/api";
+import { useBotStatus, useSignals, useStats, useAnalytics, usePositions } from "@/hooks/use-api";
+import type { Position, Signal } from "@/types/api";
 import {
   calcDeltaPercent,
   formatDelta,
@@ -403,6 +403,113 @@ function SignalRow({ s, isNew }: { s: Signal; isNew: boolean }) {
   );
 }
 
+// ── Positions summary widget ─────────────────────────────────────────────────
+
+function calcPosSummary(positions: Position[]) {
+  let inProfit = 0, inLoss = 0, sumProfit = 0, sumLoss = 0;
+  for (const p of positions) {
+    if (p.pnlPct === null) continue;
+    if (p.pnlPct > 0) { inProfit++; sumProfit += p.pnlPct; }
+    else if (p.pnlPct < 0) { inLoss++; sumLoss += p.pnlPct; }
+  }
+  return { count: positions.length, inProfit, inLoss, netPnl: sumProfit + sumLoss };
+}
+
+function PosDirBlock({
+  direction,
+  positions,
+}: {
+  direction: "LONG" | "SHORT";
+  positions: Position[];
+}) {
+  const s = calcPosSummary(positions);
+  const isLong = direction === "LONG";
+  const netPos = s.netPnl > 0;
+  const netClass = netPos
+    ? "text-emerald-400"
+    : s.netPnl < 0
+    ? "text-rose-400"
+    : "text-slate-400";
+  const borderColor = isLong ? "border-emerald-400/20" : "border-rose-400/20";
+  const bgColor = isLong ? "bg-emerald-400/[0.04]" : "bg-rose-400/[0.04]";
+  const badgeCls = isLong
+    ? "border-emerald-400/40 bg-emerald-400/10 text-emerald-400"
+    : "border-rose-400/40 bg-rose-400/10 text-rose-400";
+
+  return (
+    <div className={`rounded-2xl border ${borderColor} ${bgColor} p-4`}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-bold uppercase tracking-widest ${badgeCls}`}>
+            {isLong ? "↑" : "↓"} {direction}
+          </span>
+          <span className="text-sm text-slate-400">{s.count} поз.</span>
+        </div>
+        <div className={`font-mono font-bold tabular-nums text-lg ${netClass}`}>
+          {s.netPnl >= 0 ? "+" : ""}{s.netPnl.toFixed(2)}%
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-2 border-t border-white/5 pt-3 text-xs">
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Прибыльных</div>
+          <div className="font-mono font-semibold text-emerald-400">{s.inProfit}</div>
+        </div>
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-0.5">Убыточных</div>
+          <div className="font-mono font-semibold text-rose-400">{s.inLoss}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PositionsSummaryWidget() {
+  const { data, isLoading } = usePositions();
+  const longs  = data?.positions.filter((p) => p.direction === "LONG")  ?? [];
+  const shorts = data?.positions.filter((p) => p.direction === "SHORT") ?? [];
+
+  return (
+    <section className="mt-4">
+      <div className="rounded-2xl border border-card-border bg-card/40 p-4 backdrop-blur-sm">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+              Открытые позиции
+            </span>
+            {data && (
+              <span className="rounded-full border border-card-border px-2 py-0.5 text-[10px] text-muted-foreground/60">
+                {data.count} всего
+              </span>
+            )}
+          </div>
+          <Link
+            href="/positions"
+            className="text-[11px] text-primary/70 hover:text-primary transition-colors"
+          >
+            Все позиции →
+          </Link>
+        </div>
+
+        {isLoading ? (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="h-24 animate-pulse rounded-2xl bg-muted/30" />
+            <div className="h-24 animate-pulse rounded-2xl bg-muted/30" />
+          </div>
+        ) : !data?.count ? (
+          <div className="py-4 text-center text-sm text-muted-foreground">
+            Нет открытых позиций
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {longs.length  > 0 && <PosDirBlock direction="LONG"  positions={longs}  />}
+            {shorts.length > 0 && <PosDirBlock direction="SHORT" positions={shorts} />}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function SkeletonRow() {
   return (
     <div className="rounded-xl border border-card-border bg-card/30 px-4 py-3">
@@ -576,6 +683,8 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+
+        <PositionsSummaryWidget />
 
         <section className="mt-10">
           <div className="flex flex-wrap items-end justify-between gap-3">
