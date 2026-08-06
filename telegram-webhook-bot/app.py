@@ -1857,7 +1857,7 @@ MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "50"))
 MIN_SCORE_BY_TYPE: dict[str, int] = {
     # ── SHORT / SELL — backtest 30d: score≥70 → 63% WR at 1д (vs 52% unfiltered) ──
     "overheated_24h":      70,
-    "confluence":          70,   # fires LONG+SHORT; raise both — LONG quality also low
+    "confluence":          70,   # SHORT: score≥70 → good; LONG uses MIN_SCORE_LONG_BY_TYPE
     "breakdown_short":     70,   # raised from 55
     "momentum_up_2":       70,   # raised from default 50
     "momentum_up_3":       70,   # raised from default 50
@@ -1871,6 +1871,20 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     # ── LONG / BUY — score filter doesn't improve quality; keep lower bar ──
     "momentum_long":       55,
     "listing_dump_long":   50,
+}
+
+# ── LONG-specific score window — backtest 30d ───────────────────────────────
+# For LONG signals score is INVERSELY correlated with outcome: the only
+# profitable zone is 55–65 (TP:SL 1.19x). Above 65 quality degrades sharply
+# (≥70 → 0.59x). Below 55 → mostly SL (71% SL rate). Separate min/max dicts
+# let SHORT keep the ≥70 bar while LONG gets its own optimal window.
+MIN_SCORE_LONG_BY_TYPE: dict[str, int] = {
+    "confluence":   55,   # override global 70 — LONG sweet spot starts at 55
+    "oversold_24h": 55,   # score 55-65: TP 37-40%; ≥60 SL rate spikes to 50%+
+}
+MAX_SCORE_LONG_BY_TYPE: dict[str, int] = {
+    "confluence":   65,   # above 65: TP:SL degrades to 0.71x → 0.59x
+    "oversold_24h": 65,   # above 65: TP:SL collapses to 0.32x
 }
 
 # --- Breakdown continuation SHORT (TEST) ---
@@ -2053,14 +2067,28 @@ def send_alert_with_log(
             symbol, alert_type, recommendation,
         )
         return (False, None)
-    # Score gate — per-type minimum overrides the global floor where set.
-    min_score = MIN_SCORE_BY_TYPE.get(alert_type, MIN_ALERT_SCORE)
+    # Score gate — per-type minimum (LONG signals use their own window).
+    # Backtest: for LONG, score is inversely correlated with outcome — the
+    # profitable zone is 55–65; above 65 quality degrades sharply.
+    if recommendation == "LONG" and alert_type in MIN_SCORE_LONG_BY_TYPE:
+        min_score = MIN_SCORE_LONG_BY_TYPE[alert_type]
+    else:
+        min_score = MIN_SCORE_BY_TYPE.get(alert_type, MIN_ALERT_SCORE)
     if score is None or score < min_score:
         logger.info(
             "Suppressed %s/%s (score=%s < min %d)",
             symbol, alert_type, score, min_score,
         )
         return (False, None)
+    # LONG score ceiling — above the ceiling quality degrades (backtest-driven).
+    if recommendation == "LONG":
+        max_score_long = MAX_SCORE_LONG_BY_TYPE.get(alert_type)
+        if max_score_long is not None and score > max_score_long:
+            logger.info(
+                "Suppressed %s/%s LONG (score=%s > max %d — outside optimal zone 55–65)",
+                symbol, alert_type, score, max_score_long,
+            )
+            return (False, None)
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
         # consume cooldowns so we don't spam every cycle.
@@ -3360,11 +3388,8 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
             side, rec, kind = "sell", "SHORT", "volume_surge_short"
             zone_label = "перекуплен"
             dir_word = "ШОРТ"
-        elif crsi <= CRSI_OVERSOLD:
-            side, rec, kind = "buy", "LONG", "volume_surge_long"
-            zone_label = "перепродан"
-            dir_word = "ЛОНГ"
         else:
+            # volume_surge_long disabled — backtest 30d: 100% SL rate (0 TP of 8 signals)
             continue
 
         score = compute_signal_score(
@@ -3817,8 +3842,8 @@ def run_checks():
                 # 6f. TEST: New listing pump→dump SHORT (≥+20% from listing + RSI≥65)
                 summary["new_listing_short_alerts"] = check_new_listing_pumps(tickers, rsi_map)
 
-                # 6g. TEST: Listing dump → LONG recovery (≥−40% from 30d peak + RSI≤35)
-                summary["listing_dump_long_alerts"] = check_listing_dump_long(tickers, rsi_map)
+                # 6g. listing_dump_long disabled — backtest 30d: 0 TP of 4 signals, 50% SL
+                summary["listing_dump_long_alerts"] = 0
 
                 # 6h. TEST: New listing ATH peak → SHORT long-duration (pump≥30% + RSI≥70)
                 summary["listing_peak_short_alerts"] = check_listing_peak_short(tickers, rsi_map)
@@ -4247,7 +4272,8 @@ def run_checks():
 # ---------------------------------------------------------------------------
 
 MONITOR_POLL_INTERVAL = 45          # seconds between price polls
-MONITOR_TIMEOUT_HOURS = 4           # hours until forced timeout
+MONITOR_TIMEOUT_HOURS = 4           # hours until forced timeout (SHORT scalp fallback)
+LONG_HOLD_TIMEOUT_HOURS = 48        # LONG hold window — backtest: TP hits mostly at 1d–3d
 MONITOR_SLIPPAGE_PCT  = 5.0         # re-verify if price moves >5 % in one tick
 
 _active_monitors: dict[int, "PositionMonitor"] = {}
@@ -4581,8 +4607,10 @@ def _auto_start_monitor(
     else:
         _sl = sl_pct if sl_pct is not None else HIT_RATE_SL_PCT
         _tp = tp_pct if tp_pct is not None else HIT_RATE_TP_PCT
+        # LONG positions hold up to 48h — backtest shows TP hits mostly at 1d–3d;
+        # the old 4h timeout was cutting positions before they had time to recover.
         timeout_hours = (
-            timeout_hours if timeout_hours is not None else MONITOR_TIMEOUT_HOURS
+            timeout_hours if timeout_hours is not None else LONG_HOLD_TIMEOUT_HOURS
         )
     if direction == "LONG":
         sl_price = entry * (1 - _sl / 100)
