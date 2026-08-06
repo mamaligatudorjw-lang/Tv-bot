@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "wouter";
-import { useBotStatus, useSignals, useStats, useAnalytics, usePositions } from "@/hooks/use-api";
+import { useBotStatus, useSignals, useStats, useAnalytics, usePositions, usePerformance } from "@/hooks/use-api";
 import type { Position, Signal } from "@/types/api";
 import {
   calcDeltaPercent,
@@ -403,6 +403,173 @@ function SignalRow({ s, isNew }: { s: Signal; isNew: boolean }) {
   );
 }
 
+// ── Signal stats widget ──────────────────────────────────────────────────────
+
+const STAT_WINDOWS = [
+  { key: "1h",  label: "1ч"   },
+  { key: "4h",  label: "4ч"   },
+  { key: "8h",  label: "8ч"   },
+  { key: "12h", label: "12ч"  },
+  { key: "16h", label: "16ч"  },
+  { key: "24h", label: "24ч"  },
+  { key: "2d",  label: "2д"   },
+  { key: "4d",  label: "4д"   },
+  { key: "6d",  label: "6д"   },
+  { key: "8d",  label: "8д"   },
+  { key: "15d", label: "15д"  },
+  { key: "30d", label: "30д"  },
+];
+
+function pct(v: number | null, d = 1) {
+  if (v === null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(d)}%`;
+}
+
+function SignalStatsWidget() {
+  const [win, setWin] = useState("24h");
+  const { data, isLoading } = usePerformance(win);
+
+  // Aggregate buy / sell separately
+  const agg = useMemo(() => {
+    if (!data?.byType) return null;
+    const sides = { buy: { count: 0, fu: 0, wins: 0, ret: 0 }, sell: { count: 0, fu: 0, wins: 0, ret: 0 } } as Record<string, { count: number; fu: number; wins: number; ret: number }>;
+    for (const b of data.byType) {
+      const s = sides[b.side];
+      if (!s) continue;
+      s.count += b.count;
+      // prefer 4h horizon for quick feedback; fall back to 1h
+      const h = b.horizons["4h"]?.followups ? b.horizons["4h"] : b.horizons["1h"];
+      if (!h || !h.followups) continue;
+      s.fu   += h.followups;
+      s.wins += h.winRate  !== null ? h.winRate  * h.followups : 0;
+      s.ret  += h.avgReturn !== null ? h.avgReturn * h.followups : 0;
+    }
+    return {
+      total: data.totalSignals,
+      buy: {
+        count:   sides.buy.count,
+        winRate: sides.buy.fu  ? sides.buy.wins / sides.buy.fu  : null,
+        avgRet:  sides.buy.fu  ? sides.buy.ret  / sides.buy.fu  : null,
+        fu:      sides.buy.fu,
+      },
+      sell: {
+        count:   sides.sell.count,
+        winRate: sides.sell.fu ? sides.sell.wins / sides.sell.fu : null,
+        avgRet:  sides.sell.fu ? sides.sell.ret  / sides.sell.fu : null,
+        fu:      sides.sell.fu,
+      },
+    };
+  }, [data]);
+
+  return (
+    <section className="mt-4">
+      <div className="rounded-2xl border border-card-border bg-card/40 p-4 backdrop-blur-sm">
+        {/* header */}
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+            Статистика сигналов
+          </span>
+          <Link
+            href="/performance"
+            className="text-[11px] text-primary/70 hover:text-primary transition-colors"
+          >
+            Подробнее →
+          </Link>
+        </div>
+
+        {/* period selector */}
+        <div className="mb-4 flex flex-wrap gap-1">
+          {STAT_WINDOWS.map((w) => (
+            <button
+              key={w.key}
+              onClick={() => setWin(w.key)}
+              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                win === w.key
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-white/5 text-slate-400 hover:bg-white/10 hover:text-slate-200"
+              }`}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+
+        {/* stats */}
+        {isLoading ? (
+          <div className="grid grid-cols-3 gap-3">
+            {[1,2,3].map(i => (
+              <div key={i} className="h-16 animate-pulse rounded-xl bg-muted/30" />
+            ))}
+          </div>
+        ) : !agg || agg.total === 0 ? (
+          <div className="py-4 text-center text-sm text-muted-foreground">
+            Нет данных за этот период
+          </div>
+        ) : (
+          <div className="grid grid-cols-3 gap-3">
+            {/* total */}
+            <div className="rounded-xl border border-card-border bg-card/60 p-3 text-center">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Всего</div>
+              <div className="font-mono text-2xl font-semibold tabular-nums">{agg.total}</div>
+              <div className="text-[10px] text-slate-500 mt-1">сигналов</div>
+            </div>
+
+            {/* buy */}
+            <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/[0.04] p-3">
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className="text-[10px] uppercase tracking-wider font-bold text-emerald-400">↑ Покупка</span>
+                <span className="text-[10px] text-slate-500">{agg.buy.count}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1 text-xs">
+                <div>
+                  <div className="text-[10px] text-slate-500">Win-rate</div>
+                  <div className={`font-mono font-semibold tabular-nums ${agg.buy.winRate !== null && agg.buy.winRate >= 0.5 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {pct(agg.buy.winRate, 0)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-500">Avg return</div>
+                  <div className={`font-mono font-semibold tabular-nums ${agg.buy.avgRet !== null && agg.buy.avgRet >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {agg.buy.avgRet !== null ? `${agg.buy.avgRet >= 0 ? "+" : ""}${pct(agg.buy.avgRet, 2)}` : "—"}
+                  </div>
+                </div>
+              </div>
+              {agg.buy.fu > 0 && (
+                <div className="text-[10px] text-slate-600 mt-1">{agg.buy.fu} с данными 4ч</div>
+              )}
+            </div>
+
+            {/* sell */}
+            <div className="rounded-xl border border-rose-400/20 bg-rose-400/[0.04] p-3">
+              <div className="flex items-center gap-1.5 mb-2">
+                <span className="text-[10px] uppercase tracking-wider font-bold text-rose-400">↓ Продажа</span>
+                <span className="text-[10px] text-slate-500">{agg.sell.count}</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1 text-xs">
+                <div>
+                  <div className="text-[10px] text-slate-500">Win-rate</div>
+                  <div className={`font-mono font-semibold tabular-nums ${agg.sell.winRate !== null && agg.sell.winRate >= 0.5 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {pct(agg.sell.winRate, 0)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-slate-500">Avg return</div>
+                  <div className={`font-mono font-semibold tabular-nums ${agg.sell.avgRet !== null && agg.sell.avgRet >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {agg.sell.avgRet !== null ? `${agg.sell.avgRet >= 0 ? "+" : ""}${pct(agg.sell.avgRet, 2)}` : "—"}
+                  </div>
+                </div>
+              </div>
+              {agg.sell.fu > 0 && (
+                <div className="text-[10px] text-slate-600 mt-1">{agg.sell.fu} с данными 4ч</div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // ── Positions summary widget ─────────────────────────────────────────────────
 
 function calcPosSummary(positions: Position[]) {
@@ -683,6 +850,8 @@ export default function Dashboard() {
             )}
           </div>
         </section>
+
+        <SignalStatsWidget />
 
         <PositionsSummaryWidget />
 
