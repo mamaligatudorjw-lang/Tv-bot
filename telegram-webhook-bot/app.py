@@ -20,6 +20,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Also write to a persistent file so we can debug even when terminal
+# output is not captured by the workflow log viewer.
+_file_log_path = os.path.join(os.path.dirname(__file__), "bot_debug.log")
+try:
+    _fh = logging.FileHandler(_file_log_path, encoding="utf-8")
+    _fh.setLevel(logging.INFO)
+    _fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logging.getLogger().addHandler(_fh)
+except Exception:
+    pass  # non-fatal — terminal logging still works
+
 app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -2355,7 +2366,9 @@ def handle_callback_query(cb: dict) -> None:
     msg = cb.get("message") or {}
     chat_id = (msg.get("chat") or {}).get("id")
     message_id = msg.get("message_id")
+    logger.info("callback_query received: id=%s data=%r chat_id=%s", cb_id, data, chat_id)
     if not cb_id or not data:
+        logger.warning("callback_query dropped: cb_id=%r data=%r", cb_id, data)
         return
     try:
         kind, _, rest = data.partition(":")
@@ -2367,8 +2380,10 @@ def handle_callback_query(cb: dict) -> None:
             except ValueError:
                 _telegram_answer_callback(cb_id, "Неверные данные")
                 return
+            # Answer FIRST so Telegram spinner stops immediately
+            _telegram_answer_callback(cb_id, "Спасибо! Учтено")
             record_feedback(aid, vote)
-            # Look up symbol for the graph button
+            # Look up symbol to update the keyboard
             try:
                 with _db_lock:
                     conn = _get_db()
@@ -2380,7 +2395,6 @@ def handle_callback_query(cb: dict) -> None:
                 symbol = ""
             if chat_id and message_id and symbol:
                 _telegram_edit_markup(chat_id, message_id, _build_voted_buttons(aid, symbol, vote))
-            _telegram_answer_callback(cb_id, "Спасибо! Учтено")
         elif kind == "ht":
             if rest:
                 newly = add_hidden("type", rest)
