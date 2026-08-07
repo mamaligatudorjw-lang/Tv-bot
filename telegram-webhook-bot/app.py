@@ -382,6 +382,7 @@ def _telegram_edit_markup(chat_id: int, message_id: int, reply_markup: dict | No
 _GEMINI_BASE_URL = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL")
 _GEMINI_API_KEY = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY")
 _GEMINI_VISION_MODEL = "gemini-2.5-flash"
+_WHALE_ALERT_API_KEY = os.environ.get("WHALE_ALERT_API_KEY", "")
 _TRADE_EXTRACT_PROMPT = (
     "You are looking at a Binance Futures trade share card (screenshot). "
     "Extract the trade details and return STRICT JSON only — no prose, no "
@@ -672,6 +673,106 @@ def _trend_pump_filter(
         return False, ""
 
 
+# ── Whale / large-trader stats ───────────────────────────────────────────────
+
+def _get_gate_whale_stats(symbol: str) -> str:
+    """Return a one-line summary of whale positioning for this contract.
+
+    Uses Gate.io /contract_stats which is free and already authenticated
+    (no extra key needed — same API used for klines).
+
+    Fields:
+      top_lsr_size   — Long/Short ratio of top traders by notional size.
+                       >1.5 = heavily long, <0.67 = heavily short.
+      last_funding_rate — positive = longs pay (bullish bias), negative = shorts pay.
+
+    Returns '' on error or if the contract doesn't exist on Gate.io futures.
+    """
+    try:
+        resp = _gateio_get(
+            "/contract_stats",
+            params={"contract": _to_gate(symbol), "interval": "1h", "limit": 1},
+            timeout=6,
+        )
+        data = resp.json()
+        if not data:
+            return ""
+        row = data[0]
+        lsr = float(row.get("top_lsr_size") or 0)
+        funding = float(row.get("last_funding_rate") or 0)
+        if lsr <= 0:
+            return ""
+
+        if lsr >= 1.5:
+            whale_emoji = "🐋🟢"
+            whale_desc = f"Киты в лонге (LSR {lsr:.2f})"
+        elif lsr <= 0.67:
+            whale_emoji = "🐋🔴"
+            whale_desc = f"Киты в шорте (LSR {lsr:.2f})"
+        else:
+            whale_emoji = "🐋"
+            whale_desc = f"Киты нейтральны (LSR {lsr:.2f})"
+
+        funding_pct = funding * 100
+        funding_str = f"  ·  Фандинг: {funding_pct:+.4f}%"
+        return f"{whale_emoji} {whale_desc}{funding_str}"
+    except Exception as exc:
+        logger.debug("_get_gate_whale_stats %s: %s", symbol, exc)
+        return ""
+
+
+def _get_whale_alert_line(symbol: str) -> str:
+    """Return a one-line summary of the largest on-chain transfer in last 24h.
+
+    Uses the Whale Alert free API (100 req/day, min $500k transfers).
+    Requires WHALE_ALERT_API_KEY env var — if not set, returns ''.
+
+    Exchange inflow  (→ exchange) is bearish — suggests sell pressure.
+    Exchange outflow (← exchange) is bullish — suggests accumulation.
+    """
+    if not _WHALE_ALERT_API_KEY:
+        return ""
+    coin = symbol.upper().replace("USDT", "").replace("_", "").lower()
+    if not coin:
+        return ""
+    try:
+        since = int(time.time()) - 86400
+        resp = requests.get(
+            "https://api.whale-alert.io/v1/transactions",
+            params={
+                "api_key": _WHALE_ALERT_API_KEY,
+                "min_value": 500_000,
+                "start": since,
+                "currency": coin,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        txs = resp.json().get("transactions", [])
+        if not txs:
+            return ""
+        biggest = max(txs, key=lambda t: t.get("amount_usd", 0))
+        amount_usd = biggest.get("amount_usd", 0)
+        from_type = biggest.get("from", {}).get("owner_type", "")
+        to_type   = biggest.get("to",   {}).get("owner_type", "")
+        age_h = (int(time.time()) - biggest.get("timestamp", int(time.time()))) / 3600
+
+        if to_type == "exchange":
+            direction = "→ на биржу ⚠️"
+        elif from_type == "exchange":
+            direction = "← с биржи 🟢"
+        else:
+            direction = f"({from_type or '?'} → {to_type or '?'})"
+
+        return (
+            f"🚨 Крупный перевод: ${amount_usd / 1e6:.1f}M "
+            f"{coin.upper()} {direction}  {age_h:.1f}ч назад"
+        )
+    except Exception as exc:
+        logger.debug("_get_whale_alert_line %s: %s", symbol, exc)
+        return ""
+
+
 # ── AI veto for confluence signals ────────────────────────────────────────────
 
 def _ai_veto_confluence(
@@ -680,23 +781,25 @@ def _ai_veto_confluence(
     rsi: float | None,
     pct24: float | None,
     above_ema: bool | None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, str]:
     """Ask Gemini (with Google Search) whether the signal is safe to send.
 
-    Two-layer check in a single Gemini call:
+    Three-layer check in a single Gemini call:
     1. News check — block on critical fundamental events (hack, ban, rug pull,
        delisting, project shutdown). Ordinary price/volume news does NOT block.
+       Positive long-term news → ДЕРЖАТЬ (hold recommendation appended to signal).
     2. Technical check — block if the coin is actively pumping during a SHORT
        signal or actively dumping during a LONG signal.
 
-    Returns (allow, note):
-    • allow=False → suppress; note = blocking reason (logged + shadow demo).
-    • allow=True  → send; note = short confirmation appended to the alert.
-    Fails OPEN (allow=True) on Gemini error / timeout so signals are never
-    silently lost due to AI unavailability.
+    Returns (allow, note, hold_str):
+    • allow=False  → suppress; note = blocking reason.
+    • allow=True   → send; note = short confirmation appended to the alert.
+    • hold_str     → non-empty when Gemini finds positive long-term news and
+                     recommends holding the position for N days. Appended to body.
+    Fails OPEN (allow=True, "", "") on Gemini error / timeout.
     """
     if not _GEMINI_BASE_URL or not _GEMINI_API_KEY:
-        return True, ""
+        return True, "", ""
 
     regime = get_market_regime()
     direction_ru = "ШОРТ" if recommendation == "SHORT" else "ЛОНГ"
@@ -707,55 +810,81 @@ def _ai_veto_confluence(
         else "ниже EMA-200 — нисходящий тренд" if above_ema is False
         else "положение неизвестно"
     )
-    # Clean ticker for the search query (HFTUSDT → HFT)
     coin_ticker = symbol[:-4] if symbol.upper().endswith("USDT") else symbol
 
     prompt = (
         f"Ты — торговый фильтр крипто-бота. Найди свежие новости о монете "
-        f"{coin_ticker} ({symbol}) и вынеси вердикт о безопасности открытия позиции.\n\n"
+        f"{coin_ticker} ({symbol}) и вынеси вердикт.\n\n"
         f"МОНЕТА: {symbol}\n"
         f"СИГНАЛ БОТА: {direction_ru}\n"
         f"RSI (1ч): {rsi_str}\n"
         f"Изменение за 24ч: {pct_str}\n"
         f"Положение vs EMA-200 (4ч): {ema_str}\n"
         f"Режим рынка (BTC): {regime}\n\n"
-        f"ЗАБЛОКИРОВАТЬ сигнал только в одном из двух случаев:\n"
-        f"1. ФУНДАМЕНТАЛЬНАЯ УГРОЗА по новостям: хак/эксплойт протокола, "
-        f"санкции регулятора, закрытие/уход команды, делистинг с крупных бирж, "
-        f"скам или rug pull. Обычные новости о цене/объёме — НЕ блокируют.\n"
-        f"2. ПРОТИВОРЕЧИЕ ТЕХНИКЕ: монета явно активно растёт (памп) при сигнале ШОРТ, "
-        f"или явно падает (дамп) при сигнале ЛОНГ.\n\n"
-        f"Если новостей нет, они нейтральные, или не относятся к категориям выше — ПОДТВЕРДИТЬ.\n\n"
-        f"Ответь СТРОГО в 2 строки, без лишних слов:\n"
-        f"ВЕРДИКТ: ПОДТВЕРДИТЬ\n"
-        f"ПРИЧИНА: [1 предложение]\n\n"
-        f"ИЛИ:\n"
-        f"ВЕРДИКТ: ЗАБЛОКИРОВАТЬ\n"
-        f"ПРИЧИНА: [1 предложение, указать источник если это новость]"
+        f"Возможные вердикты:\n\n"
+        f"1. ПОДТВЕРДИТЬ — новостей нет или они нейтральные, техника не противоречит.\n"
+        f"   ВЕРДИКТ: ПОДТВЕРДИТЬ\n"
+        f"   ПРИЧИНА: [1 предложение]\n\n"
+        f"2. ЗАБЛОКИРОВАТЬ — только при критической угрозе: хак/эксплойт, санкции "
+        f"регулятора, закрытие проекта, делистинг, скам/rug pull. "
+        f"ИЛИ явное противоречие технике (памп при ШОРТ / дамп при ЛОНГ).\n"
+        f"   ВЕРДИКТ: ЗАБЛОКИРОВАТЬ\n"
+        f"   ПРИЧИНА: [1 предложение, указать источник]\n\n"
+        f"3. ДЕРЖАТЬ — если найдена ПОЗИТИВНАЯ новость с долгосрочным влиянием "
+        f"(листинг на крупной бирже, крупное партнёрство, апгрейд протокола, "
+        f"инвестиции фондов). Сигнал отправляется, но с рекомендацией держать позицию.\n"
+        f"   ВЕРДИКТ: ДЕРЖАТЬ\n"
+        f"   ПРИЧИНА: [название события, 1 предложение]\n"
+        f"   ДНИ: [число от 1 до 14]\n"
+        f"   ЦЕЛЬ: [целевая цена в USD или 0 если неизвестна]\n\n"
+        f"Ответь СТРОГО по одному из форматов выше. Без лишних слов."
     )
     try:
         resp, source = _call_gemini_with_search(
-            prompt, max_tokens=150, temperature=0.1, timeout=25
+            prompt, max_tokens=200, temperature=0.1, timeout=25
         )
     except Exception:
-        return True, ""
+        return True, "", ""
 
     if not resp:
-        return True, ""
+        return True, "", ""
 
+    resp_upper = resp.upper()
     reason = ""
-    for line in resp.splitlines():
-        if "ПРИЧИНА" in line.upper() and ":" in line:
-            reason = line.split(":", 1)[-1].strip()
-            break
+    hold_days = 3
+    hold_target = 0.0
 
-    if "ЗАБЛОКИРОВАТЬ" in resp.upper():
+    for line in resp.splitlines():
+        lu = line.upper()
+        if "ПРИЧИНА" in lu and ":" in line:
+            reason = line.split(":", 1)[-1].strip()
+        elif lu.startswith("ДНИ:") or lu.startswith("ДНИ :"):
+            try:
+                hold_days = max(1, min(14, int(line.split(":", 1)[-1].strip())))
+            except (ValueError, TypeError):
+                pass
+        elif lu.startswith("ЦЕЛЬ:") or lu.startswith("ЦЕЛЬ :"):
+            try:
+                hold_target = float(line.split(":", 1)[-1].strip())
+            except (ValueError, TypeError):
+                pass
+
+    if "ЗАБЛОКИРОВАТЬ" in resp_upper:
         full_reason = reason or "ИИ: обнаружена проблема с монетой"
-        # Append the web source if grounding returned one and it's not already in reason
         if source and source[:30] not in full_reason:
             full_reason = f"{full_reason} [{source[:100]}]"
-        return False, full_reason
-    return True, reason or ""
+        return False, full_reason, ""
+
+    if "ДЕРЖАТЬ" in resp_upper:
+        event = reason or "позитивная новость"
+        hold_str = f"📰 {event} — рекомендуется держать {hold_days} дн."
+        if hold_target > 0:
+            hold_str += f" / цель ${hold_target:,.4g}"
+        if source and source[:30] not in hold_str:
+            hold_str += f"\n   🔗 {source[:100]}"
+        return True, reason, hold_str
+
+    return True, reason or "", ""
 
 
 # ── Demo (paper trading) helpers ──────────────────────────────────────────────
@@ -3709,7 +3838,7 @@ def check_overheated_oversold(
                     + (f"\n{_oh_trend_warn}" if _oh_trend_warn else "")
                 )
                 # ── AI veto ──────────────────────────────────────────────────
-                _ai_ok_oh, _ai_note_oh = _ai_veto_confluence(
+                _ai_ok_oh, _ai_note_oh, _ai_hold_oh = _ai_veto_confluence(
                     symbol, "SHORT", rsi, pct24, None
                 )
                 if not _ai_ok_oh:
@@ -3725,6 +3854,15 @@ def check_overheated_oversold(
                             alert_type="overheated_24h",
                         )
                     continue
+                # ── Whale stats ──────────────────────────────────────────────
+                _whale_oh = _get_gate_whale_stats(symbol)
+                _whale_alert_oh = _get_whale_alert_line(symbol)
+                if _whale_oh:
+                    body += f"\n{_whale_oh}"
+                if _whale_alert_oh:
+                    body += f"\n{_whale_alert_oh}"
+                if _ai_hold_oh:
+                    body += f"\n⏳ {html.escape(_ai_hold_oh)}"
                 if _ai_note_oh:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_oh)}</i>"
                 delivered, _aid = send_alert_with_log(
@@ -3769,7 +3907,7 @@ def check_overheated_oversold(
                     + (f"\n{_os_trend_warn}" if _os_trend_warn else "")
                 )
                 # ── AI veto ──────────────────────────────────────────────────
-                _ai_ok_os, _ai_note_os = _ai_veto_confluence(
+                _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
                     symbol, "LONG", rsi, pct24, None
                 )
                 if not _ai_ok_os:
@@ -3785,6 +3923,15 @@ def check_overheated_oversold(
                             alert_type="oversold_24h",
                         )
                     continue
+                # ── Whale stats ──────────────────────────────────────────────
+                _whale_os = _get_gate_whale_stats(symbol)
+                _whale_alert_os = _get_whale_alert_line(symbol)
+                if _whale_os:
+                    body += f"\n{_whale_os}"
+                if _whale_alert_os:
+                    body += f"\n{_whale_alert_os}"
+                if _ai_hold_os:
+                    body += f"\n⏳ {html.escape(_ai_hold_os)}"
                 if _ai_note_os:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
                 delivered, _aid = send_alert_with_log(
@@ -5007,7 +5154,7 @@ def run_checks():
                             _pct24_v = float(_tv["priceChangePercent"])
                         except (ValueError, KeyError, TypeError):
                             pass
-                _ai_allow, _ai_note = _ai_veto_confluence(
+                _ai_allow, _ai_note, _ai_hold = _ai_veto_confluence(
                     sym, rec_label, b["rsi"], _pct24_v, above_ema
                 )
                 if not _ai_allow:
@@ -5040,6 +5187,9 @@ def run_checks():
                     atr = state["atr_4h"].get(sym)
                 sl_tp = _format_sl_tp(side_for_score, b["price"], atr)
                 _trend_warn = _trend_warning_line(sym, rec_label)
+                # ── Whale stats (fetched after veto passes, no wasted calls) ──
+                _whale_cf = _get_gate_whale_stats(sym)
+                _whale_alert_cf = _get_whale_alert_line(sym)
                 body_lines = header + [
                     "",
                     f"<b>Сработавшие сигналы ({len(b['lines'])}):</b>",
@@ -5053,6 +5203,12 @@ def run_checks():
                     body_lines.append(sl_tp)
                 if _trend_warn:
                     body_lines.append(_trend_warn)
+                if _whale_cf:
+                    body_lines.append(_whale_cf)
+                if _whale_alert_cf:
+                    body_lines.append(_whale_alert_cf)
+                if _ai_hold:
+                    body_lines.append(f"⏳ {html.escape(_ai_hold)}")
                 if _ai_note:
                     body_lines.append(
                         f"🤖 ИИ подтвердил: <i>{html.escape(_ai_note)}</i>"
