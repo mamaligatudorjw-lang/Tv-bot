@@ -471,6 +471,9 @@ def _call_gemini_text(
         "generationConfig": {
             "maxOutputTokens": max_tokens,
             "temperature": temperature,
+            # Disable built-in reasoning/thinking so ALL tokens go to output,
+            # not to the hidden thinking buffer (critical for gemini-2.5-flash).
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
     try:
@@ -484,11 +487,13 @@ def _call_gemini_text(
         body = resp.json()
         candidate = body["candidates"][0]
         finish = candidate.get("finishReason", "")
+        # Collect only non-thought parts (skip thought parts from thinking models)
         parts = candidate["content"]["parts"]
-        text = "".join(p.get("text", "") for p in parts).strip()
+        text = "".join(
+            p.get("text", "") for p in parts if not p.get("thought", False)
+        ).strip()
         if finish == "MAX_TOKENS":
-            logger.warning("Gemini hit MAX_TOKENS — response truncated. Increase max_tokens.")
-            # Append ellipsis so caller knows it was cut
+            logger.warning("Gemini hit MAX_TOKENS — response truncated (max=%s).", max_tokens)
             text = text + "…"
         return text
     except Exception as e:
