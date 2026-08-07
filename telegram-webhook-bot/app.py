@@ -2339,21 +2339,44 @@ def compute_signal_score(
 
 
 def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
-    """Return a 'Стоп / Цель' line based on ATR. Empty string if not applicable.
-    side: 'buy'/'long' or 'sell'/'short'. SL=1.5×ATR, TP=3×ATR, R/R 1:2."""
-    if entry is None or atr is None or atr <= 0:
-        return ""
-    if not (math.isfinite(entry) and math.isfinite(atr) and entry > 0):
+    """Return a 'Стоп / Цель' line for any signal.
+
+    Priority:
+    1. ATR-based levels when ATR is available: SL = 1.5×ATR, TP = 3×ATR (R/R 1:2).
+    2. Fixed backtested fallback when ATR is None — levels are marked 'ориент.' so
+       the user knows they are approximate.
+       LONG:  SL −{HIT_RATE_SL_PCT}% / TP +{HIT_RATE_TP_PCT}%
+       SHORT: SL +{SHORT_HOLD_SL_PCT}% / TP −{SHORT_HOLD_TP_PCT}%
+
+    Never returns empty for a valid entry price — every signal will show SL/TP.
+    side: 'buy'/'long' or 'sell'/'short'.
+    """
+    if entry is None or not (math.isfinite(entry) and entry > 0):
         return ""
     s = side.lower()
-    if s in ("buy", "long"):
-        sl = entry - 1.5 * atr
-        tp = entry + 3.0 * atr
-    elif s in ("sell", "short"):
-        sl = entry + 1.5 * atr
-        tp = entry - 3.0 * atr
-    else:
+    if s not in ("buy", "long", "sell", "short"):
         return ""
+
+    use_atr = atr is not None and atr > 0 and math.isfinite(atr)
+
+    if use_atr:
+        if s in ("buy", "long"):
+            sl = entry - 1.5 * atr
+            tp = entry + 3.0 * atr
+        else:
+            sl = entry + 1.5 * atr
+            tp = entry - 3.0 * atr
+        rr_label = "R/R 1:2"
+    else:
+        # Fallback: fixed backtested constants — valid as orientation levels
+        if s in ("buy", "long"):
+            sl = entry * (1 - HIT_RATE_SL_PCT / 100)
+            tp = entry * (1 + HIT_RATE_TP_PCT / 100)
+        else:
+            sl = entry * (1 + SHORT_HOLD_SL_PCT / 100)
+            tp = entry * (1 - SHORT_HOLD_TP_PCT / 100)
+        rr_label = "ориент."
+
     if sl <= 0 or tp <= 0:
         return ""
     sl_roi = abs(sl - entry) / entry * 100 * DISPLAY_LEVERAGE
@@ -2362,7 +2385,7 @@ def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
     tp_sign = "+" if s in ("buy", "long") else "−"
     return (
         f"🛡️ Стоп: <code>${sl:,.6g}</code> ({sl_sign}{sl_roi:.0f}% ROI)  •  "
-        f"🎯 Цель: <code>${tp:,.6g}</code> ({tp_sign}{tp_roi:.0f}% ROI)  •  R/R 1:2"
+        f"🎯 Цель: <code>${tp:,.6g}</code> ({tp_sign}{tp_roi:.0f}% ROI)  •  {rr_label}"
     )
 
 
