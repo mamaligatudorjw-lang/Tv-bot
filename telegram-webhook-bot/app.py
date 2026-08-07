@@ -530,7 +530,7 @@ def _ai_signal_commentary(
     }
     type_desc = type_labels.get(alert_type, alert_type)
     direction = "ЛОНГ" if recommendation == "LONG" else "ШОРТ"
-    rsi_str = f"RSI {rsi:.1f}" if rsi else "RSI н/д"
+    rsi_str = f"RSI {rsi:.1f}" if rsi is not None else "RSI н/д"
     pct_str = f"24ч {pct24:+.1f}%" if pct24 is not None else ""
     prompt = (
         f"Ты — опытный крипто-трейдер. Дай очень краткий комментарий (1-2 предложения, "
@@ -2612,6 +2612,8 @@ def send_alert_with_log(
     price: float | None,
     body_text: str,
     score: int | None = None,
+    rsi: float | None = None,
+    pct24: float | None = None,
 ) -> tuple[bool, int | None]:
     """Insert into alerts (if price valid), then send Telegram with inline
     buttons referencing the new id. Honors hide-type/hide-symbol prefs,
@@ -2722,9 +2724,10 @@ def send_alert_with_log(
         _auto_start_monitor(alert_id, symbol, recommendation, float(price))
     # AI commentary — sent as a follow-up message so the main signal is never delayed
     if _GEMINI_AI_COMMENTARY:
-        def _send_ai_comment(sym=symbol, rec=recommendation, at=alert_type, sc=score):
+        def _send_ai_comment(sym=symbol, rec=recommendation, at=alert_type, sc=score,
+                             rsi_=rsi, pct24_=pct24):
             try:
-                comment = _ai_signal_commentary(sym, rec, at, sc)
+                comment = _ai_signal_commentary(sym, rec, at, sc, rsi=rsi_, pct24=pct24_)
                 if comment:
                     _telegram_send(TELEGRAM_CHAT_ID, f"<code>{sym}</code>{comment}")
             except Exception as exc:
@@ -3406,7 +3409,11 @@ def check_momentum(
                 f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                 + (f"\n{sl_tp}" if sl_tp else "")
             )
-        delivered, _aid = send_alert_with_log(symbol, kind, rec, price, body, score)
+        delivered, _aid = send_alert_with_log(
+            symbol, kind, rec, price, body, score,
+            rsi=rsi_map.get(symbol) if rsi_map else None,
+            pct24=pct,
+        )
         if not delivered:
             continue
 
@@ -3571,7 +3578,10 @@ def check_overheated_oversold(
                     continue
                 if _ai_note_oh:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_oh)}</i>"
-                delivered, _aid = send_alert_with_log(symbol, "overheated_24h", "SHORT", price, body, score)
+                delivered, _aid = send_alert_with_log(
+                    symbol, "overheated_24h", "SHORT", price, body, score,
+                    rsi=rsi, pct24=pct24,
+                )
                 if delivered:
                     with state_lock:
                         state["last_overheated_alerted"][symbol] = now
@@ -3628,7 +3638,10 @@ def check_overheated_oversold(
                     continue
                 if _ai_note_os:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
-                delivered, _aid = send_alert_with_log(symbol, "oversold_24h", "LONG", price, body, score)
+                delivered, _aid = send_alert_with_log(
+                    symbol, "oversold_24h", "LONG", price, body, score,
+                    rsi=rsi, pct24=pct24,
+                )
                 if delivered:
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
@@ -3731,6 +3744,7 @@ def check_breakdown_short(
         )
         delivered, _aid = send_alert_with_log(
             symbol, "breakdown_short", "SHORT", price, body, score,
+            rsi=rsi, pct24=pct24,
         )
         if delivered:
             with state_lock:
@@ -4896,7 +4910,8 @@ def run_checks():
                     )
                 body = "\n".join(body_lines)
                 delivered, _aid = send_alert_with_log(
-                    sym, "confluence", rec_label, b["price"], body, score
+                    sym, "confluence", rec_label, b["price"], body, score,
+                    rsi=b.get("rsi"), pct24=_pct24_v,
                 )
                 if not delivered:
                     # Silenced, hidden, or Telegram error — do NOT consume cooldowns
