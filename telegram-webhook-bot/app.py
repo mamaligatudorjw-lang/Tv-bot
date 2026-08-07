@@ -807,9 +807,9 @@ def handle_demo_command(chat_id: int) -> None:
                 "FROM demo_positions WHERE status!='open' AND is_shadow=1"
             ).fetchone()
             open_rows = conn.execute(
-                "SELECT symbol, direction, entry_price, ts_open "
+                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_open "
                 "FROM demo_positions WHERE status='open' AND is_shadow=0 "
-                "ORDER BY ts_open DESC LIMIT 8"
+                "ORDER BY ts_open DESC LIMIT 10"
             ).fetchall()
     except Exception as exc:
         _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
@@ -819,6 +819,27 @@ def handle_demo_command(chat_id: int) -> None:
     sc_total, sc_tp, sc_sl, sc_pnl = sc
     rc_wr = (rc_tp / rc_total * 100) if rc_total else 0
     sc_wr = (sc_tp / sc_total * 100) if sc_total else 0
+
+    # Fetch current prices for open positions
+    open_prices: dict[str, float] = {}
+    if open_rows:
+        for sym in {r[0] for r in open_rows}:
+            try:
+                t = _gateio_ticker(sym)
+                if t:
+                    open_prices[sym] = float(t["lastPrice"])
+            except Exception:
+                pass
+
+    # Compute unrealized PnL across all open real positions
+    unrealized_pnl = 0.0
+    for sym, dr, entry, sl, tp, ts in open_rows:
+        cur = open_prices.get(sym)
+        if cur is not None and entry:
+            if dr == "LONG":
+                unrealized_pnl += 100.0 * (cur - entry) / entry
+            else:
+                unrealized_pnl += 100.0 * (entry - cur) / entry
 
     lines = [
         "📊 <b>ДЕМО-РЕЖИМ (paper trading, $100/сделка)</b>",
@@ -830,10 +851,14 @@ def handle_demo_command(chat_id: int) -> None:
         sign = "+" if rc_pnl >= 0 else ""
         lines += [
             f"  Win-rate: <b>{rc_wr:.0f}%</b>  (TP: {rc_tp} / SL: {rc_sl})",
-            f"  PnL: <b>{sign}${rc_pnl:.2f}</b>",
+            f"  PnL закрытых: <b>{sign}${rc_pnl:.2f}</b>",
         ]
     else:
         lines.append("  Пока нет закрытых позиций.")
+
+    if rc_open:
+        u_sign = "+" if unrealized_pnl >= 0 else ""
+        lines.append(f"  Нереализованный PnL: <b>{u_sign}${unrealized_pnl:.2f}</b> (открытые)")
 
     lines += [
         "",
@@ -862,11 +887,34 @@ def handle_demo_command(chat_id: int) -> None:
 
     now_ts = int(time.time())
     if open_rows:
-        lines += ["", "📋 <b>Открытые позиции:</b>"]
-        for sym, dr, entry, ts in open_rows:
+        lines += ["", "📋 <b>Открытые позиции (текущее состояние):</b>"]
+        for sym, dr, entry, sl, tp, ts in open_rows:
             age_h = (now_ts - ts) / 3600
             icon = "📈" if dr == "LONG" else "📉"
-            lines.append(f"  {icon} <code>{sym}</code> {dr} @{entry:,.4g} ({age_h:.1f}ч)")
+            cur = open_prices.get(sym)
+            if cur is not None and entry and tp and sl:
+                # Unrealized PnL for this position
+                if dr == "LONG":
+                    upnl = 100.0 * (cur - entry) / entry
+                    pct_to_tp = 100.0 * (tp - cur) / cur
+                    pct_to_sl = 100.0 * (cur - sl) / cur
+                else:
+                    upnl = 100.0 * (entry - cur) / entry
+                    pct_to_tp = 100.0 * (cur - tp) / cur
+                    pct_to_sl = 100.0 * (sl - cur) / cur
+                upnl_sign = "+" if upnl >= 0 else ""
+                upnl_icon = "🟢" if upnl >= 0 else "🔴"
+                lines.append(
+                    f"  {icon} <code>{sym}</code> {dr} │ "
+                    f"вход {entry:,.4g} → сейчас {cur:,.4g} "
+                    f"{upnl_icon} <b>{upnl_sign}{upnl:.1f}%</b>"
+                )
+                lines.append(
+                    f"      до TP: {pct_to_tp:+.1f}%  │  до SL: -{abs(pct_to_sl):.1f}%  │  "
+                    f"⏱ {age_h:.1f}ч"
+                )
+            else:
+                lines.append(f"  {icon} <code>{sym}</code> {dr} @{entry:,.4g} ({age_h:.1f}ч)")
 
     _telegram_send(chat_id, "\n".join(lines))
 
