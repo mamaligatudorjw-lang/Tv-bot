@@ -453,6 +453,79 @@ def _gemini_extract_trade_from_image(
         return None
 
 
+_GEMINI_AI_COMMENTARY = True   # set False to disable AI comments on signals
+
+def _call_gemini_text(
+    prompt: str,
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+    timeout: int = 15,
+) -> str | None:
+    """Call Gemini with a plain-text prompt. Returns the response text or None."""
+    if not _GEMINI_BASE_URL or not _GEMINI_API_KEY:
+        return None
+    url = (f"{_GEMINI_BASE_URL.rstrip('/')}/models/"
+           f"{_GEMINI_VISION_MODEL}:generateContent")
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+        },
+    }
+    try:
+        resp = requests.post(
+            url,
+            headers={"x-goog-api-key": _GEMINI_API_KEY},
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        parts = body["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip()
+    except Exception as e:
+        logger.warning("Gemini text call failed: %s", _safe_err(e))
+        return None
+
+
+def _ai_signal_commentary(
+    symbol: str,
+    recommendation: str,
+    alert_type: str,
+    score: int,
+    rsi: float | None = None,
+    pct24: float | None = None,
+) -> str:
+    """Get a short AI commentary for a signal. Returns '' on failure."""
+    type_labels = {
+        "confluence": "конфлюэнция нескольких сигналов",
+        "oversold_24h": "перепроданность 24ч (RSI + сильное падение)",
+        "overheated_24h": "перегретость 24ч (RSI + сильный рост)",
+        "breakdown_short": "пробой уровня вниз",
+        "volume_surge_short": "объёмный взрыв + CRSI перекупленность",
+    }
+    type_desc = type_labels.get(alert_type, alert_type)
+    direction = "ЛОНГ" if recommendation == "LONG" else "ШОРТ"
+    rsi_str = f"RSI {rsi:.1f}" if rsi else "RSI н/д"
+    pct_str = f"24ч {pct24:+.1f}%" if pct24 is not None else ""
+    prompt = (
+        f"Ты — опытный крипто-трейдер. Дай очень краткий комментарий (1-2 предложения, "
+        f"НЕ больше 120 символов) на русском языке почему этот сигнал интересен или рискован.\n\n"
+        f"Монета: {symbol}\n"
+        f"Направление: {direction}\n"
+        f"Тип: {type_desc}\n"
+        f"Сила сигнала: {score}/100\n"
+        f"{rsi_str}  {pct_str}\n\n"
+        f"Пиши ТОЛЬКО сам комментарий — без вводных слов, заголовков и форматирования."
+    )
+    text = _call_gemini_text(prompt, max_tokens=150, temperature=0.75, timeout=12)
+    if not text:
+        return ""
+    text = text[:160].strip()
+    return f"\n🤖 <i>{html.escape(text)}</i>"
+
+
 def _telegram_download_photo(file_id: str) -> tuple[bytes, str] | None:
     """Resolve a Telegram file_id → raw image bytes + mime type. Returns None
     on failure. Mime is inferred from the path extension since Telegram does
@@ -512,6 +585,7 @@ def _poll_telegram_commands() -> None:
         "/mytrades":   handle_mytrades_command,
         "/positions":  handle_positions_command,
         "/analyze":  handle_analyze_command,
+        "/ai":       handle_ai_command,
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
     }
@@ -558,7 +632,7 @@ def _poll_telegram_commands() -> None:
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
                         # Commands that take args receive the full raw text;
                         # the rest are called with just chat_id (backwards-compat).
-                        takes_args = cmd in ("/trade", "/analyze")
+                        takes_args = cmd in ("/trade", "/analyze", "/ai")
                         def _run(h=handler, cid=chat_id, c=cmd, rt=raw_text, ta=takes_args):
                             try:
                                 if ta:
@@ -2195,6 +2269,16 @@ def send_alert_with_log(
     # Launch position monitor for the delivered signal
     if price is not None and price > 0:
         _auto_start_monitor(alert_id, symbol, recommendation, float(price))
+    # AI commentary — sent as a follow-up message so the main signal is never delayed
+    if _GEMINI_AI_COMMENTARY:
+        def _send_ai_comment(sym=symbol, rec=recommendation, at=alert_type, sc=score):
+            try:
+                comment = _ai_signal_commentary(sym, rec, at, sc)
+                if comment:
+                    _telegram_send(TELEGRAM_CHAT_ID, f"<code>{sym}</code>{comment}")
+            except Exception as exc:
+                logger.warning("AI commentary failed for %s: %s", sym, _safe_err(exc))
+        threading.Thread(target=_send_ai_comment, daemon=True).start()
     return (True, alert_id)
 
 
@@ -5962,6 +6046,127 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
         lines.append(f"💡 <i>Заметка: {notes[0]}</i>")
 
     _telegram_send(chat_id, "\n".join(lines))
+
+
+def handle_ai_command(chat_id: int, raw_text: str) -> None:
+    """Full AI analysis of a coin: /ai BTCUSDT
+    Fetches live market data and asks Gemini for a structured assessment."""
+    parts = raw_text.strip().split()
+    if len(parts) < 2:
+        _telegram_send(
+            chat_id,
+            "🤖 <b>AI-анализ монеты</b>\n\n"
+            "Использование: <code>/ai BTCUSDT</code>\n"
+            "Пример: <code>/ai ICNTUSDT</code>\n\n"
+            "ИИ оценит тренд, RSI, объём, риски и даст торговую рекомендацию.",
+        )
+        return
+
+    raw_sym = parts[1].upper().strip()
+    symbol = raw_sym if raw_sym.endswith("USDT") else raw_sym + "USDT"
+    _telegram_send(chat_id, f"🤖 Анализирую <code>{symbol}</code> с помощью ИИ…")
+
+    if not _GEMINI_BASE_URL or not _GEMINI_API_KEY:
+        _telegram_send(chat_id, "❌ Gemini AI не настроен. Обратитесь к администратору.")
+        return
+
+    # ── Gather live data ────────────────────────────────────────────────────
+    try:
+        ticker = _gateio_ticker(symbol)
+    except Exception:
+        ticker = None
+    rsi = None
+    try:
+        rsi = get_klines_rsi(symbol)
+    except Exception:
+        pass
+    closes = _fetch_daily_closes_for_crsi(symbol)
+
+    if not ticker:
+        _telegram_send(
+            chat_id,
+            f"❌ Монета <code>{symbol}</code> не найдена на Gate.io Futures.",
+        )
+        return
+
+    try:
+        price       = float(ticker["lastPrice"])
+        pct24       = float(ticker["priceChangePercent"])
+        volume_usdt = float(ticker.get("quoteVolume") or ticker.get("baseVolume") or 0)
+    except (ValueError, KeyError, TypeError):
+        _telegram_send(chat_id, f"❌ Не удалось получить данные по <code>{symbol}</code>.")
+        return
+
+    # Trend: consecutive days
+    trend_up   = _count_consecutive_trend_days(closes, "up")   if closes else 0
+    trend_down = _count_consecutive_trend_days(closes, "down") if closes else 0
+
+    # EMA-200 position
+    ema_status = "данных нет"
+    try:
+        klines_4h = _gateio_klines(symbol, "4h", EMA200_FETCH_LIMIT)
+        if klines_4h and len(klines_4h) >= EMA200_PERIOD:
+            h4_closes = [float(k[4]) for k in klines_4h]
+            ema200 = _calculate_ema(h4_closes, EMA200_PERIOD)
+            if ema200:
+                ema_pct = (price - ema200) / ema200 * 100
+                ema_status = (
+                    f"{'выше' if price > ema200 else 'ниже'} EMA-200 на {abs(ema_pct):.1f}%"
+                )
+    except Exception:
+        pass
+
+    # Market regime
+    regime = get_market_regime()
+
+    # ── Build Gemini prompt ─────────────────────────────────────────────────
+    rsi_str   = f"{rsi:.1f}" if rsi else "н/д"
+    vol_str   = f"${volume_usdt:,.0f}" if volume_usdt else "н/д"
+    trend_str = (
+        f"растёт {trend_up} дней подряд" if trend_up >= 2
+        else f"падает {trend_down} дней подряд" if trend_down >= 2
+        else "боковое движение или 1 день"
+    )
+
+    prompt = (
+        f"Ты — опытный трейдер крипто-фьючерсов. Проведи анализ монеты и дай чёткую торговую оценку.\n\n"
+        f"=== ДАННЫЕ ПО {symbol} ===\n"
+        f"Цена: ${price:,.6g}\n"
+        f"Изменение за 24ч: {pct24:+.2f}%\n"
+        f"Объём за 24ч: {vol_str}\n"
+        f"RSI (14): {rsi_str}\n"
+        f"Тренд (дневные свечи): {trend_str}\n"
+        f"Положение относительно EMA-200 (4ч): {ema_status}\n"
+        f"Рыночный режим: {regime}\n\n"
+        f"=== ЗАДАЧА ===\n"
+        f"Ответь строго по этой структуре на РУССКОМ языке:\n\n"
+        f"📊 ТРЕНД: [Восходящий / Нисходящий / Боковой] — одна фраза объяснения\n\n"
+        f"⚡ КЛЮЧЕВЫЕ ФАКТОРЫ:\n"
+        f"• [фактор 1]\n"
+        f"• [фактор 2]\n"
+        f"• [фактор 3]\n\n"
+        f"🎯 РЕКОМЕНДАЦИЯ: [ЛОНГ / ШОРТ / ЖДАТЬ] — причина в одном предложении\n\n"
+        f"⚠️ ГЛАВНЫЙ РИСК: [одна фраза]\n\n"
+        f"Будь конкретным. Не пиши общие фразы. Не давай гарантий прибыли."
+    )
+
+    analysis = _call_gemini_text(prompt, max_tokens=512, temperature=0.65, timeout=25)
+    if not analysis:
+        _telegram_send(
+            chat_id,
+            f"⚠️ Gemini не ответил за 25 секунд. Попробуй ещё раз через минуту.",
+        )
+        return
+
+    header = (
+        f"🤖 <b>AI-анализ: <code>{symbol}</code></b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 ${price:,.6g}  |  {pct24:+.1f}% за 24ч  |  RSI {rsi_str}\n"
+        f"📅 Тренд: {trend_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+    _telegram_send(chat_id, header + html.escape(analysis))
+    logger.info("AI analysis sent for %s to chat_id=%s", symbol, chat_id)
 
 
 def handle_unmute_command(chat_id: int) -> None:
