@@ -6252,9 +6252,19 @@ def handle_ai_command(chat_id: int, raw_text: str) -> None:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 ${price:,.6g}  |  {pct24:+.1f}% за 24ч  |  RSI {rsi_str}\n"
         f"📅 Тренд: {trend_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
     )
-    _telegram_send(chat_id, header + html.escape(analysis))
+    # Send header (HTML) and analysis (plain) as two separate messages to
+    # avoid Telegram's 4096-char limit cutting off the analysis mid-sentence.
+    _telegram_send(chat_id, header)
+    # Strip any residual HTML-unsafe chars from Gemini's plain-text output
+    # before sending as a separate plain-text message.
+    safe_analysis = analysis.replace("<", "\u003c").replace(">", "\u003e").replace("&", "\u0026")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "text": safe_analysis}, timeout=15)
+    except Exception as _exc:
+        logger.error("AI analysis send failed: %s", _exc)
     logger.info("AI analysis sent for %s to chat_id=%s", symbol, chat_id)
 
 
