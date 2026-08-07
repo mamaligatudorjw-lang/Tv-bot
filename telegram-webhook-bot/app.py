@@ -616,12 +616,16 @@ def _poll_telegram_commands() -> None:
     logger.info("Telegram command polling started")
     while True:
         try:
-            params: dict = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
+            # Use POST with JSON body so Telegram correctly parses
+            # allowed_updates as a JSON array (GET+params sends repeated
+            # keys which Telegram ignores, leaving the cached filter intact
+            # and breaking callback_query delivery).
+            payload: dict = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
             if offset is not None:
-                params["offset"] = offset
-            resp = requests.get(
+                payload["offset"] = offset
+            resp = requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                params=params,
+                json=payload,
                 timeout=35,
             )
             resp.raise_for_status()
