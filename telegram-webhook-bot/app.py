@@ -482,8 +482,15 @@ def _call_gemini_text(
         )
         resp.raise_for_status()
         body = resp.json()
-        parts = body["candidates"][0]["content"]["parts"]
-        return "".join(p.get("text", "") for p in parts).strip()
+        candidate = body["candidates"][0]
+        finish = candidate.get("finishReason", "")
+        parts = candidate["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts).strip()
+        if finish == "MAX_TOKENS":
+            logger.warning("Gemini hit MAX_TOKENS — response truncated. Increase max_tokens.")
+            # Append ellipsis so caller knows it was cut
+            text = text + "…"
+        return text
     except Exception as e:
         logger.warning("Gemini text call failed: %s", _safe_err(e))
         return None
@@ -6239,11 +6246,11 @@ def handle_ai_command(chat_id: int, raw_text: str) -> None:
         f"Будь конкретным. Не пиши общие фразы. Не давай гарантий прибыли."
     )
 
-    analysis = _call_gemini_text(prompt, max_tokens=512, temperature=0.65, timeout=25)
+    analysis = _call_gemini_text(prompt, max_tokens=1024, temperature=0.65, timeout=30)
     if not analysis:
         _telegram_send(
             chat_id,
-            f"⚠️ Gemini не ответил за 25 секунд. Попробуй ещё раз через минуту.",
+            f"⚠️ Gemini не ответил за 30 секунд. Попробуй ещё раз через минуту.",
         )
         return
 
@@ -6873,7 +6880,7 @@ def api_ai_analyze():
             f"⚠️ ГЛАВНЫЙ РИСК: [одна фраза]\n\n"
             f"Не гарантируй прибыль. Будь конкретным."
         )
-        analysis = _call_gemini_text(prompt, max_tokens=512, temperature=0.65, timeout=25)
+        analysis = _call_gemini_text(prompt, max_tokens=1024, temperature=0.65, timeout=30)
         if not analysis:
             return jsonify({"error": "AI не ответил, попробуйте позже"}), 503
 
