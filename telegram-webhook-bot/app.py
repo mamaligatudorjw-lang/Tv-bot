@@ -2396,13 +2396,16 @@ def handle_callback_query(cb: dict) -> None:
                     f"Пара {rest} скрыта" if newly else f"Пара {rest} уже скрыта",
                 )
         elif kind == "ai_ask":
-            # Store pending state so the user's next text message becomes the AI question
+            # Answer the callback IMMEDIATELY — before any slow work —
+            # so Telegram stops the spinner within the 10-second window.
+            _telegram_answer_callback(cb_id, "🤖 Готов к вопросу")
+            logger.info("ai_ask callback: data=%s chat_id=%s", data, chat_id)
             try:
                 aid = int(rest)
             except ValueError:
-                _telegram_answer_callback(cb_id, "Ошибка")
+                _telegram_send(chat_id, "❌ Некорректный ID сигнала.")
                 return
-            # Fetch signal context from DB
+            # Fetch signal context from DB (may block briefly if check cycle running)
             sig_row = None
             try:
                 with _db_lock:
@@ -2411,10 +2414,10 @@ def handle_callback_query(cb: dict) -> None:
                         "SELECT symbol, recommendation, alert_type, score FROM alerts WHERE id=?",
                         (aid,)
                     ).fetchone()
-            except Exception:
-                pass
+            except Exception as db_exc:
+                logger.warning("ai_ask DB lookup failed: %s", db_exc)
             if not sig_row:
-                _telegram_answer_callback(cb_id, "Сигнал не найден")
+                _telegram_send(chat_id, "❌ Сигнал не найден в базе.")
                 return
             sym, rec, atype, score = sig_row
             with _ai_ask_pending_lock:
@@ -2423,13 +2426,13 @@ def handle_callback_query(cb: dict) -> None:
                     "rec": rec, "alert_type": atype,
                     "score": score, "ts": time.time(),
                 }
-            _telegram_answer_callback(cb_id, "Введи свой вопрос")
             _telegram_send(
                 chat_id,
                 f"🤖 <b>Задай вопрос по сигналу <code>{sym}</code> ({rec})</b>\n"
                 f"Например: «Стоит ли входить сейчас?» или «Какие риски?»\n\n"
-                f"Просто напиши — отвечу через несколько секунд."
+                f"Просто напиши сообщение — отвечу через несколько секунд."
             )
+            logger.info("ai_ask pending set for chat_id=%s symbol=%s", chat_id, sym)
         elif kind == "noop":
             _telegram_answer_callback(cb_id)
         else:
