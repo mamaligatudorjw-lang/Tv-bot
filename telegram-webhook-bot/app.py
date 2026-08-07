@@ -549,6 +549,328 @@ def _ai_signal_commentary(
     return f"\n🤖 <i>{html.escape(text)}</i>"
 
 
+# ── Trend pump/dump filter ────────────────────────────────────────────────────
+
+def _trend_pump_filter(
+    symbol: str, recommendation: str, price: float
+) -> tuple[bool, str]:
+    """Block SHORT during active pump; block LONG during active dump.
+
+    Conditions that block SHORT (symmetric conditions block LONG):
+    • Price above EMA-50 (1h) AND 4h price change > +5 %, OR
+    • Last 3 completed hourly candles all green with rising volume.
+
+    Returns (blocked, reason). Fails open (False) on any API error.
+    """
+    if recommendation not in ("SHORT", "LONG"):
+        return False, ""
+    try:
+        candles = _gateio_klines(symbol, "1h", 56)
+        if not candles or len(candles) < 10:
+            return False, ""
+
+        opens  = [float(k[1]) for k in candles]
+        closes = [float(k[4]) for k in candles]
+        vols   = [float(k[7]) for k in candles]   # quote vol USDT
+
+        ema50 = _calculate_ema(closes[:-1], min(50, len(closes) - 1)) if len(closes) > 50 else None
+        # 4h change: last completed candle vs 4 candles earlier
+        change_4h = ((closes[-2] - closes[-6]) / closes[-6] * 100
+                     if len(closes) >= 6 else 0.0)
+
+        # Last 3 COMPLETED candles (skip -1 which may still be forming)
+        last3_o = opens[-4:-1]
+        last3_c = closes[-4:-1]
+        last3_v = vols[-4:-1]
+        all_green  = all(c > o for o, c in zip(last3_o, last3_c))
+        all_red    = all(c < o for o, c in zip(last3_o, last3_c))
+        rising_vol = (
+            len(last3_v) == 3
+            and last3_v[1] > last3_v[0]
+            and last3_v[2] > last3_v[1]
+        )
+
+        if recommendation == "SHORT":
+            if ema50 and price > ema50 and change_4h > 5.0:
+                return True, f"памп: +{change_4h:.1f}% за 4ч, цена выше EMA-50(1ч)"
+            if all_green and rising_vol:
+                return True, "3 зелёных 1ч-свечи подряд с ростом объёма — памп активен"
+        else:  # LONG
+            if ema50 and price < ema50 and change_4h < -5.0:
+                return True, f"дамп: {change_4h:.1f}% за 4ч, цена ниже EMA-50(1ч)"
+            if all_red and rising_vol:
+                return True, "3 красных 1ч-свечи подряд с ростом объёма — дамп активен"
+        return False, ""
+    except Exception as exc:
+        logger.debug("_trend_pump_filter %s: %s", symbol, exc)
+        return False, ""
+
+
+# ── AI veto for confluence signals ────────────────────────────────────────────
+
+def _ai_veto_confluence(
+    symbol: str,
+    recommendation: str,
+    rsi: float | None,
+    pct24: float | None,
+    above_ema: bool | None,
+) -> tuple[bool, str]:
+    """Ask Gemini whether the confluence signal direction makes sense right now.
+
+    Returns (allow, note):
+    • allow=False → suppress; note is the blocking reason (logged + shadow demo).
+    • allow=True  → send; note is a brief confirmation appended to the alert.
+    Fails OPEN (allow=True) on Gemini error / timeout so signals are never
+    silently lost due to AI unavailability.
+    """
+    if not _GEMINI_BASE_URL or not _GEMINI_API_KEY:
+        return True, ""
+
+    regime = get_market_regime()
+    direction_ru = "ШОРТ" if recommendation == "SHORT" else "ЛОНГ"
+    rsi_str = f"{rsi:.1f}" if rsi is not None else "н/д"
+    pct_str = f"{pct24:+.1f}%" if pct24 is not None else "н/д"
+    ema_str = (
+        "выше EMA-200 — восходящий тренд" if above_ema is True
+        else "ниже EMA-200 — нисходящий тренд" if above_ema is False
+        else "положение неизвестно"
+    )
+
+    prompt = (
+        f"Ты — торговый фильтр крипто-бота. Реши, отправлять ли сигнал.\n\n"
+        f"МОНЕТА: {symbol}\n"
+        f"СИГНАЛ БОТА: {direction_ru}\n"
+        f"RSI (1ч): {rsi_str}\n"
+        f"Изменение за 24ч: {pct_str}\n"
+        f"Положение vs EMA-200 (4ч): {ema_str}\n"
+        f"Режим рынка (BTC): {regime}\n\n"
+        f"Ответь СТРОГО в 2 строки, без лишних слов:\n"
+        f"ВЕРДИКТ: ПОДТВЕРДИТЬ\n"
+        f"ПРИЧИНА: [1 предложение]\n\n"
+        f"ИЛИ:\n"
+        f"ВЕРДИКТ: ЗАБЛОКИРОВАТЬ\n"
+        f"ПРИЧИНА: [1 предложение]\n\n"
+        f"ЗАБЛОКИРОВАТЬ только если монета явно растёт (памп) при сигнале ШОРТ, "
+        f"или явно падает (дамп) при сигнале ЛОНГ. Во всех остальных случаях — ПОДТВЕРДИТЬ."
+    )
+    try:
+        resp = _call_gemini_text(prompt, max_tokens=80, temperature=0.2, timeout=12)
+    except Exception:
+        return True, ""
+
+    if not resp:
+        return True, ""
+
+    reason = ""
+    for line in resp.splitlines():
+        if "ПРИЧИНА" in line.upper() and ":" in line:
+            reason = line.split(":", 1)[-1].strip()
+            break
+
+    if "ЗАБЛОКИРОВАТЬ" in resp.upper():
+        return False, reason or "ИИ: сигнал противоречит текущему рыночному контексту"
+    return True, reason or ""
+
+
+# ── Demo (paper trading) helpers ──────────────────────────────────────────────
+
+def _compute_demo_sl_tp(
+    direction: str, price: float, atr: float | None
+) -> tuple[float | None, float | None]:
+    """Return (sl_price, tp_price) for a $100 demo position."""
+    if not price or price <= 0:
+        return None, None
+    if atr and atr > 0:
+        if direction == "LONG":
+            return price - 1.5 * atr, price + 3.0 * atr
+        return price + 1.5 * atr, price - 3.0 * atr
+    # Fixed fallback
+    if direction == "LONG":
+        return price * (1 - HIT_RATE_SL_PCT / 100), price * (1 + HIT_RATE_TP_PCT / 100)
+    return price * (1 + SHORT_HOLD_SL_PCT / 100), price * (1 - SHORT_HOLD_TP_PCT / 100)
+
+
+def _demo_open_position(
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp_price: float,
+    size_usd: float = 100.0,
+    is_shadow: bool = False,
+    shadow_reason: str | None = None,
+    alert_type: str | None = None,
+) -> None:
+    """Insert a paper-trading position row."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            conn.execute(
+                "INSERT INTO demo_positions "
+                "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
+                " size_usd, status, is_shadow, shadow_reason, alert_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+                (int(time.time()), symbol, direction, entry_price,
+                 sl_price, tp_price, size_usd,
+                 1 if is_shadow else 0, shadow_reason, alert_type),
+            )
+            conn.commit()
+        logger.info(
+            "Demo %s: %s %s entry=%.6g sl=%.6g tp=%.6g",
+            "shadow" if is_shadow else "pos",
+            symbol, direction, entry_price, sl_price, tp_price,
+        )
+    except Exception as exc:
+        logger.warning("_demo_open_position failed for %s: %s", symbol, exc)
+
+
+def check_demo_positions() -> None:
+    """Close demo positions that reached TP or SL. Called every 60 s."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT id, symbol, direction, entry_price, sl_price, tp_price "
+                "FROM demo_positions WHERE status='open'"
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("check_demo_positions DB read: %s", exc)
+        return
+
+    if not rows:
+        return
+
+    symbols = list({r[1] for r in rows})
+    prices: dict[str, float] = {}
+    for sym in symbols:
+        try:
+            t = _gateio_ticker(sym)
+            if t:
+                prices[sym] = float(t["lastPrice"])
+        except Exception:
+            pass
+
+    now_ts = int(time.time())
+    for row_id, symbol, direction, entry, sl, tp in rows:
+        price = prices.get(symbol)
+        if price is None:
+            continue
+        hit_tp = (direction == "LONG" and price >= tp) or (direction == "SHORT" and price <= tp)
+        hit_sl = (direction == "LONG" and price <= sl) or (direction == "SHORT" and price >= sl)
+        if not hit_tp and not hit_sl:
+            continue
+        status = "tp" if hit_tp else "sl"
+        pnl_usd = (
+            100.0 * (price - entry) / entry if direction == "LONG"
+            else 100.0 * (entry - price) / entry
+        )
+        try:
+            with _db_lock:
+                conn = _get_db()
+                conn.execute(
+                    "UPDATE demo_positions "
+                    "SET status=?, ts_close=?, exit_price=?, pnl_usd=? WHERE id=?",
+                    (status, now_ts, price, pnl_usd, row_id),
+                )
+                conn.commit()
+            logger.info(
+                "Demo pos %d %s %s: %s exit=%.6g pnl=$%.2f",
+                row_id, symbol, direction, status.upper(), price, pnl_usd,
+            )
+        except Exception as exc:
+            logger.warning("check_demo_positions update %d: %s", row_id, exc)
+
+
+def handle_demo_command(chat_id: int) -> None:
+    """Show paper-trading stats: sent signals vs AI/filter-suppressed shadow positions."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rc_open = conn.execute(
+                "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=0"
+            ).fetchone()[0]
+            rc = conn.execute(
+                "SELECT COUNT(*), "
+                "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
+                "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
+                "COALESCE(SUM(pnl_usd),0) "
+                "FROM demo_positions WHERE status!='open' AND is_shadow=0"
+            ).fetchone()
+            sc_open = conn.execute(
+                "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=1"
+            ).fetchone()[0]
+            sc = conn.execute(
+                "SELECT COUNT(*), "
+                "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
+                "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
+                "COALESCE(SUM(pnl_usd),0) "
+                "FROM demo_positions WHERE status!='open' AND is_shadow=1"
+            ).fetchone()
+            open_rows = conn.execute(
+                "SELECT symbol, direction, entry_price, ts_open "
+                "FROM demo_positions WHERE status='open' AND is_shadow=0 "
+                "ORDER BY ts_open DESC LIMIT 8"
+            ).fetchall()
+    except Exception as exc:
+        _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
+        return
+
+    rc_total, rc_tp, rc_sl, rc_pnl = rc
+    sc_total, sc_tp, sc_sl, sc_pnl = sc
+    rc_wr = (rc_tp / rc_total * 100) if rc_total else 0
+    sc_wr = (sc_tp / sc_total * 100) if sc_total else 0
+
+    lines = [
+        "📊 <b>ДЕМО-РЕЖИМ (paper trading, $100/сделка)</b>",
+        "",
+        "🟢 <b>Реальные сигналы (отправлены)</b>",
+        f"  Открытых: <b>{rc_open}</b>  │  Закрытых: <b>{rc_total}</b>",
+    ]
+    if rc_total:
+        sign = "+" if rc_pnl >= 0 else ""
+        lines += [
+            f"  Win-rate: <b>{rc_wr:.0f}%</b>  (TP: {rc_tp} / SL: {rc_sl})",
+            f"  PnL: <b>{sign}${rc_pnl:.2f}</b>",
+        ]
+    else:
+        lines.append("  Пока нет закрытых позиций.")
+
+    lines += [
+        "",
+        "👻 <b>Теневые (заблокированы ИИ / фильтром)</b>",
+        f"  Открытых: <b>{sc_open}</b>  │  Закрытых: <b>{sc_total}</b>",
+    ]
+    if sc_total:
+        sign = "+" if sc_pnl >= 0 else ""
+        lines += [
+            f"  Win-rate: <b>{sc_wr:.0f}%</b>  (TP: {sc_tp} / SL: {sc_sl})",
+            f"  PnL если бы открыли: <b>{sign}${sc_pnl:.2f}</b>",
+        ]
+    else:
+        lines.append("  Пока нет заблокированных сигналов.")
+
+    if rc_total >= 3 and sc_total >= 3:
+        diff = rc_pnl - sc_pnl
+        verdict = (
+            "✅ Фильтр улучшает результат"
+            if diff > 0 else
+            "⚠️ Фильтр блокирует прибыльные сигналы — возможно, стоит ослабить"
+        )
+        lines += ["", f"🤖 <b>Оценка фильтра:</b> {verdict}"]
+    else:
+        lines += ["", "<i>Нужно ≥3 закрытых позиции для оценки фильтра.</i>"]
+
+    now_ts = int(time.time())
+    if open_rows:
+        lines += ["", "📋 <b>Открытые позиции:</b>"]
+        for sym, dr, entry, ts in open_rows:
+            age_h = (now_ts - ts) / 3600
+            icon = "📈" if dr == "LONG" else "📉"
+            lines.append(f"  {icon} <code>{sym}</code> {dr} @{entry:,.4g} ({age_h:.1f}ч)")
+
+    _telegram_send(chat_id, "\n".join(lines))
+
+
 def _telegram_download_photo(file_id: str) -> tuple[bytes, str] | None:
     """Resolve a Telegram file_id → raw image bytes + mime type. Returns None
     on failure. Mime is inferred from the path extension since Telegram does
@@ -611,6 +933,7 @@ def _poll_telegram_commands() -> None:
         "/ai":       handle_ai_command,
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
+        "/demo":     handle_demo_command,
     }
     offset: int | None = None
     logger.info("Telegram command polling started")
@@ -1648,6 +1971,30 @@ def _get_db() -> sqlite3.Connection:
         )
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_pv_visitor ON page_views(visitor_hash)"
+        )
+        # ── Demo (paper trading) positions ───────────────────────────────────
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS demo_positions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_open       INTEGER NOT NULL,
+                symbol        TEXT    NOT NULL,
+                direction     TEXT    NOT NULL,
+                entry_price   REAL    NOT NULL,
+                sl_price      REAL    NOT NULL,
+                tp_price      REAL    NOT NULL,
+                size_usd      REAL    NOT NULL DEFAULT 100,
+                status        TEXT    NOT NULL DEFAULT 'open',
+                ts_close      INTEGER,
+                exit_price    REAL,
+                pnl_usd       REAL,
+                is_shadow     INTEGER NOT NULL DEFAULT 0,
+                shadow_reason TEXT,
+                alert_type    TEXT
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_demo_status "
+            "ON demo_positions(status, is_shadow)"
         )
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
@@ -4403,6 +4750,63 @@ def run_checks():
                             except (ValueError, KeyError, TypeError):
                                 pass
 
+                # ── Trend pump/dump filter ───────────────────────────────────────
+                _ai_note = ""
+                if b["price"] is not None:
+                    _pump_blocked, _pump_reason = _trend_pump_filter(
+                        sym, rec_label, b["price"]
+                    )
+                    if _pump_blocked:
+                        logger.info(
+                            "Confluence %s %s blocked by pump filter: %s",
+                            sym, rec_label, _pump_reason,
+                        )
+                        summary["confluence_ema_blocked"] += 1
+                        with state_lock:
+                            _atr_p = state["atr_4h"].get(sym)
+                        _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_p)
+                        if _dsl and _dtp:
+                            _demo_open_position(
+                                sym, rec_label, b["price"], _dsl, _dtp,
+                                is_shadow=True,
+                                shadow_reason=f"pump_filter: {_pump_reason}",
+                                alert_type="confluence",
+                            )
+                        continue
+
+                # ── AI veto ──────────────────────────────────────────────────────
+                _pct24_v: float | None = None
+                if tickers:
+                    _tv = tickers.get(sym)
+                    if _tv:
+                        try:
+                            _pct24_v = float(_tv["priceChangePercent"])
+                        except (ValueError, KeyError, TypeError):
+                            pass
+                _ai_allow, _ai_note = _ai_veto_confluence(
+                    sym, rec_label, b["rsi"], _pct24_v, above_ema
+                )
+                if not _ai_allow:
+                    logger.info(
+                        "SUPPRESSED: %s %s, причина ИИ: %s",
+                        sym, rec_label, _ai_note,
+                    )
+                    summary["confluence_ai_blocked"] = (
+                        summary.get("confluence_ai_blocked", 0) + 1
+                    )
+                    if b["price"]:
+                        with state_lock:
+                            _atr_v = state["atr_4h"].get(sym)
+                        _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_v)
+                        if _dsl and _dtp:
+                            _demo_open_position(
+                                sym, rec_label, b["price"], _dsl, _dtp,
+                                is_shadow=True,
+                                shadow_reason=f"ai_veto: {_ai_note}",
+                                alert_type="confluence",
+                            )
+                    continue
+
                 header = [f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>"]
                 if b["price"] is not None:
                     header.append(f"Цена: <b>${b['price']:,.6g}</b>")
@@ -4425,6 +4829,10 @@ def run_checks():
                     body_lines.append(sl_tp)
                 if _trend_warn:
                     body_lines.append(_trend_warn)
+                if _ai_note:
+                    body_lines.append(
+                        f"🤖 ИИ подтвердил: <i>{html.escape(_ai_note)}</i>"
+                    )
                 body = "\n".join(body_lines)
                 delivered, _aid = send_alert_with_log(
                     sym, "confluence", rec_label, b["price"], body, score
@@ -4442,6 +4850,16 @@ def run_checks():
                     sym, len(b["lines"]), sorted(b["flags"]), score,
                 )
                 summary["confluence_alerts"] += 1
+                # Open real demo position for this delivered signal
+                if b["price"]:
+                    with state_lock:
+                        _atr_d = state["atr_4h"].get(sym)
+                    _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_d)
+                    if _dsl and _dtp:
+                        _demo_open_position(
+                            sym, rec_label, b["price"], _dsl, _dtp,
+                            alert_type="confluence",
+                        )
 
                 # Mark cooldowns only for signals that actually contributed to a sent alert
                 with state_lock:
@@ -7002,6 +7420,9 @@ scheduler.add_job(
 )
 scheduler.add_job(
     backup_alerts_db, "interval", hours=1, id="alerts_db_backup",
+)
+scheduler.add_job(
+    check_demo_positions, "interval", seconds=60, id="demo_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
