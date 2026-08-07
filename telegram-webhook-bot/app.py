@@ -844,10 +844,10 @@ def _ai_veto_confluence(
             prompt, max_tokens=200, temperature=0.1, timeout=25
         )
     except Exception:
-        return True, "", ""
+        return True, "⚠️ проверка недоступна (ошибка сети)", ""
 
     if not resp:
-        return True, "", ""
+        return True, "⚠️ проверка недоступна (нет ответа)", ""
 
     resp_upper = resp.upper()
     reason = ""
@@ -884,7 +884,7 @@ def _ai_veto_confluence(
             hold_str += f"\n   🔗 {source[:100]}"
         return True, reason, hold_str
 
-    return True, reason or "", ""
+    return True, reason or "критичных новостей нет", ""
 
 
 # ── Demo (paper trading) helpers ──────────────────────────────────────────────
