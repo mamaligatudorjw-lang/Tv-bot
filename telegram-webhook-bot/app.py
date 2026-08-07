@@ -157,6 +157,9 @@ state = {
     "last_listing_peak_alerted": {},        # symbol -> ts (listing_peak_short TEST cooldown)
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
+    "last_streak_1h_alerted": {},      # symbol -> ts (intraday 6h+ streak LONG/SHORT cooldown)
+    "last_lsr_shift_alerted": {},      # symbol -> ts (whale LSR flip cooldown)
+    "lsr_prev": {},                    # symbol -> float (previous LSR value for shift detection)
     "prior_day_pct": {},               # symbol -> float: yesterday's close-to-close % change
     "market_regime": "NEUTRAL",        # BTC daily EMA-200 regime: BULL/BEAR/NEUTRAL
     "market_regime_ts": 0,             # unix ts of last regime refresh
@@ -2739,6 +2742,20 @@ BREAKDOWN_RSI_MIN    = 30.0    # RSI must be above (oversold coins excluded — 
 BREAKDOWN_RSI_MAX    = 58.0    # RSI must be below (confirms selling pressure, not neutral)
 BREAKDOWN_COOLDOWN   = 14400   # 4h cooldown per coin
 
+# --- Intraday hourly streak (6h+ consecutive green/red 1h candles) ---
+STREAK_1H_MIN          = 6       # minimum consecutive green/red hours to trigger
+STREAK_1H_COOLDOWN     = 28800   # 8h cooldown per symbol (avoid re-spamming same streak)
+STREAK_1H_PRE_FILTER   = 3.0    # min |pct24| to even fetch 1h candles (saves API calls)
+STREAK_1H_RSI_MAX_LONG = 73.0   # RSI ceiling for LONG streak (not already overbought)
+STREAK_1H_RSI_MIN_SHORT= 27.0   # RSI floor for SHORT streak (not already oversold)
+
+# --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
+LSR_SHIFT_THRESHOLD  = 0.38    # min |lsr_new - lsr_prev| to count as a flip
+LSR_BULL_MIN         = 1.30    # after shift, LSR must be ≥ this (whales in long)
+LSR_BEAR_MAX         = 0.72    # after shift, LSR must be ≤ this (whales in short)
+LSR_SHIFT_COOLDOWN   = 14400   # 4h cooldown per symbol
+LSR_MONITOR_TOP_N    = 40      # check LSR for top-N by volume per cycle
+
 # --- Momentum continuation LONG (TEST) ---
 MOMENTUM_LONG_PCT    = 10.0    # 24h rise must be ≥ this to qualify
 MOMENTUM_LONG_RSI_MIN = 42.0   # RSI must be above (confirms momentum, not dead-cat)
@@ -3220,6 +3237,304 @@ def compute_hit_rate_stats(days: int = 7) -> list[dict]:
     except Exception as e:
         logger.warning("compute_hit_rate_stats failed: %s", e)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Intraday helpers
+# ---------------------------------------------------------------------------
+
+def _fetch_1h_closes(symbol: str, limit: int = 14) -> list[float] | None:
+    """Return the last `limit-1` completed 1h closes (oldest→newest), skipping
+    the current (potentially incomplete) candle.  Returns None on error."""
+    try:
+        candles = _gateio_klines(symbol, "1h", limit)
+        if not candles or len(candles) < 8:
+            return None
+        return [float(k[4]) for k in candles[:-1]]   # drop last (live) candle
+    except Exception:
+        return None
+
+
+def _fetch_gate_lsr_raw(symbol: str) -> float | None:
+    """Return the raw top_lsr_size from Gate.io /contract_stats (1h, 1 row).
+    Returns None on any error or if the contract isn't listed."""
+    try:
+        resp = _gateio_get(
+            "/contract_stats",
+            params={"contract": _to_gate(symbol), "interval": "1h", "limit": 1},
+            timeout=5,
+        )
+        data = resp.json()
+        if not data:
+            return None
+        lsr = float(data[0].get("top_lsr_size") or 0)
+        return lsr if lsr > 0 else None
+    except Exception:
+        return None
+
+
+def check_intraday_streak(
+    tickers: dict[str, dict],
+    rsi_map: dict[str, float],
+) -> int:
+    """Send LONG/SHORT alerts when a coin has 6+ consecutive green/red 1h candles.
+
+    Pre-filter: only fetch 1h data for coins that already show ±STREAK_1H_PRE_FILTER%
+    on the 24h ticker (reduces API calls from ~500 to ~50).
+
+    LONG  → 6+ consecutive green hours, RSI < STREAK_1H_RSI_MAX_LONG
+    SHORT → 6+ consecutive red   hours, RSI > STREAK_1H_RSI_MIN_SHORT
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    btc_t = tickers.get("BTCUSDT")
+    btc_pct24: float | None = None
+    if btc_t:
+        try:
+            btc_pct24 = float(btc_t["priceChangePercent"])
+        except (ValueError, KeyError, TypeError):
+            pass
+
+    for symbol, t in tickers.items():
+        try:
+            pct24   = float(t["priceChangePercent"])
+            price   = float(t["lastPrice"])
+            vol24   = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        # Fast pre-filter: coin must already be showing movement
+        if abs(pct24) < STREAK_1H_PRE_FILTER:
+            continue
+
+        # Cooldown
+        with state_lock:
+            last = state["last_streak_1h_alerted"].get(symbol, 0)
+        if now - last < STREAK_1H_COOLDOWN:
+            continue
+
+        rsi = rsi_map.get(symbol)
+
+        # Fetch 1h candles
+        closes = _fetch_1h_closes(symbol, limit=14)
+        if not closes or len(closes) < STREAK_1H_MIN + 1:
+            continue
+
+        streak_up   = _count_consecutive_trend_days(closes, "up")
+        streak_down = _count_consecutive_trend_days(closes, "down")
+
+        if streak_up >= STREAK_1H_MIN and pct24 > 0:
+            # LONG signal — sustained uptrend
+            if rsi is not None and rsi >= STREAK_1H_RSI_MAX_LONG:
+                continue  # already overbought, skip
+
+            # Cumulative gain over streak window
+            streak_start_price = closes[-(streak_up + 1)]
+            streak_gain = (closes[-1] - streak_start_price) / streak_start_price * 100
+
+            with state_lock:
+                atr = state["atr_4h"].get(symbol)
+                ema = state["ema200_4h"].get(symbol)
+
+            above_ema = (ema is not None and price > ema)
+            sl_tp = _format_sl_tp("buy", price, atr)
+            whale = _get_gate_whale_stats(symbol)
+
+            score = compute_signal_score(
+                "streak_1h", "buy",
+                rsi=rsi, above_ema=above_ema, pct24=pct24, btc_pct24=btc_pct24,
+            )
+            ema_note = "📍 Выше EMA-200 ✅" if above_ema else "📍 Ниже EMA-200 ⚠️"
+            rsi_str  = f"{rsi:.1f}" if rsi is not None else "н/д"
+            body = (
+                f"📈 <b>ВОСХОДЯЩИЙ ТРЕНД {streak_up}ч — ранний ЛОНГ</b>\n"
+                f"Монета растёт <b>{streak_up} часов подряд</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{symbol}</code>\n"
+                f"⏱ Рост за {streak_up}ч: <b>+{streak_gain:.1f}%</b>\n"
+                f"📈 24ч: <b>{pct24:+.1f}%</b>\n"
+                f"🧊 RSI: <b>{rsi_str}</b>\n"
+                f"💰 Цена: <b>${price:,.6g}</b>\n"
+                f"{ema_note}\n"
+                f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+            )
+            if sl_tp:
+                body += f"\n{sl_tp}"
+            if whale:
+                body += f"\n{whale}"
+
+            delivered, _aid = send_alert_with_log(
+                symbol, "streak_1h", "LONG", price, body, score,
+                rsi=rsi, pct24=pct24,
+            )
+            if delivered:
+                with state_lock:
+                    state["last_streak_1h_alerted"][symbol] = now
+                logger.info(
+                    "Streak1h LONG: %s streak=%dh gain=%.1f%% rsi=%s",
+                    symbol, streak_up, streak_gain, rsi_str,
+                )
+                sent += 1
+
+        elif streak_down >= STREAK_1H_MIN and pct24 < 0:
+            # SHORT signal — sustained downtrend
+            if rsi is not None and rsi <= STREAK_1H_RSI_MIN_SHORT:
+                continue  # already oversold, skip
+
+            streak_start_price = closes[-(streak_down + 1)]
+            streak_loss = (closes[-1] - streak_start_price) / streak_start_price * 100
+
+            with state_lock:
+                atr = state["atr_4h"].get(symbol)
+                ema = state["ema200_4h"].get(symbol)
+
+            below_ema = (ema is not None and price < ema)
+            sl_tp = _format_sl_tp("sell", price, atr)
+            whale = _get_gate_whale_stats(symbol)
+
+            score = compute_signal_score(
+                "streak_1h", "sell",
+                rsi=rsi, above_ema=(not below_ema), pct24=pct24, btc_pct24=btc_pct24,
+            )
+            ema_note = "📍 Ниже EMA-200 ✅" if below_ema else "📍 Выше EMA-200 ⚠️"
+            rsi_str  = f"{rsi:.1f}" if rsi is not None else "н/д"
+            body = (
+                f"📉 <b>НИСХОДЯЩИЙ ТРЕНД {streak_down}ч — ранний ШОРТ</b>\n"
+                f"Монета падает <b>{streak_down} часов подряд</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{symbol}</code>\n"
+                f"⏱ Падение за {streak_down}ч: <b>{streak_loss:.1f}%</b>\n"
+                f"📉 24ч: <b>{pct24:+.1f}%</b>\n"
+                f"🧊 RSI: <b>{rsi_str}</b>\n"
+                f"💰 Цена: <b>${price:,.6g}</b>\n"
+                f"{ema_note}\n"
+                f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+            )
+            if sl_tp:
+                body += f"\n{sl_tp}"
+            if whale:
+                body += f"\n{whale}"
+
+            delivered, _aid = send_alert_with_log(
+                symbol, "streak_1h", "SHORT", price, body, score,
+                rsi=rsi, pct24=pct24,
+            )
+            if delivered:
+                with state_lock:
+                    state["last_streak_1h_alerted"][symbol] = now
+                logger.info(
+                    "Streak1h SHORT: %s streak=%dh loss=%.1f%% rsi=%s",
+                    symbol, streak_down, streak_loss, rsi_str,
+                )
+                sent += 1
+
+    return sent
+
+
+def check_whale_lsr_shift(liquid_pairs: list[tuple[str, float]]) -> int:
+    """Alert when Gate.io top-trader LSR flips significantly in one 5-min cycle.
+
+    Strategy:
+    - Each cycle, fetch current LSR for the top LSR_MONITOR_TOP_N pairs by volume.
+    - Compare to the stored previous value (state["lsr_prev"]).
+    - If |current - previous| >= LSR_SHIFT_THRESHOLD AND current crosses a
+      bull/bear threshold → send an alert.
+
+    LONG  alert: LSR was < 1.0, now >= LSR_BULL_MIN   (whales rushed into LONG)
+    SHORT alert: LSR was > 1.0, now <= LSR_BEAR_MAX   (whales rushed into SHORT)
+    """
+    if not liquid_pairs:
+        return 0
+    sent = 0
+    now = time.time()
+
+    # Take the top N symbols by volume for LSR polling
+    top_pairs = sorted(liquid_pairs, key=lambda x: x[1], reverse=True)[:LSR_MONITOR_TOP_N]
+
+    for symbol, _vol in top_pairs:
+        # Cooldown check first to avoid unnecessary API call
+        with state_lock:
+            last = state["last_lsr_shift_alerted"].get(symbol, 0)
+        if now - last < LSR_SHIFT_COOLDOWN:
+            continue
+
+        current_lsr = _fetch_gate_lsr_raw(symbol)
+        if current_lsr is None:
+            continue
+
+        with state_lock:
+            prev_lsr = state["lsr_prev"].get(symbol)
+            state["lsr_prev"][symbol] = current_lsr  # always update
+
+        if prev_lsr is None:
+            continue  # first time seeing this symbol — just store, don't alert
+
+        delta = current_lsr - prev_lsr
+
+        if abs(delta) < LSR_SHIFT_THRESHOLD:
+            continue  # not a significant shift
+
+        # Determine direction
+        if prev_lsr < 1.0 and current_lsr >= LSR_BULL_MIN:
+            direction = "LONG"
+            emoji    = "🐋🟢"
+            verdict  = "Киты резко перешли в ЛОНГ"
+        elif prev_lsr > 1.0 and current_lsr <= LSR_BEAR_MAX:
+            direction = "SHORT"
+            emoji    = "🐋🔴"
+            verdict  = "Киты резко перешли в ШОРТ"
+        else:
+            continue  # shift happened but didn't cross a threshold
+
+        with state_lock:
+            atr   = state["atr_4h"].get(symbol)
+            ema   = state["ema200_4h"].get(symbol)
+
+        # Fetch current price from ticker-free path
+        gate_t = _gateio_ticker(symbol)
+        price  = float(gate_t["lastPrice"]) if gate_t else None
+
+        sl_tp  = _format_sl_tp("buy" if direction == "LONG" else "sell", price, atr) if price else ""
+        ema_note = ""
+        if ema and price:
+            if direction == "LONG":
+                ema_note = "\n📍 Выше EMA-200 ✅" if price > ema else "\n📍 Ниже EMA-200 ⚠️"
+            else:
+                ema_note = "\n📍 Ниже EMA-200 ✅" if price < ema else "\n📍 Выше EMA-200 ⚠️"
+
+        price_str = f"${price:,.6g}" if price else "н/д"
+        body = (
+            f"{emoji} <b>ВХОД КИТОВ — {verdict}</b>\n"
+            f"LSR изменился: <b>{prev_lsr:.2f} → {current_lsr:.2f}</b> "
+            f"(Δ{delta:+.2f} за 5 мин)\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code>\n"
+            f"💰 Цена: <b>{price_str}</b>{ema_note}\n"
+            f"🎯 Рекомендация: <b>{direction}</b> — следуй за китами"
+        )
+        if sl_tp:
+            body += f"\n{sl_tp}"
+
+        score = 65  # fixed moderate score — based on whale signal alone
+        delivered, _aid = send_alert_with_log(
+            symbol, "whale_lsr_shift", direction, price, body, score,
+        )
+        if delivered:
+            with state_lock:
+                state["last_lsr_shift_alerted"][symbol] = now
+            logger.info(
+                "WhaleLSR %s: %s lsr %.2f→%.2f delta %.2f",
+                direction, symbol, prev_lsr, current_lsr, delta,
+            )
+            sent += 1
+
+    return sent
 
 
 # ---------------------------------------------------------------------------
@@ -4705,6 +5020,8 @@ def run_checks():
         "breakdown_alerts": 0,         # TEST: breakdown continuation SHORT
         "momentum_long_alerts": 0,     # TEST: momentum fade SHORT (pamped +10% → reversal)
         "new_listing_short_alerts": 0, # TEST: new listing pump→dump SHORT
+        "streak_1h_alerts": 0,         # intraday 6h+ streak LONG/SHORT
+        "whale_lsr_shift_alerts": 0,   # whale LSR flip alerts
         "errors": [],
     }
 
@@ -4821,6 +5138,12 @@ def run_checks():
 
                 # 6h. TEST: New listing ATH peak → SHORT long-duration (pump≥30% + RSI≥70)
                 summary["listing_peak_short_alerts"] = check_listing_peak_short(tickers, rsi_map)
+
+                # 6i. Intraday hourly streak — 6+ consecutive green/red 1h candles
+                summary["streak_1h_alerts"] = check_intraday_streak(tickers, rsi_map)
+
+                # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
+                summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs)
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
