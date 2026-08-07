@@ -512,6 +512,72 @@ def _call_gemini_text(
         return None
 
 
+def _call_gemini_with_search(
+    prompt: str,
+    max_tokens: int = 256,
+    temperature: float = 0.1,
+    timeout: int = 25,
+) -> tuple[str | None, str]:
+    """Call Gemini with Google Search grounding enabled.
+
+    Returns (text_response, source_snippet) where source_snippet is a brief
+    citation extracted from groundingMetadata, or '' if no results were used.
+    Fails open (None, '') on any error — callers must handle None as "allow".
+
+    NOTE: thinkingConfig is intentionally omitted here — Google Search grounding
+    is incompatible with thinkingBudget=0 in the Gemini 2.5 API and will cause
+    a 400 error if included.
+    """
+    if not _GEMINI_BASE_URL or not _GEMINI_API_KEY:
+        return None, ""
+    url = (f"{_GEMINI_BASE_URL.rstrip('/')}/models/"
+           f"{_GEMINI_VISION_MODEL}:generateContent")
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {
+            "maxOutputTokens": max_tokens,
+            "temperature": temperature,
+        },
+    }
+    try:
+        resp = requests.post(
+            url,
+            headers={"x-goog-api-key": _GEMINI_API_KEY},
+            json=payload,
+            timeout=timeout,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+        candidate = body["candidates"][0]
+        parts = candidate.get("content", {}).get("parts", [])
+        text = "".join(
+            p.get("text", "") for p in parts if not p.get("thought", False)
+        ).strip()
+
+        # Extract the first web source from grounding metadata (if any)
+        source_snippet = ""
+        grounding = candidate.get("groundingMetadata", {})
+        chunks = grounding.get("groundingChunks", [])
+        if chunks:
+            web = chunks[0].get("web", {})
+            title = web.get("title", "").strip()
+            uri   = web.get("uri",   "").strip()
+            if title:
+                # Keep URI short so it fits in the Telegram message
+                source_snippet = title if not uri else f"{title} — {uri[:80]}"
+
+        logger.debug(
+            "Gemini search veto for prompt snippet %r → %r (source: %r)",
+            prompt[:60], text[:80], source_snippet[:60],
+        )
+        return text, source_snippet
+
+    except Exception as e:
+        logger.warning("Gemini search call failed: %s", _safe_err(e))
+        return None, ""
+
+
 def _ai_signal_commentary(
     symbol: str,
     recommendation: str,
@@ -615,11 +681,17 @@ def _ai_veto_confluence(
     pct24: float | None,
     above_ema: bool | None,
 ) -> tuple[bool, str]:
-    """Ask Gemini whether the confluence signal direction makes sense right now.
+    """Ask Gemini (with Google Search) whether the signal is safe to send.
+
+    Two-layer check in a single Gemini call:
+    1. News check — block on critical fundamental events (hack, ban, rug pull,
+       delisting, project shutdown). Ordinary price/volume news does NOT block.
+    2. Technical check — block if the coin is actively pumping during a SHORT
+       signal or actively dumping during a LONG signal.
 
     Returns (allow, note):
-    • allow=False → suppress; note is the blocking reason (logged + shadow demo).
-    • allow=True  → send; note is a brief confirmation appended to the alert.
+    • allow=False → suppress; note = blocking reason (logged + shadow demo).
+    • allow=True  → send; note = short confirmation appended to the alert.
     Fails OPEN (allow=True) on Gemini error / timeout so signals are never
     silently lost due to AI unavailability.
     """
@@ -635,26 +707,36 @@ def _ai_veto_confluence(
         else "ниже EMA-200 — нисходящий тренд" if above_ema is False
         else "положение неизвестно"
     )
+    # Clean ticker for the search query (HFTUSDT → HFT)
+    coin_ticker = symbol[:-4] if symbol.upper().endswith("USDT") else symbol
 
     prompt = (
-        f"Ты — торговый фильтр крипто-бота. Реши, отправлять ли сигнал.\n\n"
+        f"Ты — торговый фильтр крипто-бота. Найди свежие новости о монете "
+        f"{coin_ticker} ({symbol}) и вынеси вердикт о безопасности открытия позиции.\n\n"
         f"МОНЕТА: {symbol}\n"
         f"СИГНАЛ БОТА: {direction_ru}\n"
         f"RSI (1ч): {rsi_str}\n"
         f"Изменение за 24ч: {pct_str}\n"
         f"Положение vs EMA-200 (4ч): {ema_str}\n"
         f"Режим рынка (BTC): {regime}\n\n"
+        f"ЗАБЛОКИРОВАТЬ сигнал только в одном из двух случаев:\n"
+        f"1. ФУНДАМЕНТАЛЬНАЯ УГРОЗА по новостям: хак/эксплойт протокола, "
+        f"санкции регулятора, закрытие/уход команды, делистинг с крупных бирж, "
+        f"скам или rug pull. Обычные новости о цене/объёме — НЕ блокируют.\n"
+        f"2. ПРОТИВОРЕЧИЕ ТЕХНИКЕ: монета явно активно растёт (памп) при сигнале ШОРТ, "
+        f"или явно падает (дамп) при сигнале ЛОНГ.\n\n"
+        f"Если новостей нет, они нейтральные, или не относятся к категориям выше — ПОДТВЕРДИТЬ.\n\n"
         f"Ответь СТРОГО в 2 строки, без лишних слов:\n"
         f"ВЕРДИКТ: ПОДТВЕРДИТЬ\n"
         f"ПРИЧИНА: [1 предложение]\n\n"
         f"ИЛИ:\n"
         f"ВЕРДИКТ: ЗАБЛОКИРОВАТЬ\n"
-        f"ПРИЧИНА: [1 предложение]\n\n"
-        f"ЗАБЛОКИРОВАТЬ только если монета явно растёт (памп) при сигнале ШОРТ, "
-        f"или явно падает (дамп) при сигнале ЛОНГ. Во всех остальных случаях — ПОДТВЕРДИТЬ."
+        f"ПРИЧИНА: [1 предложение, указать источник если это новость]"
     )
     try:
-        resp = _call_gemini_text(prompt, max_tokens=80, temperature=0.2, timeout=12)
+        resp, source = _call_gemini_with_search(
+            prompt, max_tokens=150, temperature=0.1, timeout=25
+        )
     except Exception:
         return True, ""
 
@@ -668,7 +750,11 @@ def _ai_veto_confluence(
             break
 
     if "ЗАБЛОКИРОВАТЬ" in resp.upper():
-        return False, reason or "ИИ: сигнал противоречит текущему рыночному контексту"
+        full_reason = reason or "ИИ: обнаружена проблема с монетой"
+        # Append the web source if grounding returned one and it's not already in reason
+        if source and source[:30] not in full_reason:
+            full_reason = f"{full_reason} [{source[:100]}]"
+        return False, full_reason
     return True, reason or ""
 
 
