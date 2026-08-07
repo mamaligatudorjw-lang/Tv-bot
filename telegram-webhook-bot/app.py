@@ -3552,6 +3552,25 @@ def check_overheated_oversold(
                     + _co_line
                     + (f"\n{_oh_trend_warn}" if _oh_trend_warn else "")
                 )
+                # ── AI veto ──────────────────────────────────────────────────
+                _ai_ok_oh, _ai_note_oh = _ai_veto_confluence(
+                    symbol, "SHORT", rsi, pct24, None
+                )
+                if not _ai_ok_oh:
+                    logger.info(
+                        "SUPPRESSED overheated %s — ИИ: %s", symbol, _ai_note_oh,
+                    )
+                    _dsl, _dtp = _compute_demo_sl_tp("SHORT", price, atr)
+                    if _dsl and _dtp:
+                        _demo_open_position(
+                            symbol, "SHORT", price, _dsl, _dtp,
+                            is_shadow=True,
+                            shadow_reason=f"ai_veto: {_ai_note_oh}",
+                            alert_type="overheated_24h",
+                        )
+                    continue
+                if _ai_note_oh:
+                    body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_oh)}</i>"
                 delivered, _aid = send_alert_with_log(symbol, "overheated_24h", "SHORT", price, body, score)
                 if delivered:
                     with state_lock:
@@ -3590,6 +3609,25 @@ def check_overheated_oversold(
                     + _co_line_os
                     + (f"\n{_os_trend_warn}" if _os_trend_warn else "")
                 )
+                # ── AI veto ──────────────────────────────────────────────────
+                _ai_ok_os, _ai_note_os = _ai_veto_confluence(
+                    symbol, "LONG", rsi, pct24, None
+                )
+                if not _ai_ok_os:
+                    logger.info(
+                        "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
+                    )
+                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl and _dtp:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl, _dtp,
+                            is_shadow=True,
+                            shadow_reason=f"ai_veto: {_ai_note_os}",
+                            alert_type="oversold_24h",
+                        )
+                    continue
+                if _ai_note_os:
+                    body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
                 delivered, _aid = send_alert_with_log(symbol, "oversold_24h", "LONG", price, body, score)
                 if delivered:
                     with state_lock:
