@@ -625,6 +625,53 @@ def _poll_telegram_commands() -> None:
                 text = raw_text.lower()
                 if not text:
                     continue
+                # AI question handler — fires when user tapped "🤖 Спросить AI" button
+                with _ai_ask_pending_lock:
+                    pending = _ai_ask_pending.pop(chat_id, None)
+                if pending and time.time() - pending["ts"] < 300:  # 5-min window
+                    def _handle_ai_q(p=pending, q=raw_text, cid=chat_id):
+                        sym = p["symbol"]; rec = p["rec"]
+                        atype = p["alert_type"]; score = p["score"]
+                        rsi = None
+                        try: rsi = get_klines_rsi(sym)
+                        except Exception: pass
+                        pct24 = None
+                        try:
+                            t = _gateio_ticker(sym)
+                            if t: pct24 = float(t["priceChangePercent"])
+                        except Exception: pass
+                        closes = _fetch_daily_closes_for_crsi(sym)
+                        trend_up   = _count_consecutive_trend_days(closes, "up")   if closes else 0
+                        trend_down = _count_consecutive_trend_days(closes, "down") if closes else 0
+                        trend_str = (
+                            f"растёт {trend_up} дней подряд" if trend_up >= 2
+                            else f"падает {trend_down} дней подряд" if trend_down >= 2
+                            else "боковое движение"
+                        )
+                        prompt = (
+                            f"Ты — опытный трейдер крипто-фьючерсов. Пользователь получил сигнал и задаёт вопрос.\n\n"
+                            f"=== КОНТЕКСТ СИГНАЛА ===\n"
+                            f"Монета: {sym}\n"
+                            f"Направление: {rec}\n"
+                            f"Тип сигнала: {atype}\n"
+                            f"Score: {score}/100\n"
+                            f"RSI: {f'{rsi:.1f}' if rsi else 'н/д'}\n"
+                            f"24ч изменение: {f'{pct24:+.1f}%' if pct24 else 'н/д'}\n"
+                            f"Тренд (дневные): {trend_str}\n\n"
+                            f"=== ВОПРОС ПОЛЬЗОВАТЕЛЯ ===\n{q}\n\n"
+                            f"Ответь по-русски, конкретно, 2-4 предложения. "
+                            f"Не гарантируй прибыль. Упомяни ключевой риск."
+                        )
+                        answer = _call_gemini_text(prompt, max_tokens=300, temperature=0.7, timeout=20)
+                        if answer:
+                            _telegram_send(cid,
+                                f"🤖 <b>{html.escape(sym)} · AI ответ</b>\n\n"
+                                f"<i>{html.escape(answer)}</i>"
+                            )
+                        else:
+                            _telegram_send(cid, "⚠️ AI не ответил, попробуй ещё раз.")
+                    threading.Thread(target=_handle_ai_q, daemon=True).start()
+                    continue
                 for cmd, handler in COMMANDS.items():
                     # Exact match — the command must be the whole word, optionally
                     # followed by whitespace + args. Prevents '/trader' matching '/trade'.
@@ -925,6 +972,10 @@ def get_two_day_volumes(symbol: str) -> tuple[float, float] | None:
 
 _CRSI_KLINES_CACHE: dict[str, tuple[float, list[float]]] = {}
 _CRSI_KLINES_CACHE_TTL = 1800  # 30 min — daily closes don't change intraday
+
+# Pending "ask AI" state: chat_id → {alert_id, symbol, rec, alert_type, score, ts}
+_ai_ask_pending: dict[int, dict] = {}
+_ai_ask_pending_lock = threading.Lock()
 
 
 def _fetch_daily_closes_for_crsi(symbol: str) -> list[float] | None:
@@ -2067,6 +2118,9 @@ def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
                 {"text": "↓ не сработал", "callback_data": f"fb:{alert_id}:-1"},
             ],
             [
+                {"text": "🤖 Спросить AI", "callback_data": f"ai_ask:{alert_id}"},
+            ],
+            [
                 {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
                 {"text": "Скрыть тип", "callback_data": f"ht:{alert_type}"},
             ],
@@ -2329,6 +2383,41 @@ def handle_callback_query(cb: dict) -> None:
                     cb_id,
                     f"Пара {rest} скрыта" if newly else f"Пара {rest} уже скрыта",
                 )
+        elif kind == "ai_ask":
+            # Store pending state so the user's next text message becomes the AI question
+            try:
+                aid = int(rest)
+            except ValueError:
+                _telegram_answer_callback(cb_id, "Ошибка")
+                return
+            # Fetch signal context from DB
+            sig_row = None
+            try:
+                with _db_lock:
+                    conn = _get_db()
+                    sig_row = conn.execute(
+                        "SELECT symbol, recommendation, alert_type, score FROM alerts WHERE id=?",
+                        (aid,)
+                    ).fetchone()
+            except Exception:
+                pass
+            if not sig_row:
+                _telegram_answer_callback(cb_id, "Сигнал не найден")
+                return
+            sym, rec, atype, score = sig_row
+            with _ai_ask_pending_lock:
+                _ai_ask_pending[chat_id] = {
+                    "alert_id": aid, "symbol": sym,
+                    "rec": rec, "alert_type": atype,
+                    "score": score, "ts": time.time(),
+                }
+            _telegram_answer_callback(cb_id, "Введи свой вопрос")
+            _telegram_send(
+                chat_id,
+                f"🤖 <b>Задай вопрос по сигналу <code>{sym}</code> ({rec})</b>\n"
+                f"Например: «Стоит ли входить сейчас?» или «Какие риски?»\n\n"
+                f"Просто напиши — отвечу через несколько секунд."
+            )
         elif kind == "noop":
             _telegram_answer_callback(cb_id)
         else:
@@ -6718,6 +6807,77 @@ def api_status():
             "lastRunSummary": state["last_run_summary"],
             "activeBinanceHost": BINANCE_BASE,
         })
+
+
+@app.route("/bot-api/ai-analyze", methods=["POST"])
+def api_ai_analyze():
+    """POST { symbol } → { analysis } — Gemini AI analysis of a coin."""
+    from flask import request as flask_request
+    try:
+        body = flask_request.get_json(force=True) or {}
+        raw_sym = str(body.get("symbol", "")).strip().upper()
+        if not raw_sym:
+            return jsonify({"error": "symbol required"}), 400
+        symbol = raw_sym if raw_sym.endswith("USDT") else raw_sym + "USDT"
+
+        # Gather live data
+        ticker = None
+        try: ticker = _gateio_ticker(symbol)
+        except Exception: pass
+        rsi = None
+        try: rsi = get_klines_rsi(symbol)
+        except Exception: pass
+        closes = _fetch_daily_closes_for_crsi(symbol)
+
+        if not ticker:
+            return jsonify({"error": f"Монета {symbol} не найдена"}), 404
+
+        price = pct24 = volume = None
+        try:
+            price   = float(ticker["lastPrice"])
+            pct24   = float(ticker["priceChangePercent"])
+            volume  = float(ticker.get("quoteVolume") or 0)
+        except Exception:
+            return jsonify({"error": "Не удалось получить данные"}), 500
+
+        trend_up   = _count_consecutive_trend_days(closes, "up")   if closes else 0
+        trend_down = _count_consecutive_trend_days(closes, "down") if closes else 0
+        trend_str = (
+            f"растёт {trend_up} дней подряд" if trend_up >= 2
+            else f"падает {trend_down} дней подряд" if trend_down >= 2
+            else "боковое движение"
+        )
+
+        prompt = (
+            f"Ты — опытный трейдер крипто-фьючерсов. Проведи анализ монеты.\n\n"
+            f"=== {symbol} ===\n"
+            f"Цена: ${price:,.6g}\n"
+            f"Изменение за 24ч: {pct24:+.2f}%\n"
+            f"Объём за 24ч: ${volume:,.0f}\n"
+            f"RSI (14): {f'{rsi:.1f}' if rsi else 'н/д'}\n"
+            f"Тренд (дневные свечи): {trend_str}\n\n"
+            f"Ответь строго по структуре на РУССКОМ:\n\n"
+            f"📊 ТРЕНД: [Восходящий / Нисходящий / Боковой] — одна фраза\n\n"
+            f"⚡ КЛЮЧЕВЫЕ ФАКТОРЫ:\n• [фактор 1]\n• [фактор 2]\n• [фактор 3]\n\n"
+            f"🎯 РЕКОМЕНДАЦИЯ: [ЛОНГ / ШОРТ / ЖДАТЬ] — причина\n\n"
+            f"⚠️ ГЛАВНЫЙ РИСК: [одна фраза]\n\n"
+            f"Не гарантируй прибыль. Будь конкретным."
+        )
+        analysis = _call_gemini_text(prompt, max_tokens=512, temperature=0.65, timeout=25)
+        if not analysis:
+            return jsonify({"error": "AI не ответил, попробуйте позже"}), 503
+
+        return jsonify({
+            "symbol": symbol,
+            "price": price,
+            "pct24": pct24,
+            "rsi": rsi,
+            "trend": trend_str,
+            "analysis": analysis,
+        })
+    except Exception as exc:
+        logger.warning("api_ai_analyze error: %s", exc)
+        return jsonify({"error": "Внутренняя ошибка"}), 500
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,99 @@ import {
   formatTimeAgo,
 } from "@/lib/format";
 
+// ── AI Analyze widget ────────────────────────────────────────────────────────
+
+function AiAnalyzeWidget() {
+  const [symbol, setSymbol] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState<{
+    symbol: string; price: number; pct24: number;
+    rsi: number | null; trend: string; analysis: string;
+  } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const analyze = async () => {
+    const sym = symbol.trim().toUpperCase();
+    if (!sym) return;
+    setLoading(true); setResult(null); setError(null);
+    try {
+      const res = await fetch("/bot-api/ai-analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ symbol: sym }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || "Ошибка"); return; }
+      setResult(data);
+    } catch {
+      setError("Не удалось подключиться к серверу");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="mt-8">
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+          🤖 AI-анализ монеты
+        </span>
+      </div>
+
+      <div className="rounded-2xl border border-card-border bg-card/60 p-4">
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="BTCUSDT, ETHUSDT…"
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && analyze()}
+            className="flex-1 rounded-xl border border-card-border bg-background px-3 py-2 text-sm outline-none focus:border-primary/50"
+          />
+          <button
+            onClick={analyze}
+            disabled={loading || !symbol.trim()}
+            className="rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-40 transition-opacity"
+          >
+            {loading ? "…" : "Анализировать"}
+          </button>
+        </div>
+
+        {error && (
+          <div className="mt-3 rounded-xl border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        {loading && (
+          <div className="mt-4 space-y-2">
+            {[1,2,3].map(i => (
+              <div key={i} className="h-4 w-full animate-pulse rounded bg-muted/40" />
+            ))}
+          </div>
+        )}
+
+        {result && (
+          <div className="mt-4">
+            <div className="mb-2 flex flex-wrap gap-3 text-xs text-muted-foreground">
+              <span className="font-mono font-semibold text-foreground">{result.symbol}</span>
+              <span>${result.price.toPrecision(5)}</span>
+              <span className={result.pct24 >= 0 ? "text-emerald-400" : "text-red-400"}>
+                {result.pct24 >= 0 ? "+" : ""}{result.pct24.toFixed(2)}%
+              </span>
+              {result.rsi != null && <span>RSI {result.rsi.toFixed(1)}</span>}
+              <span className="text-muted-foreground/60">{result.trend}</span>
+            </div>
+            <div className="whitespace-pre-wrap rounded-xl border border-card-border bg-background/50 px-4 py-3 text-sm leading-relaxed">
+              {result.analysis}
+            </div>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 // ── Analytics widget ────────────────────────────────────────────────────────
 
 const PAGE_LABELS: Record<string, string> = {
@@ -925,6 +1018,7 @@ export default function Dashboard() {
           </div>
         </section>
 
+        <AiAnalyzeWidget />
         <AnalyticsWidget />
 
         <footer className="mt-16 border-t border-card-border pt-6 text-center text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
