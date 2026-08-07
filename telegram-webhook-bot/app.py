@@ -872,6 +872,52 @@ def _fetch_daily_closes_for_crsi(symbol: str) -> list[float] | None:
     return closes
 
 
+def _count_consecutive_trend_days(closes: list[float], direction: str) -> int:
+    """Count how many consecutive daily closes moved in `direction` ('up'/'down').
+
+    Uses the last N daily candles (most-recent last). Returns 0 if data is
+    insufficient or no consecutive streak is found.
+    """
+    if not closes or len(closes) < 2:
+        return 0
+    count = 0
+    # Walk backwards from the most-recent candle (skip the current day — it
+    # may be incomplete) comparing close[i] vs close[i-1].
+    for i in range(len(closes) - 1, 0, -1):
+        if direction == "up" and closes[i] > closes[i - 1]:
+            count += 1
+        elif direction == "down" and closes[i] < closes[i - 1]:
+            count += 1
+        else:
+            break
+    return count
+
+
+def _trend_warning_line(symbol: str, recommendation: str) -> str:
+    """Return a warning string if the signal direction conflicts with the
+    multi-day daily trend, or '' if no conflict detected.
+
+    SHORT against N≥3 consecutive UP days → warn.
+    LONG  against N≥3 consecutive DOWN days → warn.
+    """
+    closes = _fetch_daily_closes_for_crsi(symbol)
+    if not closes:
+        return ""
+    if recommendation == "SHORT":
+        days = _count_consecutive_trend_days(closes, "up")
+        if days >= 3:
+            return (
+                f"⚠️ <b>Тренд вверх {days} дней подряд</b> — SHORT против тренда, риск выше обычного"
+            )
+    elif recommendation == "LONG":
+        days = _count_consecutive_trend_days(closes, "down")
+        if days >= 3:
+            return (
+                f"⚠️ <b>Тренд вниз {days} дней подряд</b> — LONG против тренда, риск выше обычного"
+            )
+    return ""
+
+
 def _calculate_rsi(closes: list[float], period: int) -> float:
     closes = np.array(closes)
     deltas = np.diff(closes)
@@ -2916,6 +2962,7 @@ def check_overheated_oversold(
                     f"\n🔗 Также растут: {', '.join(_oh_others)}"
                     if _oh_others else ""
                 )
+                _oh_trend_warn = _trend_warning_line(symbol, "SHORT")
                 body = (
                     f"⚠️ <b>ПЕРЕГРЕТА — возможен шорт</b>\n"
                     f"Монета выросла слишком быстро\n"
@@ -2927,6 +2974,7 @@ def check_overheated_oversold(
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
                     + _co_line
+                    + (f"\n{_oh_trend_warn}" if _oh_trend_warn else "")
                 )
                 delivered, _aid = send_alert_with_log(symbol, "overheated_24h", "SHORT", price, body, score)
                 if delivered:
@@ -2952,6 +3000,7 @@ def check_overheated_oversold(
                     f"\n🔗 Также падают: {', '.join(_os_others)}"
                     if _os_others else ""
                 )
+                _os_trend_warn = _trend_warning_line(symbol, "LONG")
                 body = (
                     f"💎 <b>ПЕРЕПРОДАНА — возможен лонг</b>\n"
                     f"Монета упала слишком сильно\n"
@@ -2963,6 +3012,7 @@ def check_overheated_oversold(
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
                     + _co_line_os
+                    + (f"\n{_os_trend_warn}" if _os_trend_warn else "")
                 )
                 delivered, _aid = send_alert_with_log(symbol, "oversold_24h", "LONG", price, body, score)
                 if delivered:
@@ -4155,6 +4205,7 @@ def run_checks():
                 with state_lock:
                     atr = state["atr_4h"].get(sym)
                 sl_tp = _format_sl_tp(side_for_score, b["price"], atr)
+                _trend_warn = _trend_warning_line(sym, rec_label)
                 body_lines = header + [
                     "",
                     f"<b>Сработавшие сигналы ({len(b['lines'])}):</b>",
@@ -4166,6 +4217,8 @@ def run_checks():
                 ]
                 if sl_tp:
                     body_lines.append(sl_tp)
+                if _trend_warn:
+                    body_lines.append(_trend_warn)
                 body = "\n".join(body_lines)
                 delivered, _aid = send_alert_with_log(
                     sym, "confluence", rec_label, b["price"], body, score
