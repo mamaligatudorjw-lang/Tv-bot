@@ -1674,6 +1674,29 @@ def _trend_warning_line(symbol: str, recommendation: str) -> str:
     return ""
 
 
+def _bear_downtrend_blocks_long(symbol: str) -> tuple[bool, int]:
+    """Return (should_block, down_days) when a LONG signal should be suppressed.
+
+    Logic: perversold RSI in a BEAR market with 3+ consecutive down days is
+    NOT a bounce — it is a falling knife.  Block the LONG and open a shadow
+    demo position so we can track the missed opportunity.
+
+    Conditions (all must be true):
+      1. Market regime == "BEAR"    (BTC below its 4h EMA-200)
+      2. Symbol has ≥ 3 consecutive daily closes moving down
+
+    Fails OPEN (returns False) on any data error so real signals are never
+    silently dropped due to a candle-fetch timeout.
+    """
+    if get_market_regime() != "BEAR":
+        return False, 0
+    closes = _fetch_daily_closes_for_crsi(symbol)
+    if not closes:
+        return False, 0
+    days = _count_consecutive_trend_days(closes, "down")
+    return (days >= 3, days)
+
+
 def _calculate_rsi(closes: list[float], period: int) -> float:
     closes = np.array(closes)
     deltas = np.diff(closes)
@@ -4026,7 +4049,7 @@ def check_overheated_oversold(
     """
     if not tickers:
         return 0, 0, 0, 0
-    sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh = 0, 0, 0, 0
+    sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked = 0, 0, 0, 0, 0
     now = time.time()
 
     # ── Pre-scan: collect co-movers for "also rising / also falling" note ───
@@ -4190,6 +4213,23 @@ def check_overheated_oversold(
                     sent_oh += 1
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
+            # Bear-downtrend block: oversold RSI in BEAR market + 3+ down days = falling knife
+            _block_bd_os, _bd_os_days = _bear_downtrend_blocks_long(symbol)
+            if _block_bd_os:
+                logger.info(
+                    "SUPPRESSED oversold LONG %s — bear downtrend %dd + BEAR market",
+                    symbol, _bd_os_days,
+                )
+                bear_long_blocked += 1
+                _dsl_bd, _dtp_bd = _compute_demo_sl_tp("LONG", price, atr)
+                if _dsl_bd and _dtp_bd:
+                    _demo_open_position(
+                        symbol, "LONG", price, _dsl_bd, _dtp_bd,
+                        is_shadow=True,
+                        shadow_reason=f"bear_downtrend_{_bd_os_days}d",
+                        alert_type="oversold_24h",
+                    )
+                continue
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
@@ -4257,7 +4297,7 @@ def check_overheated_oversold(
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
-    return sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh
+    return sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked
 
 
 def check_breakdown_short(
@@ -5114,11 +5154,14 @@ def run_checks():
                 summary["momentum_ema_blocked"] = mom_ema_blocked
 
                 # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
-                oh_n, os_n, oh_ema_blocked, oh_reversal_blocked = check_overheated_oversold(tickers, rsi_map)
+                oh_n, os_n, oh_ema_blocked, oh_reversal_blocked, oh_bear_blocked = check_overheated_oversold(tickers, rsi_map)
                 summary["overheated_reversal_blocked"] = oh_reversal_blocked
                 summary["overheated_alerts"] = oh_n
                 summary["overheated_ema_blocked"] = oh_ema_blocked
                 summary["oversold_alerts"] = os_n
+                summary["bear_downtrend_long_blocked"] = (
+                    summary.get("bear_downtrend_long_blocked", 0) + oh_bear_blocked
+                )
 
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
                 # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
@@ -5341,6 +5384,32 @@ def run_checks():
                     )
                     summary["confluence_ema_blocked"] += 1
                     continue
+
+                # Bear downtrend filter for LONG signals.
+                # Oversold RSI in a BEAR market with 3+ consecutive down days is
+                # NOT a bounce — it is a falling knife.  Block LONG and shadow-track.
+                if rec_label == "LONG":
+                    _block_bd, _bd_days = _bear_downtrend_blocks_long(sym)
+                    if _block_bd:
+                        logger.info(
+                            "Confluence LONG suppressed by bear-downtrend filter: "
+                            "%s downtrend=%dd BEAR market", sym, _bd_days,
+                        )
+                        summary["confluence_bear_long_blocked"] = (
+                            summary.get("confluence_bear_long_blocked", 0) + 1
+                        )
+                        if b["price"]:
+                            with state_lock:
+                                _atr_bd = state["atr_4h"].get(sym)
+                            _dsl, _dtp = _compute_demo_sl_tp("LONG", b["price"], _atr_bd)
+                            if _dsl and _dtp:
+                                _demo_open_position(
+                                    sym, "LONG", b["price"], _dsl, _dtp,
+                                    is_shadow=True,
+                                    shadow_reason=f"bear_downtrend_{_bd_days}d",
+                                    alert_type="confluence",
+                                )
+                        continue
 
                 # BTC direction filter — alts follow BTC short-term.
                 # RSI of BTC (1h) tells us if BTC is in an up or down swing right now.
