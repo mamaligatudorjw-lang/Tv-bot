@@ -2857,6 +2857,8 @@ def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
             ],
             [
                 {"text": "🤖 Спросить AI", "callback_data": f"ai_ask:{alert_id}"},
+                {"text": "📈 Лонг", "callback_data": f"ap:{symbol}:LONG"},
+                {"text": "📉 Шорт", "callback_data": f"ap:{symbol}:SHORT"},
             ],
             [
                 {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
@@ -3170,6 +3172,42 @@ def handle_callback_query(cb: dict) -> None:
                 f"Просто напиши сообщение — отвечу через несколько секунд."
             )
             logger.info("ai_ask pending set for chat_id=%s symbol=%s", chat_id, sym)
+        elif kind == "ap":
+            # "ap:SYMBOL:LONG" or "ap:SYMBOL:SHORT" — add personal position via button
+            sym, _, direction = rest.partition(":")
+            if sym and direction in ("LONG", "SHORT"):
+                now = int(time.time())
+                try:
+                    with _db_lock:
+                        db = _get_db()
+                        existing = db.execute(
+                            "SELECT id FROM user_positions WHERE symbol=? AND status='open'",
+                            (sym,)
+                        ).fetchone()
+                        if existing:
+                            db.execute(
+                                "UPDATE user_positions SET direction=?, ts_added=?, last_alerted=0 WHERE id=?",
+                                (direction, now, existing[0]),
+                            )
+                            action = "обновлена"
+                        else:
+                            db.execute(
+                                "INSERT INTO user_positions (symbol, direction, note, ts_added) VALUES (?,?,NULL,?)",
+                                (sym, direction, now),
+                            )
+                            action = "добавлена"
+                        db.commit()
+                    dir_emoji = "📈" if direction == "LONG" else "📉"
+                    _telegram_answer_callback(
+                        cb_id,
+                        f"{dir_emoji} {sym} {direction} {action} в трекер",
+                    )
+                    logger.info("UserPos via button: %s %s (%s)", sym, direction, action)
+                except Exception as db_exc:
+                    logger.error("ap callback DB error: %s", db_exc)
+                    _telegram_answer_callback(cb_id, "❌ Ошибка базы данных")
+            else:
+                _telegram_answer_callback(cb_id)
         elif kind == "noop":
             _telegram_answer_callback(cb_id)
         else:
