@@ -2918,10 +2918,10 @@ def _get_signal_edge_label(alert_type: str, recommendation: str) -> str | None:
 
     if side == "sell":
         action = "Держите SHORT"
-        move_str = f"монета падает в среднем на <b>{best_avg * 100:.1f}%</b>"
+        move_str = f"после сигнала монета падала в среднем на <b>{best_avg * 100:.1f}%</b>"
     else:
         action = "Держите LONG"
-        move_str = f"монета растёт в среднем на <b>+{best_avg * 100:.1f}%</b>"
+        move_str = f"после сигнала монета росла в среднем на <b>+{best_avg * 100:.1f}%</b>"
     return (
         f"\n\n{badge}\n"
         f"📊 По статистике 30 дней: {action} — "
