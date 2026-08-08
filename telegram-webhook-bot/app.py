@@ -1217,6 +1217,9 @@ def _poll_telegram_commands() -> None:
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
         "/demo":     handle_demo_command,
+        "/addpos":   handle_addpos_command,
+        "/mypos":    handle_mypos_command,
+        "/closepos": handle_closepos_command,
     }
     offset: int | None = None
     logger.info("Telegram command polling started")
@@ -1312,7 +1315,7 @@ def _poll_telegram_commands() -> None:
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
                         # Commands that take args receive the full raw text;
                         # the rest are called with just chat_id (backwards-compat).
-                        takes_args = cmd in ("/trade", "/analyze", "/ai")
+                        takes_args = cmd in ("/trade", "/analyze", "/ai", "/addpos", "/closepos")
                         def _run(h=handler, cid=chat_id, c=cmd, rt=raw_text, ta=takes_args):
                             try:
                                 if ta:
@@ -2301,6 +2304,24 @@ def _get_db() -> sqlite3.Connection:
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
             "ON demo_positions(status, is_shadow)"
+        )
+        # Personal positions tracker — user registers their own open positions;
+        # bot monitors and sends confirmed reversal alerts.
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_positions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol       TEXT    NOT NULL,
+                direction    TEXT    NOT NULL,  -- 'LONG' or 'SHORT'
+                note         TEXT,
+                ts_added     INTEGER NOT NULL,
+                ts_closed    INTEGER,
+                status       TEXT    NOT NULL DEFAULT 'open',
+                last_alerted INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_userpos_status "
+            "ON user_positions(status)"
         )
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
@@ -4999,6 +5020,311 @@ def check_listing_peak_short(
     return sent
 
 
+# ---------------------------------------------------------------------------
+# Personal position tracker — monitor user's own open positions for reversals
+# ---------------------------------------------------------------------------
+
+_USERPOS_REVERSAL_COOLDOWN = 6 * 3600   # 6h between alerts per position
+_USERPOS_RSI_PERIOD = 14
+
+
+def _calc_rsi_simple(closes: list[float], period: int = 14) -> float | None:
+    if len(closes) < period + 2:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0.0))
+        losses.append(max(-d, 0.0))
+    ag = sum(gains[:period]) / period
+    al = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        ag = (ag * (period - 1) + gains[i]) / period
+        al = (al * (period - 1) + losses[i]) / period
+    return 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+
+
+def check_user_position_reversals() -> None:
+    """Check all open user positions for confirmed reversal signals.
+
+    Confirmation requires at least 2 of 3 indicators to agree before alerting.
+    This prevents false positives like the one we saw with TUTUSDT.
+
+    SHORT position reversal (go LONG):
+      1. RSI (1h) has climbed: recent low was ≤ 38, current ≥ 45
+      2. ≥ 2 consecutive green 1h candles
+      3. Price crossed above 1h EMA-20
+
+    LONG position reversal (go SHORT):
+      1. RSI (1h) has dropped: recent high was ≥ 62, current ≤ 55
+      2. ≥ 2 consecutive red 1h candles
+      3. Price crossed below 1h EMA-20
+    """
+    try:
+        db = _get_db()
+        rows = db.execute(
+            "SELECT id, symbol, direction, note, last_alerted "
+            "FROM user_positions WHERE status='open'"
+        ).fetchall()
+    except Exception as e:
+        logger.error("check_user_position_reversals: DB error: %s", e)
+        return
+
+    if not rows:
+        return
+
+    now = int(time.time())
+    GATE_BASE = "https://fx-api.gateio.ws/api/v4"
+
+    for pos_id, symbol, direction, note, last_alerted in rows:
+        # Respect cooldown
+        if now - last_alerted < _USERPOS_REVERSAL_COOLDOWN:
+            continue
+
+        gate_sym = symbol[:-4] + "_USDT" if symbol.endswith("USDT") else symbol + "_USDT"
+        try:
+            r = requests.get(
+                f"{GATE_BASE}/futures/usdt/candlesticks",
+                params={"contract": gate_sym, "interval": "1h", "limit": 30},
+                timeout=8,
+            )
+            candles = r.json()
+            if not isinstance(candles, list) or len(candles) < 22:
+                continue
+            candles = candles[:-1]   # drop live candle
+        except Exception:
+            continue
+
+        closes = [float(c["c"]) for c in candles]
+        opens  = [float(c["o"]) for c in candles]
+        price  = closes[-1]
+
+        # ── Indicator 1: RSI trend ────────────────────────────────────────
+        rsi_now  = _calc_rsi_simple(closes)
+        rsi_prev = _calc_rsi_simple(closes[:-3])   # 3h ago
+        if rsi_now is None or rsi_prev is None:
+            continue
+
+        if direction == "SHORT":
+            # SHORT reversal: RSI was oversold/low, now climbing
+            rsi_confirms = rsi_prev <= 38 and rsi_now >= 45
+        else:
+            # LONG reversal: RSI was overbought/high, now falling
+            rsi_confirms = rsi_prev >= 62 and rsi_now <= 55
+
+        # ── Indicator 2: consecutive candles ─────────────────────────────
+        consec_count = 0
+        for i in range(-1, -5, -1):
+            if direction == "SHORT":
+                if closes[i] > opens[i]:   # green
+                    consec_count += 1
+                else:
+                    break
+            else:
+                if closes[i] < opens[i]:   # red
+                    consec_count += 1
+                else:
+                    break
+        candle_confirms = consec_count >= 2
+
+        # ── Indicator 3: price vs EMA-20 (1h) ───────────────────────────
+        ema20 = closes[-20]
+        multiplier = 2.0 / (20 + 1)
+        for c in closes[-19:]:
+            ema20 = c * multiplier + ema20 * (1 - multiplier)
+        if direction == "SHORT":
+            ema_confirms = price > ema20    # price crossed above EMA
+        else:
+            ema_confirms = price < ema20    # price crossed below EMA
+
+        confirmed_count = sum([rsi_confirms, candle_confirms, ema_confirms])
+        if confirmed_count < 2:
+            continue
+
+        # ── Build alert ──────────────────────────────────────────────────
+        reversal_dir   = "ЛОНГ" if direction == "SHORT" else "ШОРТ"
+        reversal_emoji = "📈" if direction == "SHORT" else "📉"
+        signals_text = []
+        if rsi_confirms:
+            if direction == "SHORT":
+                signals_text.append(f"📊 RSI вырос: {rsi_prev:.0f} → {rsi_now:.0f} (выход из зоны перепроданности)")
+            else:
+                signals_text.append(f"📊 RSI упал: {rsi_prev:.0f} → {rsi_now:.0f} (выход из зоны перекупленности)")
+        if candle_confirms:
+            ctype = "зелёных" if direction == "SHORT" else "красных"
+            signals_text.append(f"🕯 {consec_count} {ctype} свечи подряд на 1ч")
+        if ema_confirms:
+            cross = "пересёк EMA-20 вверх" if direction == "SHORT" else "пересёк EMA-20 вниз"
+            signals_text.append(f"📉 Цена {cross} (${ema20:.6g})")
+
+        conf_label = "✅✅✅ Тройное подтверждение" if confirmed_count == 3 else "✅✅ Двойное подтверждение"
+        note_line  = f"\n📝 Ваша заметка: <i>{html.escape(note)}</i>" if note else ""
+
+        body = (
+            f"{reversal_emoji} <b>Коррекция по вашей позиции</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"<code>{symbol}</code> · Ваш {direction} → сигнал <b>{reversal_dir}</b>\n"
+            f"💰 Цена: ${price:,.6g}\n"
+            f"{conf_label}\n"
+            f"{chr(10).join(signals_text)}"
+            f"{note_line}\n\n"
+            f"⚠️ Не финансовый совет — примите решение самостоятельно."
+        )
+        ok = send_telegram(body)
+        if ok:
+            try:
+                db.execute(
+                    "UPDATE user_positions SET last_alerted=? WHERE id=?",
+                    (now, pos_id),
+                )
+                db.commit()
+            except Exception as e:
+                logger.error("check_user_position_reversals: update error: %s", e)
+            logger.info(
+                "UserPos reversal alert sent: %s %s → %s (conf=%d)",
+                symbol, direction, reversal_dir, confirmed_count,
+            )
+
+
+# ---------------------------------------------------------------------------
+# /addpos  /mypos  /closepos — personal position tracker commands
+# ---------------------------------------------------------------------------
+
+def handle_addpos_command(chat_id: int, text: str) -> None:
+    """Register a personal position for reversal monitoring.
+    Usage: /addpos SYMBOL DIRECTION [note]
+    Example: /addpos BTCUSDT SHORT "вошёл по сигналу 6ч стрик"
+    """
+    parts = text.strip().split(None, 3)
+    if len(parts) < 3:
+        _telegram_send(chat_id,
+            "📍 <b>Трекер личных позиций</b>\n\n"
+            "Формат: <code>/addpos SYMBOL DIRECTION</code>\n"
+            "Пример: <code>/addpos BTCUSDT SHORT</code>\n"
+            "С заметкой: <code>/addpos ETHUSDT LONG вошёл по стрику</code>\n\n"
+            "Бот будет присылать подтверждённые сигналы коррекции\n"
+            "(минимум 2 из 3 индикаторов должны совпасть)."
+        )
+        return
+
+    symbol = parts[1].upper().strip()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+    direction = parts[2].upper().strip()
+    if direction in ("LONG", "ЛОНГ", "BUY", "L"):
+        direction = "LONG"
+    elif direction in ("SHORT", "ШОРТ", "SELL", "S"):
+        direction = "SHORT"
+    else:
+        _telegram_send(chat_id, "❌ Направление: <code>LONG</code> или <code>SHORT</code>")
+        return
+
+    note = parts[3].strip('"\'') if len(parts) > 3 else None
+    now  = int(time.time())
+
+    try:
+        db = _get_db()
+        # Check if already tracking this symbol
+        existing = db.execute(
+            "SELECT id FROM user_positions WHERE symbol=? AND status='open'",
+            (symbol,)
+        ).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE user_positions SET direction=?, note=?, ts_added=?, last_alerted=0 WHERE id=?",
+                (direction, note, now, existing[0]),
+            )
+            action = "обновлена"
+        else:
+            db.execute(
+                "INSERT INTO user_positions (symbol, direction, note, ts_added) VALUES (?,?,?,?)",
+                (symbol, direction, note, now),
+            )
+            action = "добавлена"
+        db.commit()
+    except Exception as e:
+        logger.error("handle_addpos_command: %s", e)
+        _telegram_send(chat_id, "❌ Ошибка базы данных.")
+        return
+
+    dir_emoji = "📈" if direction == "LONG" else "📉"
+    note_line = f"\n📝 Заметка: <i>{html.escape(note)}</i>" if note else ""
+    _telegram_send(chat_id,
+        f"✅ Позиция {action}!\n\n"
+        f"{dir_emoji} <b>{symbol}</b> {direction}{note_line}\n\n"
+        f"Бот будет мониторить и пришлёт сигнал когда появится подтверждённая коррекция."
+    )
+
+
+def handle_mypos_command(chat_id: int) -> None:
+    """List all open personal positions."""
+    try:
+        db  = _get_db()
+        rows = db.execute(
+            "SELECT symbol, direction, note, ts_added, last_alerted "
+            "FROM user_positions WHERE status='open' ORDER BY ts_added DESC"
+        ).fetchall()
+    except Exception as e:
+        logger.error("handle_mypos_command: %s", e)
+        _telegram_send(chat_id, "❌ Ошибка базы данных.")
+        return
+
+    if not rows:
+        _telegram_send(chat_id,
+            "📭 Нет открытых позиций.\n\n"
+            "Добавить: <code>/addpos BTCUSDT SHORT</code>"
+        )
+        return
+
+    now   = int(time.time())
+    lines = ["📍 <b>Ваши открытые позиции:</b>\n"]
+    for symbol, direction, note, ts_added, last_alerted in rows:
+        dir_emoji = "📈" if direction == "LONG" else "📉"
+        age_h  = (now - ts_added) // 3600
+        note_s = f"  <i>{html.escape(note)}</i>" if note else ""
+        alerted_s = ""
+        if last_alerted:
+            h = (now - last_alerted) // 3600
+            alerted_s = f"  · последний алерт {h}ч назад"
+        lines.append(f"{dir_emoji} <code>{symbol}</code> {direction} · {age_h}ч назад{note_s}{alerted_s}")
+
+    lines.append(f"\nЗакрыть: <code>/closepos BTCUSDT</code>")
+    _telegram_send(chat_id, "\n".join(lines))
+
+
+def handle_closepos_command(chat_id: int, text: str) -> None:
+    """Close (stop tracking) a personal position.
+    Usage: /closepos SYMBOL
+    """
+    parts = text.strip().split()
+    if len(parts) < 2:
+        _telegram_send(chat_id, "Формат: <code>/closepos BTCUSDT</code>")
+        return
+
+    symbol = parts[1].upper().strip()
+    if not symbol.endswith("USDT"):
+        symbol += "USDT"
+
+    try:
+        db  = _get_db()
+        cur = db.execute(
+            "UPDATE user_positions SET status='closed', ts_closed=? "
+            "WHERE symbol=? AND status='open'",
+            (int(time.time()), symbol),
+        )
+        db.commit()
+        affected = cur.rowcount
+    except Exception as e:
+        logger.error("handle_closepos_command: %s", e)
+        _telegram_send(chat_id, "❌ Ошибка базы данных.")
+        return
+
+    if affected:
+        _telegram_send(chat_id, f"✅ Позиция <code>{symbol}</code> закрыта и удалена из мониторинга.")
+    else:
+        _telegram_send(chat_id, f"❌ Открытой позиции по <code>{symbol}</code> не найдено.\n\nСписок: /mypos")
+
+
 # NOTE: `check_24h_pumps` was removed — it was a pure "WATCH" alert (no
 # directional bias), so the LONG/SHORT-only filter in `send_alert_with_log`
 # would have suppressed every fire. The same coins now surface through
@@ -5164,6 +5490,9 @@ def run_checks():
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
                 summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs)
+
+                # 6k. Personal position tracker — check user's own open positions
+                check_user_position_reversals()
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
