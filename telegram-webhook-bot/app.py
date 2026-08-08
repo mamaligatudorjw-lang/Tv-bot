@@ -4104,50 +4104,18 @@ def check_overheated_oversold(
             atr = state["atr_4h"].get(symbol)
 
         if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
-            # B. EMA-200 trend filter: a coin that is overheated AND still
-            #    above EMA-200 is in a strong uptrend — fading it with a
-            #    short has historically low edge. Skip if in uptrend.
+            # Momentum LONG: coin pumped hard with high RSI → ride the momentum.
+            # Backtest shows 63% of overheated events continue rising in next 12h.
+            # Require price ABOVE EMA-200 (strong uptrend confirmation).
             with state_lock:
                 ema_oh = state["ema200_4h"].get(symbol)
-            if ema_oh is not None and price > ema_oh:
+            if ema_oh is not None and price < ema_oh:
                 logger.debug(
-                    "Overheated short suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
+                    "Overheated LONG suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
                     symbol, price, ema_oh,
                 )
                 ema_blocked_oh += 1
                 continue
-
-            # Multi-day trend filter: if the coin was already rising strongly
-            # YESTERDAY, today's surge is a trend continuation, not a reversal.
-            # Example: HEIUSDT +48.9% on day 1 → bot shorted. Wrong.
-            # Day 2 prior_day_pct = +48.9% → SHORT suppressed.
-            with state_lock:
-                prior_pct = state["prior_day_pct"].get(symbol)
-            if prior_pct is not None and prior_pct >= PRIOR_TREND_BLOCK_PCT:
-                logger.debug(
-                    "Overheated short suppressed by multi-day trend filter: "
-                    "%s prior_day=+%.1f%% >= %.1f%%",
-                    symbol, prior_pct, PRIOR_TREND_BLOCK_PCT,
-                )
-                ema_blocked_oh += 1   # reuse the same counter for summary
-                continue
-
-            # Reversal confirmation: price must have pulled back ≥ 1.5% from
-            # its 24h high before we short. Prevents shorting a rising coin.
-            try:
-                high_24h = float(t["highPrice"])
-                if high_24h > 0:
-                    pullback_pct = (high_24h - price) / high_24h * 100.0
-                    if pullback_pct < SHORT_REVERSAL_CONFIRM_PCT:
-                        logger.debug(
-                            "Overheated short suppressed by reversal filter: "
-                            "%s price=%.6g high=%.6g pullback=%.2f%%",
-                            symbol, price, high_24h, pullback_pct,
-                        )
-                        reversal_blocked_oh += 1
-                        continue
-            except (ValueError, KeyError):
-                pass
 
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
@@ -4155,10 +4123,10 @@ def check_overheated_oversold(
             oh_cooldown = OVERHEATED_COOLDOWN_BY_REGIME.get(regime, OVERHEATED_COOLDOWN)
             if now - last >= oh_cooldown:
                 score = compute_signal_score(
-                    "overheated_24h", "sell",
+                    "overheated_24h", "buy",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
-                sl_tp = _format_sl_tp("sell", price, atr)
+                sl_tp = _format_sl_tp("buy", price, atr)
                 # Co-movers: up to 3 other coins also in the overheated zone
                 _oh_others = [
                     f"<code>{s}</code> +{p:.1f}%"
@@ -4168,10 +4136,10 @@ def check_overheated_oversold(
                     f"\n🔗 Также растут: {', '.join(_oh_others)}"
                     if _oh_others else ""
                 )
-                _oh_trend_warn = _trend_warning_line(symbol, "SHORT")
+                _oh_trend_warn = _trend_warning_line(symbol, "LONG")
                 body = (
-                    f"⚠️ <b>ПЕРЕГРЕТА — возможен шорт</b>\n"
-                    f"Монета выросла слишком быстро\n"
+                    f"🚀 <b>ИМПУЛЬС ВВЕРХ — продолжение роста</b>\n"
+                    f"Монета в сильном восходящем импульсе\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
                     f"📈 24ч: <b>+{pct24:.1f}%</b> (порог <b>+{oh_threshold:.1f}%</b>)\n"
@@ -4184,16 +4152,16 @@ def check_overheated_oversold(
                 )
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_oh, _ai_note_oh, _ai_hold_oh = _ai_veto_confluence(
-                    symbol, "SHORT", rsi, pct24, None
+                    symbol, "LONG", rsi, pct24, None
                 )
                 if not _ai_ok_oh:
                     logger.info(
                         "SUPPRESSED overheated %s — ИИ: %s", symbol, _ai_note_oh,
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl and _dtp:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl, _dtp,
+                            symbol, "LONG", price, _dsl, _dtp,
                             is_shadow=True,
                             shadow_reason=f"ai_veto: {_ai_note_oh}",
                             alert_type="overheated_24h",
@@ -4211,7 +4179,7 @@ def check_overheated_oversold(
                 if _ai_note_oh:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_oh)}</i>"
                 delivered, _aid = send_alert_with_log(
-                    symbol, "overheated_24h", "SHORT", price, body, score,
+                    symbol, "overheated_24h", "LONG", price, body, score,
                     rsi=rsi, pct24=pct24,
                 )
                 if delivered:
@@ -4219,40 +4187,26 @@ def check_overheated_oversold(
                         state["last_overheated_alerted"][symbol] = now
                     sent_oh += 1
                     # Track real demo position so we can measure win-rate later
-                    _dsl_oh, _dtp_oh = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl_oh, _dtp_oh = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_oh and _dtp_oh:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl_oh, _dtp_oh,
+                            symbol, "LONG", price, _dsl_oh, _dtp_oh,
                             is_shadow=False,
                             alert_type="overheated_24h",
                         )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
-            # Bear-downtrend block: oversold RSI in BEAR market + 3+ down days = falling knife
-            _block_bd_os, _bd_os_days = _bear_downtrend_blocks_long(symbol)
-            if _block_bd_os:
-                logger.info(
-                    "SUPPRESSED oversold LONG %s — bear downtrend %dd + BEAR market",
-                    symbol, _bd_os_days,
-                )
-                bear_long_blocked += 1
-                _dsl_bd, _dtp_bd = _compute_demo_sl_tp("LONG", price, atr)
-                if _dsl_bd and _dtp_bd:
-                    _demo_open_position(
-                        symbol, "LONG", price, _dsl_bd, _dtp_bd,
-                        is_shadow=True,
-                        shadow_reason=f"bear_downtrend_{_bd_os_days}d",
-                        alert_type="oversold_24h",
-                    )
-                continue
+            # Momentum SHORT: coin dumped hard with low RSI → ride the momentum down.
+            # Symmetrical to overheated LONG: by backtest logic, dumped coins
+            # continue falling more often than bouncing immediately.
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
                 score = compute_signal_score(
-                    "oversold_24h", "buy",
+                    "oversold_24h", "sell",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
-                sl_tp = _format_sl_tp("buy", price, atr)
+                sl_tp = _format_sl_tp("sell", price, atr)
                 # Co-movers: up to 3 other coins also in the oversold zone
                 _os_others = [
                     f"<code>{s}</code> {p:.1f}%"
@@ -4262,10 +4216,10 @@ def check_overheated_oversold(
                     f"\n🔗 Также падают: {', '.join(_os_others)}"
                     if _os_others else ""
                 )
-                _os_trend_warn = _trend_warning_line(symbol, "LONG")
+                _os_trend_warn = _trend_warning_line(symbol, "SHORT")
                 body = (
-                    f"💎 <b>ПЕРЕПРОДАНА — возможен лонг</b>\n"
-                    f"Монета упала слишком сильно\n"
+                    f"📉 <b>ИМПУЛЬС ВНИЗ — продолжение падения</b>\n"
+                    f"Монета в сильном нисходящем импульсе\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
@@ -4278,16 +4232,16 @@ def check_overheated_oversold(
                 )
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
-                    symbol, "LONG", rsi, pct24, None
+                    symbol, "SHORT", rsi, pct24, None
                 )
                 if not _ai_ok_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl, _dtp = _compute_demo_sl_tp("SHORT", price, atr)
                     if _dsl and _dtp:
                         _demo_open_position(
-                            symbol, "LONG", price, _dsl, _dtp,
+                            symbol, "SHORT", price, _dsl, _dtp,
                             is_shadow=True,
                             shadow_reason=f"ai_veto: {_ai_note_os}",
                             alert_type="oversold_24h",
@@ -4305,7 +4259,7 @@ def check_overheated_oversold(
                 if _ai_note_os:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
                 delivered, _aid = send_alert_with_log(
-                    symbol, "oversold_24h", "LONG", price, body, score,
+                    symbol, "oversold_24h", "SHORT", price, body, score,
                     rsi=rsi, pct24=pct24,
                 )
                 if delivered:
@@ -4313,10 +4267,10 @@ def check_overheated_oversold(
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
                     # Track real demo position so we can measure win-rate later
-                    _dsl_os, _dtp_os = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl_os, _dtp_os = _compute_demo_sl_tp("SHORT", price, atr)
                     if _dsl_os and _dtp_os:
                         _demo_open_position(
-                            symbol, "LONG", price, _dsl_os, _dtp_os,
+                            symbol, "SHORT", price, _dsl_os, _dtp_os,
                             is_shadow=False,
                             alert_type="oversold_24h",
                         )
