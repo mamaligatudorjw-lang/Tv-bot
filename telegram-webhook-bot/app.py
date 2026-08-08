@@ -3058,6 +3058,9 @@ STREAK_1H_COOLDOWN     = 28800   # 8h cooldown per symbol (avoid re-spamming sam
 STREAK_1H_PRE_FILTER   = 3.0    # min |pct24| to even fetch 1h candles (saves API calls)
 STREAK_1H_RSI_MAX_LONG = 73.0   # RSI ceiling for LONG streak (not already overbought)
 STREAK_1H_RSI_MIN_SHORT= 27.0   # RSI floor for SHORT streak (not already oversold)
+STREAK_1H_LONG_MAX_GAIN = 15.0  # если монета уже выросла >15% за стрик — перегрета, пропустить ЛОНГ
+STREAK_1H_SHORT_MAX_LOSS= 15.0  # если монета уже упала  >15% за стрик — перепродана, пропустить SHORT
+STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_close на >0.5% — разворот, пропустить ЛОНГ
 
 # --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
 LSR_SHIFT_THRESHOLD  = 0.38    # min |lsr_new - lsr_prev| to count as a flip
@@ -3695,6 +3698,24 @@ def check_intraday_streak(
             streak_start_price = closes[-(streak_up + 1)]
             streak_gain = (closes[-1] - streak_start_price) / streak_start_price * 100
 
+            # Перегрев: монета уже слишком сильно выросла — ловить хвост поздно
+            if streak_gain > STREAK_1H_LONG_MAX_GAIN:
+                logger.debug(
+                    "Streak1h LONG %s skipped: streak_gain=%.1f%% > max %.1f%%",
+                    symbol, streak_gain, STREAK_1H_LONG_MAX_GAIN,
+                )
+                continue
+
+            # Разворот: живая цена уже ниже последней закрытой свечи → тренд кончился
+            last_close = closes[-1]
+            reversal_drop = (last_close - price) / last_close * 100
+            if reversal_drop > STREAK_1H_REVERSAL_PCT:
+                logger.info(
+                    "Streak1h LONG %s skipped: price=%.6g already %.2f%% below last_close=%.6g",
+                    symbol, price, reversal_drop, last_close,
+                )
+                continue
+
             with state_lock:
                 atr = state["atr_4h"].get(symbol)
                 ema = state["ema200_4h"].get(symbol)
@@ -3754,6 +3775,24 @@ def check_intraday_streak(
 
             streak_start_price = closes[-(streak_down + 1)]
             streak_loss = (closes[-1] - streak_start_price) / streak_start_price * 100
+
+            # Перепроданность: монета уже слишком сильно упала — ловить хвост шорта поздно
+            if abs(streak_loss) > STREAK_1H_SHORT_MAX_LOSS:
+                logger.debug(
+                    "Streak1h SHORT %s skipped: streak_loss=%.1f%% > max %.1f%%",
+                    symbol, streak_loss, STREAK_1H_SHORT_MAX_LOSS,
+                )
+                continue
+
+            # Разворот: живая цена уже выше последней закрытой свечи → тренд кончился
+            last_close_s = closes[-1]
+            reversal_pump = (price - last_close_s) / last_close_s * 100
+            if reversal_pump > STREAK_1H_REVERSAL_PCT:
+                logger.info(
+                    "Streak1h SHORT %s skipped: price=%.6g already %.2f%% above last_close=%.6g",
+                    symbol, price, reversal_pump, last_close_s,
+                )
+                continue
 
             with state_lock:
                 atr = state["atr_4h"].get(symbol)
