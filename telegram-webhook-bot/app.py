@@ -6001,7 +6001,18 @@ def run_checks():
                     f"• ⚠️ Перегрета (+20% за 24ч + RSI ≥ 70 — возможен шорт)\n"
                     f"• 💎 Перепродана (-20% за 24ч + RSI ≤ 30 — возможен лонг)\n\n"
                     f"<b>Фильтр тренда:</b> EMA-200 (4ч) — блокирует шорт выше EMA и лонг ниже EMA.\n\n"
-                    f"<b>Команды:</b> /status · /top10 · /top30 · /signal · /stats · /trade · /mytrades · /silence · /unmute"
+                    f"<b>Команды мониторинга:</b>\n"
+                    f"  /status · /top10 · /top30 · /signal · /stats\n\n"
+                    f"<b>Команды торговли:</b>\n"
+                    f"  /trade · /mytrades · /positions · /analyze · /ai\n\n"
+                    f"<b>Демо P&L:</b>\n"
+                    f"  /demo\n\n"
+                    f"<b>Личный трекер позиций:</b>\n"
+                    f"  /addpos SYMBOL LONG|SHORT — добавить позицию\n"
+                    f"  /mypos — список открытых позиций\n"
+                    f"  /closepos SYMBOL — закрыть позицию\n\n"
+                    f"<b>Настройки:</b>\n"
+                    f"  /silence · /unmute"
                 )
 
     except Exception as e:
@@ -6553,7 +6564,18 @@ def handle_status_command(chat_id: int) -> None:
         f"  RSI перепроданность: ≤ {RSI_OVERSOLD}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
         f"  EMA-200 (4ч): тренд-фильтр для шорт/лонг\n"
         f"  Интервал проверки: 5 мин\n\n"
-        f"<b>Команды:</b> /status · /top10 · /top30 · /signal · /stats · /trade · /mytrades · /silence · /unmute"
+        f"<b>Команды мониторинга:</b>\n"
+        f"  /status · /top10 · /top30 · /signal · /stats\n\n"
+        f"<b>Команды торговли:</b>\n"
+        f"  /trade · /mytrades · /positions · /analyze · /ai\n\n"
+        f"<b>Демо P&L:</b>\n"
+        f"  /demo\n\n"
+        f"<b>Личный трекер позиций:</b>\n"
+        f"  /addpos SYMBOL LONG|SHORT — добавить позицию\n"
+        f"  /mypos — список открытых позиций\n"
+        f"  /closepos SYMBOL — закрыть позицию\n\n"
+        f"<b>Настройки:</b>\n"
+        f"  /silence · /unmute"
     )
     _telegram_send(chat_id, msg)
 
