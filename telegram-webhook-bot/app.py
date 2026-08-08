@@ -318,6 +318,33 @@ MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (
 # factor so the user sees ROI at their preferred leverage, not raw price move.
 DISPLAY_LEVERAGE = 10
 
+# ---------------------------------------------------------------------------
+# Funding Rate scoring thresholds (№1) — крутить при необходимости
+# ---------------------------------------------------------------------------
+FUNDING_SHORT_THR_1  = 0.0005   # +0.05%: лонги платят → SHORT +10 баллов
+FUNDING_SHORT_THR_2  = 0.0010   # +0.10%: лонги сильно платят → SHORT +15 баллов
+FUNDING_SHORT_PTS_1  = 10
+FUNDING_SHORT_PTS_2  = 15
+FUNDING_LONG_THR_NEG = -0.0003  # −0.03%: шорты платят → LONG +10 баллов
+FUNDING_LONG_PTS_BON = 10
+FUNDING_LONG_THR_BAD = 0.0010   # +0.10%: все в лонгах → LONG −10 баллов
+FUNDING_LONG_PTS_PEN = 10
+
+# ---------------------------------------------------------------------------
+# L/S Ratio scoring thresholds (№2) — крутить при необходимости
+# ---------------------------------------------------------------------------
+LSR_SHORT_THR = 1.8   # толпа в лонгах → SHORT +7 баллов
+LSR_LONG_THR  = 0.7   # толпа в шортах → LONG +7 баллов
+LSR_BONUS_PTS = 7
+
+# ---------------------------------------------------------------------------
+# Liquidation veto (№5)
+# ---------------------------------------------------------------------------
+LIQ_VETO_WINDOW   = 900    # 15 минут в секундах
+LIQ_VETO_VOL_FRAC = 0.003  # 0.3% от 24ч объёма = крупное событие ликвидации
+STATS_CACHE_TTL   = 60     # кэш contract_stats (сек/пара)
+LIQ_CACHE_TTL     = 300    # кэш ликвидаций (сек/пара)
+
 
 # ---------------------------------------------------------------------------
 # Telegram helpers
@@ -724,6 +751,200 @@ def _get_gate_whale_stats(symbol: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Cached contract_stats — funding rate & LSR (STATS_CACHE_TTL per pair)
+# ---------------------------------------------------------------------------
+
+_contract_stats_cache: dict[str, tuple[float, float, float]] = {}
+# symbol → (cached_at_ts, lsr, funding_rate)
+_contract_stats_lock = threading.Lock()
+
+
+def _get_contract_stats_cached(symbol: str) -> tuple[float | None, float | None]:
+    """Return (top_lsr_size, last_funding_rate) from Gate.io /contract_stats.
+
+    Results cached per symbol for STATS_CACHE_TTL seconds.
+    Returns (None, None) on any error — callers must handle gracefully.
+    """
+    now = time.time()
+    with _contract_stats_lock:
+        cached = _contract_stats_cache.get(symbol)
+        if cached and now - cached[0] < STATS_CACHE_TTL:
+            lsr_v = cached[1] if cached[1] > 0 else None
+            return (lsr_v, cached[2])
+    try:
+        resp = _gateio_get(
+            "/contract_stats",
+            params={"contract": _to_gate(symbol), "interval": "1h", "limit": 1},
+            timeout=6,
+        )
+        data = resp.json()
+        if not data:
+            return (None, None)
+        row = data[0]
+        lsr = float(row.get("top_lsr_size") or 0)
+        funding = float(row.get("last_funding_rate") or 0)
+        with _contract_stats_lock:
+            _contract_stats_cache[symbol] = (now, lsr, funding)
+        return (lsr if lsr > 0 else None, funding)
+    except Exception as exc:
+        logger.debug("_get_contract_stats_cached %s: %s", symbol, exc)
+        return (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Liquidation data cache — Gate.io /liq_orders (LIQ_CACHE_TTL per pair)
+# ---------------------------------------------------------------------------
+
+_liq_cache: dict[str, tuple[float, float, float]] = {}
+# symbol → (cached_at_ts, liq_short_usd, liq_long_usd)
+_liq_cache_lock = threading.Lock()
+
+
+def _get_gate_liq_data(symbol: str) -> tuple[float, float]:
+    """Return (liq_short_usd, liq_long_usd) for the last LIQ_VETO_WINDOW seconds.
+
+    Uses Gate.io /futures/usdt/liq_orders (public, no key needed).
+    Results cached for LIQ_CACHE_TTL seconds.
+
+    Gate.io convention:
+      size > 0 → short position force-closed (short squeeze / покупка для закрытия)
+      size < 0 → long  position force-closed (лонг-каскад / продажа для закрытия)
+
+    Returns (0.0, 0.0) on any error — callers will skip the veto gracefully.
+    """
+    now = time.time()
+    with _liq_cache_lock:
+        cached = _liq_cache.get(symbol)
+        if cached and now - cached[0] < LIQ_CACHE_TTL:
+            return (cached[1], cached[2])
+    try:
+        resp = _gateio_get(
+            "/liq_orders",
+            params={
+                "contract": _to_gate(symbol),
+                "from": int(now) - LIQ_VETO_WINDOW,
+                "limit": 1000,
+            },
+            timeout=8,
+        )
+        orders = resp.json()
+        if not isinstance(orders, list):
+            return (0.0, 0.0)
+        liq_short = 0.0
+        liq_long  = 0.0
+        for o in orders:
+            size  = float(o.get("size") or 0)
+            price = float(o.get("fill_price") or o.get("order_price") or 0)
+            if price <= 0:
+                continue
+            usd = abs(size) * price
+            if size > 0:
+                liq_short += usd   # шорты ликвидированы (сквиз)
+            else:
+                liq_long  += usd   # лонги ликвидированы (каскад)
+        with _liq_cache_lock:
+            _liq_cache[symbol] = (now, liq_short, liq_long)
+        return (liq_short, liq_long)
+    except Exception as exc:
+        logger.warning("_get_gate_liq_data %s: %s", symbol, exc)
+        return (0.0, 0.0)
+
+
+def _check_liq_veto(
+    symbol: str, side: str, vol_24h_usdt: float
+) -> tuple[bool, str]:
+    """Return (should_veto, reason) based on recent liquidation data.
+
+    SHORT + крупные ликвидации шортов → шорт-сквиз уже случился → вето
+    LONG  + крупные ликвидации лонгов → лонг-каскад активен → вето
+
+    Порог: LIQ_VETO_VOL_FRAC × vol_24h_usdt (относительный, не фиксированный $).
+    При ошибке эндпоинта → (False, "") — сигнал проходит как обычно.
+    """
+    if vol_24h_usdt <= 0:
+        return (False, "")
+    threshold = vol_24h_usdt * LIQ_VETO_VOL_FRAC
+    try:
+        liq_short, liq_long = _get_gate_liq_data(symbol)
+    except Exception:
+        return (False, "")
+    if side == "sell" and liq_short >= threshold:
+        reason = (
+            f"шорт-сквиз: ${liq_short:,.0f} шортов ликвидировано за 15м "
+            f"(порог ${threshold:,.0f})"
+        )
+        return (True, reason)
+    if side == "buy" and liq_long >= threshold:
+        reason = (
+            f"лонг-каскад: ${liq_long:,.0f} лонгов ликвидировано за 15м "
+            f"(порог ${threshold:,.0f})"
+        )
+        return (True, reason)
+    return (False, "")
+
+
+# ---------------------------------------------------------------------------
+# Funding + LSR factor: compute score delta and signal text lines
+# ---------------------------------------------------------------------------
+
+def _funding_lsr_score_and_text(
+    symbol: str,
+    side: str,
+) -> tuple[int, str, int, int]:
+    """Fetch funding rate + LSR, compute score adjustment, return factor text.
+
+    Returns (total_delta, factor_text, funding_pts, lsr_pts).
+    factor_text — \\n-разделённые строки для тела сигнала (пусто если нет факторов).
+    funding_pts и lsr_pts сохраняются в alerts для /demo разбивки.
+    При недоступности API возвращает (0, "", 0, 0) — сигнал работает без фактора.
+    """
+    lsr, funding = _get_contract_stats_cached(symbol)
+    delta       = 0
+    lines: list[str] = []
+    funding_pts = 0
+    lsr_pts     = 0
+
+    # ── Funding rate ─────────────────────────────────────────────────────
+    if funding is not None:
+        fpct = funding * 100
+        if side == "sell":   # SHORT сигнал
+            if funding >= FUNDING_SHORT_THR_2:
+                funding_pts = FUNDING_SHORT_PTS_2
+                lines.append(
+                    f"💰 Фандинг: {fpct:+.4f}% (лонги сильно платят) → +{funding_pts} баллов"
+                )
+            elif funding >= FUNDING_SHORT_THR_1:
+                funding_pts = FUNDING_SHORT_PTS_1
+                lines.append(
+                    f"💰 Фандинг: {fpct:+.4f}% (лонги платят) → +{funding_pts} баллов"
+                )
+        else:                # LONG сигнал
+            if funding >= FUNDING_LONG_THR_BAD:
+                funding_pts = -FUNDING_LONG_PTS_PEN
+                lines.append(
+                    f"💰 Фандинг: {fpct:+.4f}% (лонгов много, риск) → {funding_pts} баллов"
+                )
+            elif funding <= FUNDING_LONG_THR_NEG:
+                funding_pts = FUNDING_LONG_PTS_BON
+                lines.append(
+                    f"💰 Фандинг: {fpct:+.4f}% (шорты платят) → +{funding_pts} баллов"
+                )
+        delta += funding_pts
+
+    # ── LSR ─────────────────────────────────────────────────────────────
+    if lsr is not None and lsr > 0:
+        if side == "sell" and lsr >= LSR_SHORT_THR:
+            lsr_pts = LSR_BONUS_PTS
+            lines.append(f"👥 L/S: {lsr:.2f} (толпа в лонгах) → +{lsr_pts} баллов")
+        elif side == "buy" and lsr <= LSR_LONG_THR:
+            lsr_pts = LSR_BONUS_PTS
+            lines.append(f"👥 L/S: {lsr:.2f} (толпа в шортах) → +{lsr_pts} баллов")
+        delta += lsr_pts
+
+    return (delta, "\n".join(lines), funding_pts, lsr_pts)
+
+
 def _get_whale_alert_line(symbol: str) -> str:
     """Return a one-line summary of the largest on-chain transfer in last 24h.
 
@@ -1114,6 +1335,47 @@ def handle_demo_command(chat_id: int) -> None:
         lines += ["", f"🤖 <b>Оценка фильтра:</b> {verdict}"]
     else:
         lines += ["", "<i>Нужно ≥3 закрытых позиции для оценки фильтра.</i>"]
+
+    # ── Разбивка по факторам фандинга и LSR (данные за последние 7 дней) ──
+    try:
+        with _db_lock:
+            conn = _get_db()
+            since7d = int(time.time()) - 7 * 86400
+            _frows = conn.execute(
+                "SELECT factor_funding_pts, factor_lsr_pts, COUNT(*) as cnt "
+                "FROM alerts WHERE ts >= ? AND recommendation IN ('LONG','SHORT') "
+                "GROUP BY factor_funding_pts != 0, factor_lsr_pts != 0",
+                (since7d,)
+            ).fetchall()
+            _f_with  = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_funding_pts != 0",
+                (since7d,)
+            ).fetchone()[0]
+            _f_without = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_funding_pts = 0",
+                (since7d,)
+            ).fetchone()[0]
+            _l_with  = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_lsr_pts != 0",
+                (since7d,)
+            ).fetchone()[0]
+            _l_without = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_lsr_pts = 0",
+                (since7d,)
+            ).fetchone()[0]
+            _total7d = conn.execute(
+                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND recommendation IN ('LONG','SHORT')",
+                (since7d,)
+            ).fetchone()[0]
+        lines += [
+            "",
+            "📊 <b>Факторы за 7 дней (сигналы с/без бонуса):</b>",
+            f"  💰 Фандинг дал бонус/штраф: <b>{_f_with}</b> сигналов из {_total7d}",
+            f"  👥 LSR дал бонус:             <b>{_l_with}</b> сигналов из {_total7d}",
+            f"  ℹ️ Через неделю используй /demo чтобы сравнить winrate",
+        ]
+    except Exception as _demo_exc:
+        logger.warning("demo factor stats failed: %s", _demo_exc)
 
     def _format_open_rows(rows, label: str) -> list[str]:
         if not rows:
@@ -2196,6 +2458,8 @@ def _get_db() -> sqlite3.Connection:
             ("price_2d", "REAL"),
             ("price_3d", "REAL"),
             ("price_7d", "REAL"),
+            ("factor_funding_pts", "INTEGER DEFAULT 0"),
+            ("factor_lsr_pts",     "INTEGER DEFAULT 0"),
         ):
             try:
                 _db_conn.execute(f"ALTER TABLE alerts ADD COLUMN {_col} {_coltype}")
@@ -2962,6 +3226,8 @@ def send_alert_with_log(
     score: int | None = None,
     rsi: float | None = None,
     pct24: float | None = None,
+    factor_funding_pts: int = 0,
+    factor_lsr_pts: int = 0,
 ) -> tuple[bool, int | None]:
     """Insert into alerts (if price valid), then send Telegram with inline
     buttons referencing the new id. Honors hide-type/hide-symbol prefs,
@@ -3020,8 +3286,10 @@ def send_alert_with_log(
             conn = _get_db()
             cur = conn.execute(
                 "INSERT INTO alerts (ts, symbol, alert_type, recommendation, "
-                "price_at_alert, score) VALUES (?, ?, ?, ?, ?, ?)",
-                (int(time.time()), symbol, alert_type, recommendation, float(price), score),
+                "price_at_alert, score, factor_funding_pts, factor_lsr_pts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (int(time.time()), symbol, alert_type, recommendation,
+                 float(price), score, factor_funding_pts, factor_lsr_pts),
             )
             conn.commit()
             alert_id = int(cur.lastrowid or 0)
@@ -3439,6 +3707,11 @@ def check_intraday_streak(
                 "streak_1h", "buy",
                 rsi=rsi, above_ema=above_ema, pct24=pct24, btc_pct24=btc_pct24,
             )
+            # Funding + LSR adjustment
+            _fl_delta_sl, _fl_text_sl, _fl_fpts_sl, _fl_lpts_sl = (
+                _funding_lsr_score_and_text(symbol, "buy")
+            )
+            score = max(0, min(100, score + _fl_delta_sl))
             ema_note = "📍 Выше EMA-200 ✅" if above_ema else "📍 Ниже EMA-200 ⚠️"
             rsi_str  = f"{rsi:.1f}" if rsi is not None else "н/д"
             body = (
@@ -3455,12 +3728,15 @@ def check_intraday_streak(
             )
             if sl_tp:
                 body += f"\n{sl_tp}"
+            if _fl_text_sl:
+                body += f"\n{_fl_text_sl}"
             if whale:
                 body += f"\n{whale}"
 
             delivered, _aid = send_alert_with_log(
                 symbol, "streak_1h", "LONG", price, body, score,
                 rsi=rsi, pct24=pct24,
+                factor_funding_pts=_fl_fpts_sl, factor_lsr_pts=_fl_lpts_sl,
             )
             if delivered:
                 with state_lock:
@@ -3491,6 +3767,11 @@ def check_intraday_streak(
                 "streak_1h", "sell",
                 rsi=rsi, above_ema=(not below_ema), pct24=pct24, btc_pct24=btc_pct24,
             )
+            # Funding + LSR adjustment
+            _fl_delta_ss, _fl_text_ss, _fl_fpts_ss, _fl_lpts_ss = (
+                _funding_lsr_score_and_text(symbol, "sell")
+            )
+            score = max(0, min(100, score + _fl_delta_ss))
             ema_note = "📍 Ниже EMA-200 ✅" if below_ema else "📍 Выше EMA-200 ⚠️"
             rsi_str  = f"{rsi:.1f}" if rsi is not None else "н/д"
             body = (
@@ -3507,12 +3788,15 @@ def check_intraday_streak(
             )
             if sl_tp:
                 body += f"\n{sl_tp}"
+            if _fl_text_ss:
+                body += f"\n{_fl_text_ss}"
             if whale:
                 body += f"\n{whale}"
 
             delivered, _aid = send_alert_with_log(
                 symbol, "streak_1h", "SHORT", price, body, score,
                 rsi=rsi, pct24=pct24,
+                factor_funding_pts=_fl_fpts_ss, factor_lsr_pts=_fl_lpts_ss,
             )
             if delivered:
                 with state_lock:
@@ -4185,6 +4469,11 @@ def check_overheated_oversold(
                     "overheated_24h", "buy",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
+                # Funding + LSR adjustment
+                _fl_delta_oh, _fl_text_oh, _fl_fpts_oh, _fl_lpts_oh = (
+                    _funding_lsr_score_and_text(symbol, "buy")
+                )
+                score = max(0, min(100, score + _fl_delta_oh))
                 sl_tp = _format_sl_tp("buy", price, atr)
                 # Co-movers: up to 3 other coins also in the overheated zone
                 _oh_others = [
@@ -4209,6 +4498,22 @@ def check_overheated_oversold(
                     + _co_line
                     + (f"\n{_oh_trend_warn}" if _oh_trend_warn else "")
                 )
+                # ── Ликвидационное вето (лонг-каскад) ───────────────────────
+                _vol24_oh = float((tickers.get(symbol) or {}).get("quoteVolume", 0))
+                _liq_veto_oh, _liq_reason_oh = _check_liq_veto(symbol, "buy", _vol24_oh)
+                if _liq_veto_oh:
+                    logger.info(
+                        "SUPPRESSED overheated %s — ликвидации: %s", symbol, _liq_reason_oh
+                    )
+                    _dsl_lv, _dtp_lv = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl_lv and _dtp_lv:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_lv, _dtp_lv,
+                            is_shadow=True,
+                            shadow_reason=f"liq_veto: {_liq_reason_oh}",
+                            alert_type="overheated_24h",
+                        )
+                    continue
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_oh, _ai_note_oh, _ai_hold_oh = _ai_veto_confluence(
                     symbol, "LONG", rsi, pct24, None
@@ -4226,6 +4531,9 @@ def check_overheated_oversold(
                             alert_type="overheated_24h",
                         )
                     continue
+                # ── Факторы фандинг + LSR ────────────────────────────────────
+                if _fl_text_oh:
+                    body += f"\n{_fl_text_oh}"
                 # ── Whale stats ──────────────────────────────────────────────
                 _whale_oh = _get_gate_whale_stats(symbol)
                 _whale_alert_oh = _get_whale_alert_line(symbol)
@@ -4240,6 +4548,7 @@ def check_overheated_oversold(
                 delivered, _aid = send_alert_with_log(
                     symbol, "overheated_24h", "LONG", price, body, score,
                     rsi=rsi, pct24=pct24,
+                    factor_funding_pts=_fl_fpts_oh, factor_lsr_pts=_fl_lpts_oh,
                 )
                 if delivered:
                     with state_lock:
@@ -4265,6 +4574,11 @@ def check_overheated_oversold(
                     "oversold_24h", "sell",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
+                # Funding + LSR adjustment
+                _fl_delta_os, _fl_text_os, _fl_fpts_os, _fl_lpts_os = (
+                    _funding_lsr_score_and_text(symbol, "sell")
+                )
+                score = max(0, min(100, score + _fl_delta_os))
                 sl_tp = _format_sl_tp("sell", price, atr)
                 # Co-movers: up to 3 other coins also in the oversold zone
                 _os_others = [
@@ -4289,6 +4603,22 @@ def check_overheated_oversold(
                     + _co_line_os
                     + (f"\n{_os_trend_warn}" if _os_trend_warn else "")
                 )
+                # ── Ликвидационное вето (шорт-сквиз) ───────────────────────
+                _vol24_os = float((tickers.get(symbol) or {}).get("quoteVolume", 0))
+                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "sell", _vol24_os)
+                if _liq_veto_os:
+                    logger.info(
+                        "SUPPRESSED oversold %s — ликвидации: %s", symbol, _liq_reason_os
+                    )
+                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("SHORT", price, atr)
+                    if _dsl_lv2 and _dtp_lv2:
+                        _demo_open_position(
+                            symbol, "SHORT", price, _dsl_lv2, _dtp_lv2,
+                            is_shadow=True,
+                            shadow_reason=f"liq_veto: {_liq_reason_os}",
+                            alert_type="oversold_24h",
+                        )
+                    continue
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
                     symbol, "SHORT", rsi, pct24, None
@@ -4306,6 +4636,9 @@ def check_overheated_oversold(
                             alert_type="oversold_24h",
                         )
                     continue
+                # ── Факторы фандинг + LSR ────────────────────────────────────
+                if _fl_text_os:
+                    body += f"\n{_fl_text_os}"
                 # ── Whale stats ──────────────────────────────────────────────
                 _whale_os = _get_gate_whale_stats(symbol)
                 _whale_alert_os = _get_whale_alert_line(symbol)
@@ -4320,6 +4653,7 @@ def check_overheated_oversold(
                 delivered, _aid = send_alert_with_log(
                     symbol, "oversold_24h", "SHORT", price, body, score,
                     rsi=rsi, pct24=pct24,
+                    factor_funding_pts=_fl_fpts_os, factor_lsr_pts=_fl_lpts_os,
                 )
                 if delivered:
                     with state_lock:
@@ -5829,6 +6163,11 @@ def run_checks():
                     spike_ratio=b["spike_ratio"],
                     btc_pct24=btc_pct24,
                 )
+                # Funding + LSR adjustment
+                _fl_delta_cf, _fl_text_cf, _fl_fpts_cf, _fl_lpts_cf = (
+                    _funding_lsr_score_and_text(sym, side_for_score)
+                )
+                score = max(0, min(100, score + _fl_delta_cf))
 
                 # --- LONG quality filters ---
                 if rec_label == "LONG":
@@ -5881,6 +6220,29 @@ def run_checks():
                             )
                         continue
 
+                # ── Ликвидационное вето ──────────────────────────────────────────
+                if b["price"] is not None:
+                    _vol24_cf = float((tickers.get(sym) or {}).get("quoteVolume", 0)) if tickers else 0.0
+                    _liq_veto_cf, _liq_reason_cf = _check_liq_veto(sym, side_for_score, _vol24_cf)
+                    if _liq_veto_cf:
+                        logger.info(
+                            "SUPPRESSED confluence %s %s — ликвидации: %s",
+                            sym, rec_label, _liq_reason_cf,
+                        )
+                        summary["confluence_ema_blocked"] = (
+                            summary.get("confluence_ema_blocked", 0) + 1
+                        )
+                        with state_lock:
+                            _atr_lv = state["atr_4h"].get(sym)
+                        _dsl_lv3, _dtp_lv3 = _compute_demo_sl_tp(rec_label, b["price"], _atr_lv)
+                        if _dsl_lv3 and _dtp_lv3:
+                            _demo_open_position(
+                                sym, rec_label, b["price"], _dsl_lv3, _dtp_lv3,
+                                is_shadow=True,
+                                shadow_reason=f"liq_veto: {_liq_reason_cf}",
+                                alert_type="confluence",
+                            )
+                        continue
                 # ── AI veto ──────────────────────────────────────────────────────
                 _pct24_v: float | None = None
                 if tickers:
@@ -5939,6 +6301,8 @@ def run_checks():
                     body_lines.append(sl_tp)
                 if _trend_warn:
                     body_lines.append(_trend_warn)
+                if _fl_text_cf:
+                    body_lines.append(_fl_text_cf)
                 if _whale_cf:
                     body_lines.append(_whale_cf)
                 if _whale_alert_cf:
@@ -5953,6 +6317,7 @@ def run_checks():
                 delivered, _aid = send_alert_with_log(
                     sym, "confluence", rec_label, b["price"], body, score,
                     rsi=b.get("rsi"), pct24=_pct24_v,
+                    factor_funding_pts=_fl_fpts_cf, factor_lsr_pts=_fl_lpts_cf,
                 )
                 if not delivered:
                     # Silenced, hidden, or Telegram error — do NOT consume cooldowns
