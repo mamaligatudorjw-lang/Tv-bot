@@ -4211,6 +4211,14 @@ def check_overheated_oversold(
                     with state_lock:
                         state["last_overheated_alerted"][symbol] = now
                     sent_oh += 1
+                    # Track real demo position so we can measure win-rate later
+                    _dsl_oh, _dtp_oh = _compute_demo_sl_tp("SHORT", price, atr)
+                    if _dsl_oh and _dtp_oh:
+                        _demo_open_position(
+                            symbol, "SHORT", price, _dsl_oh, _dtp_oh,
+                            is_shadow=False,
+                            alert_type="overheated_24h",
+                        )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
             # Bear-downtrend block: oversold RSI in BEAR market + 3+ down days = falling knife
@@ -4297,6 +4305,14 @@ def check_overheated_oversold(
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
+                    # Track real demo position so we can measure win-rate later
+                    _dsl_os, _dtp_os = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl_os and _dtp_os:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_os, _dtp_os,
+                            is_shadow=False,
+                            alert_type="oversold_24h",
+                        )
     return sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked
 
 
