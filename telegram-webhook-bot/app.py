@@ -5480,8 +5480,12 @@ def check_listing_peak_short(
 # Personal position tracker — monitor user's own open positions for reversals
 # ---------------------------------------------------------------------------
 
-_USERPOS_REVERSAL_COOLDOWN = 6 * 3600   # 6h between alerts per position
-_USERPOS_RSI_PERIOD = 14
+_USERPOS_REVERSAL_COOLDOWN   = 6 * 3600   # 6h between alerts per position
+_USERPOS_RSI_PERIOD          = 14
+# Minimum total candle move to count as a real confirmation (not noise)
+REVERSAL_CANDLE_MIN_MOVE_PCT = 0.5        # % total move across consecutive candles
+# Minimum position age before a correction with < 3 confirmations is sent
+REVERSAL_MIN_AGE_SECS        = 30 * 60   # 30 minutes
 
 
 def _calc_rsi_simple(closes: list[float], period: int = 14) -> float | None:
@@ -5519,7 +5523,7 @@ def check_user_position_reversals() -> None:
     try:
         db = _get_db()
         rows = db.execute(
-            "SELECT id, symbol, direction, note, last_alerted "
+            "SELECT id, symbol, direction, note, ts_added, last_alerted "
             "FROM user_positions WHERE status='open'"
         ).fetchall()
     except Exception as e:
@@ -5532,7 +5536,7 @@ def check_user_position_reversals() -> None:
     now = int(time.time())
     GATE_BASE = "https://fx-api.gateio.ws/api/v4"
 
-    for pos_id, symbol, direction, note, last_alerted in rows:
+    for pos_id, symbol, direction, note, ts_added, last_alerted in rows:
         # Respect cooldown
         if now - last_alerted < _USERPOS_REVERSAL_COOLDOWN:
             continue
@@ -5568,7 +5572,7 @@ def check_user_position_reversals() -> None:
             # LONG reversal: RSI was overbought/high, now falling
             rsi_confirms = rsi_prev >= 62 and rsi_now <= 55
 
-        # ── Indicator 2: consecutive candles ─────────────────────────────
+        # ── Indicator 2: consecutive candles (with noise filter) ─────────
         consec_count = 0
         for i in range(-1, -5, -1):
             if direction == "SHORT":
@@ -5581,20 +5585,59 @@ def check_user_position_reversals() -> None:
                     consec_count += 1
                 else:
                     break
-        candle_confirms = consec_count >= 2
+        candle_confirms = False
+        if consec_count >= 2:
+            # FIX 2: require a minimum total price move — not just colour
+            # compare open of the first counted candle to close of the last
+            first_open  = opens[-consec_count]
+            total_move  = (
+                abs(closes[-1] - first_open) / first_open * 100
+                if first_open != 0 else 0.0
+            )
+            if total_move >= REVERSAL_CANDLE_MIN_MOVE_PCT:
+                candle_confirms = True
+            else:
+                logger.info(
+                    "check_user_position_reversals: %s %s — candle streak "
+                    "suppressed (move %.3f%% < %.1f%% threshold)",
+                    symbol, direction, total_move, REVERSAL_CANDLE_MIN_MOVE_PCT,
+                )
 
-        # ── Indicator 3: price vs EMA-20 (1h) ───────────────────────────
-        ema20 = closes[-20]
+        # ── Indicator 3: EMA-20 true crossover (1h) ─────────────────────
+        # FIX 1: detect an actual cross — prev candle on one side, current
+        # candle on the other — instead of just checking "price > EMA now".
+        # Requires len(closes) >= 22 (already guaranteed above).
         multiplier = 2.0 / (20 + 1)
-        for c in closes[-19:]:
-            ema20 = c * multiplier + ema20 * (1 - multiplier)
+        # EMA value at the previous completed candle (closes[-2])
+        ema20_prev = closes[-21]
+        for c in closes[-20:-1]:            # 19 steps → lands at closes[-2]
+            ema20_prev = c * multiplier + ema20_prev * (1 - multiplier)
+        # EMA value at the current completed candle (closes[-1])
+        ema20_curr = closes[-1] * multiplier + ema20_prev * (1 - multiplier)
+        prev_price = closes[-2]
         if direction == "SHORT":
-            ema_confirms = price > ema20    # price crossed above EMA
+            # Cross UP: prev candle closed below EMA, current closed above
+            ema_confirms = (prev_price < ema20_prev) and (price > ema20_curr)
         else:
-            ema_confirms = price < ema20    # price crossed below EMA
+            # Cross DOWN: prev candle closed above EMA, current closed below
+            ema_confirms = (prev_price > ema20_prev) and (price < ema20_curr)
+        # Use ema20_curr for display in the alert text
+        ema20 = ema20_curr
 
         confirmed_count = sum([rsi_confirms, candle_confirms, ema_confirms])
         if confirmed_count < 2:
+            continue
+
+        # ── FIX 3: timing guard — protect fresh positions from immediate noise
+        pos_age_secs = now - ts_added
+        if pos_age_secs < REVERSAL_MIN_AGE_SECS and confirmed_count < 3:
+            logger.info(
+                "check_user_position_reversals: %s %s — correction suppressed "
+                "(position only %dm old, conf=%d < 3 required within first %dm)",
+                symbol, direction,
+                pos_age_secs // 60, confirmed_count,
+                REVERSAL_MIN_AGE_SECS // 60,
+            )
             continue
 
         # ── Build alert ──────────────────────────────────────────────────
