@@ -4683,56 +4683,58 @@ def check_overheated_oversold(
                         )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
-            # Momentum SHORT: coin dumped hard with low RSI → ride the momentum down.
-            # Symmetrical to overheated LONG: by backtest logic, dumped coins
-            # continue falling more often than bouncing immediately.
+            # Bounce LONG: coin dumped hard and RSI is deeply oversold → expect a
+            # mean-reversion bounce. RSI ≤ 30 is classically a BUY signal; the big
+            # 24h drop confirms the oversold condition is extreme.
+            # Previously this was a momentum SHORT ("ride the dump") which contradicted
+            # RSI theory and the confluence LONG signal — flipped 2026-08-09.
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
                 score = compute_signal_score(
-                    "oversold_24h", "sell",
+                    "oversold_24h", "buy",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
                 # Funding + LSR adjustment
                 _fl_delta_os, _fl_text_os, _fl_fpts_os, _fl_lpts_os = (
-                    _funding_lsr_score_and_text(symbol, "sell")
+                    _funding_lsr_score_and_text(symbol, "buy")
                 )
                 score = max(0, min(100, score + _fl_delta_os))
-                sl_tp = _format_sl_tp("sell", price, atr, score=score)
+                sl_tp = _format_sl_tp("buy", price, atr, score=score)
                 # Co-movers: up to 3 other coins also in the oversold zone
                 _os_others = [
                     f"<code>{s}</code> {p:.1f}%"
                     for s, p in os_peers if s != symbol
                 ][:3]
                 _co_line_os = (
-                    f"\n🔗 Также падают: {', '.join(_os_others)}"
+                    f"\n🔗 Также перепроданы: {', '.join(_os_others)}"
                     if _os_others else ""
                 )
-                _os_trend_warn = _trend_warning_line(symbol, "SHORT")
+                _os_trend_warn = _trend_warning_line(symbol, "LONG")
                 body = (
-                    f"📉 <b>ИМПУЛЬС ВНИЗ — продолжение падения</b>\n"
-                    f"Монета в сильном нисходящем импульсе\n"
+                    f"💎 <b>ОТСКОК ОТ ДНА — перепроданность</b>\n"
+                    f"Монета сильно упала, RSI в зоне перепроданности — ожидается отскок\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
-                    f"🧊 RSI: <b>{rsi:.1f}</b>\n"
+                    f"🧊 RSI: <b>{rsi:.1f}</b> — зона перепроданности\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
                     + _co_line_os
                     + (f"\n{_os_trend_warn}" if _os_trend_warn else "")
                 )
-                # ── Ликвидационное вето (шорт-сквиз) ───────────────────────
+                # ── Ликвидационное вето ──────────────────────────────────────
                 _vol24_os = float((tickers.get(symbol) or {}).get("quoteVolume", 0))
-                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "sell", _vol24_os)
+                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "buy", _vol24_os)
                 if _liq_veto_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ликвидации: %s", symbol, _liq_reason_os
                     )
-                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_lv2 and _dtp_lv2:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl_lv2, _dtp_lv2,
+                            symbol, "LONG", price, _dsl_lv2, _dtp_lv2,
                             is_shadow=True,
                             shadow_reason=f"liq_veto: {_liq_reason_os}",
                             alert_type="oversold_24h",
@@ -4740,16 +4742,16 @@ def check_overheated_oversold(
                     continue
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
-                    symbol, "SHORT", rsi, pct24, None
+                    symbol, "LONG", rsi, pct24, None
                 )
                 if not _ai_ok_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl and _dtp:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl, _dtp,
+                            symbol, "LONG", price, _dsl, _dtp,
                             is_shadow=True,
                             shadow_reason=f"ai_veto: {_ai_note_os}",
                             alert_type="oversold_24h",
@@ -4770,7 +4772,7 @@ def check_overheated_oversold(
                 if _ai_note_os:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
                 delivered, _aid = send_alert_with_log(
-                    symbol, "oversold_24h", "SHORT", price, body, score,
+                    symbol, "oversold_24h", "LONG", price, body, score,
                     rsi=rsi, pct24=pct24,
                     factor_funding_pts=_fl_fpts_os, factor_lsr_pts=_fl_lpts_os,
                 )
@@ -4779,10 +4781,10 @@ def check_overheated_oversold(
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
                     # Track real demo position so we can measure win-rate later
-                    _dsl_os, _dtp_os = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl_os, _dtp_os = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_os and _dtp_os:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl_os, _dtp_os,
+                            symbol, "LONG", price, _dsl_os, _dtp_os,
                             is_shadow=False,
                             alert_type="oversold_24h",
                         )
