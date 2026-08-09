@@ -73,10 +73,15 @@ def _from_gate(symbol: str) -> str:
     return symbol
 
 def _gateio_get(path: str, params: dict | None = None, timeout: int = 10):
-    """GET request to Gate.io Futures REST API."""
+    """GET request to Gate.io Futures REST API.
+
+    A global semaphore (GATEIO_MAX_CONCURRENT) caps the number of in-flight
+    requests so we don't trigger Gate.io's 429 rate limit during bulk scans.
+    """
     url = f"{GATEIO_BASE}{path}"
-    resp = requests.get(url, params=params, timeout=timeout,
-                        headers={"Accept": "application/json"})
+    with _gateio_sem:
+        resp = requests.get(url, params=params, timeout=timeout,
+                            headers={"Accept": "application/json"})
     resp.raise_for_status()
     return resp
 
@@ -239,7 +244,11 @@ RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
 VOLUME_SPIKE_MULTIPLIER = 3.0
 MAX_WORKERS = 20
+GATEIO_MAX_CONCURRENT = 10   # max parallel Gate.io API requests; raise if 429s disappear
 MIN_VOLUME_USDT = 50_000
+
+# Semaphore that caps concurrent Gate.io HTTP calls across all threads.
+_gateio_sem = threading.Semaphore(GATEIO_MAX_CONCURRENT)
 
 # Momentum (15-min price change) — visually distinct alerts at each tier
 MOMENTUM_THRESHOLDS_UP = (2.0, 3.0, 5.0, 10.0)
