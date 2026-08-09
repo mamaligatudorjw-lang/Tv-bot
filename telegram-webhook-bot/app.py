@@ -3021,20 +3021,24 @@ def _format_sl_tp(side: str, entry: float | None, atr: float | None, score: int 
     if sl <= 0 or tp1 <= 0 or tp2 <= 0:
         return ""
 
-    def _roi(p: float) -> float:
-        return abs(p - entry) / entry * 100 * DISPLAY_LEVERAGE
-
-    sl_sign = "−" if s in ("buy", "long") else "+"
-    tp_sign = "+" if s in ("buy", "long") else "−"
+    def _lev_roi(p: float) -> str:
+        """Return '×2:±X% / ×5:±Y% / ×10:±Z%' for a price level."""
+        raw = abs(p - entry) / entry * 100
+        sign = "+" if p > entry else "−"
+        r2  = f"{sign}{raw * 2:.0f}%"
+        r5  = f"{sign}{raw * 5:.0f}%"
+        r10 = f"{sign}{raw * 10:.0f}%"
+        suffix = orient if orient else ""
+        return f"×2:{r2} / ×5:{r5} / ×10:{r10}{suffix}"
 
     lines = [
-        f"🛡️ SL: <code>${sl:,.6g}</code> ({sl_sign}{_roi(sl):.0f}% ROI{orient})",
-        f"🎯 TP1: <code>${tp1:,.6g}</code> ({tp_sign}{_roi(tp1):.0f}% ROI) · снять 40%",
-        f"🎯 TP2: <code>${tp2:,.6g}</code> ({tp_sign}{_roi(tp2):.0f}% ROI) · снять 40%",
+        f"🛡️ SL:  <code>${sl:,.6g}</code>  {_lev_roi(sl)}",
+        f"🎯 TP1: <code>${tp1:,.6g}</code>  {_lev_roi(tp1)}  · снять 40%",
+        f"🎯 TP2: <code>${tp2:,.6g}</code>  {_lev_roi(tp2)}  · снять 40%",
     ]
     if show_tp3 and tp3 > 0:
         lines.append(
-            f"🎯 TP3: <code>${tp3:,.6g}</code> ({tp_sign}{_roi(tp3):.0f}% ROI) · снять 20%"
+            f"🎯 TP3: <code>${tp3:,.6g}</code>  {_lev_roi(tp3)}  · снять 20%"
         )
     return "\n".join(lines)
 
