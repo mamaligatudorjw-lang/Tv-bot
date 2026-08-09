@@ -334,8 +334,11 @@ MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (
 BEAR_DOWNTREND_FILTER_ENABLED = False   # ← True чтобы включить обратно
 
 # pump_filter: блокировал LONG/SHORT во время активного памп/дамп тренда
-# По данным демо-позиций win rate теней = 57% → сигналы продолжали идти в нужную сторону
-PUMP_FILTER_ENABLED = False             # ← True чтобы включить обратно
+# Разделён на два флага — демо показало разное поведение для LONG и SHORT:
+#   SHORT + памп активен → правильно блокировать (не шортить в рост)
+#   LONG  + дамп активен → неправильно блокировать (тренд продолжения, 57% TP у теней)
+PUMP_FILTER_SHORT_ENABLED = True        # блокировать SHORT во время активного памп-тренда
+PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
 
 # --- Display leverage for ROI calculation in Telegram messages ---
 # All P&L / SL / TP percentages shown to the user are multiplied by this
@@ -6324,10 +6327,14 @@ def run_checks():
                                 pass
 
                 # ── Trend pump/dump filter ───────────────────────────────────────
-                # ОТКЛЮЧЁН: демо-позиции показали 57% win rate у теней —
-                # памп-тренды продолжались в нужную сторону. Включить: PUMP_FILTER_ENABLED = True
+                # SHORT+памп: блокировать (PUMP_FILTER_SHORT_ENABLED=True)
+                # LONG+дамп:  не блокировать (PUMP_FILTER_LONG_ENABLED=False, 57% win rate у теней)
                 _ai_note = ""
-                if PUMP_FILTER_ENABLED and b["price"] is not None:
+                _pump_filter_active = (
+                    (PUMP_FILTER_SHORT_ENABLED and rec_label == "SHORT") or
+                    (PUMP_FILTER_LONG_ENABLED  and rec_label == "LONG")
+                )
+                if _pump_filter_active and b["price"] is not None:
                     _pump_blocked, _pump_reason = _trend_pump_filter(
                         sym, rec_label, b["price"]
                     )
