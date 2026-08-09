@@ -2961,18 +2961,24 @@ def compute_signal_score(
     return max(0, min(100, int(round(score))))
 
 
-def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
-    """Return a 'Стоп / Цель' line for any signal.
+def _format_sl_tp(side: str, entry: float | None, atr: float | None, score: int = 0) -> str:
+    """Return SL + 3-level TP lines for any signal.
 
-    Priority:
-    1. ATR-based levels when ATR is available: SL = 1.5×ATR, TP = 3×ATR (R/R 1:2).
-    2. Fixed backtested fallback when ATR is None — levels are marked 'ориент.' so
-       the user knows they are approximate.
-       LONG:  SL −{HIT_RATE_SL_PCT}% / TP +{HIT_RATE_TP_PCT}%
-       SHORT: SL +{SHORT_HOLD_SL_PCT}% / TP −{SHORT_HOLD_TP_PCT}%
+    ATR-based levels (R:R per level):
+      LONG:  SL  = entry − 1.5×ATR
+             TP1 = entry + 1.5×ATR  (R:R 1:1)  → снять 40% позиции
+             TP2 = entry + 3.0×ATR  (R:R 1:2)  → снять 40%
+             TP3 = entry + 4.5×ATR  (R:R 1:3)  → снять 20%  [только score ≥ 70]
 
-    Never returns empty for a valid entry price — every signal will show SL/TP.
-    side: 'buy'/'long' or 'sell'/'short'.
+      SHORT: SL  = max(2×ATR, entry×1.025) выше цены входа
+             TP1 = entry − SL_dist×1  (R:R 1:1)  → снять 40%
+             TP2 = entry − SL_dist×2  (R:R 1:2)  → снять 40%
+             TP3 = entry − SL_dist×3  (R:R 1:3)  → снять 20%  [только score ≥ 70]
+
+    Fallback (ATR=None): фиксированные уровни из бэктеста; TP1=50% от TP2, TP3=150%.
+    TP3 показывается только при score ≥ 70 (сильный сигнал, стоит держать дольше).
+    Демо-позиции по-прежнему закрываются по TP2.
+    side: 'buy'/'long' или 'sell'/'short'.
     """
     if entry is None or not (math.isfinite(entry) and entry > 0):
         return ""
@@ -2980,39 +2986,57 @@ def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
     if s not in ("buy", "long", "sell", "short"):
         return ""
 
-    use_atr = atr is not None and atr > 0 and math.isfinite(atr)
+    use_atr  = atr is not None and atr > 0 and math.isfinite(atr)
+    show_tp3 = score >= 70
 
     if use_atr:
         if s in ("buy", "long"):
-            sl = entry - 1.5 * atr
-            tp = entry + 3.0 * atr
+            sl   = entry - 1.5 * atr
+            tp1  = entry + 1.5 * atr   # R:R 1:1
+            tp2  = entry + 3.0 * atr   # R:R 1:2
+            tp3  = entry + 4.5 * atr   # R:R 1:3
         else:
-            # SHORT: wider SL with minimum floor so crypto noise does not stop us out
             raw_sl   = entry + SHORT_ATR_SL_MULT * atr
             floor_sl = entry * (1 + SHORT_ATR_SL_MIN_PCT / 100)
             sl       = max(raw_sl, floor_sl)
-            tp       = entry - (sl - entry) * SHORT_ATR_TP_MULT_RR  # R:R 1:2
-        rr_label = "R/R 1:2"
+            sl_dist  = sl - entry
+            tp1  = entry - sl_dist        # R:R 1:1
+            tp2  = entry - sl_dist * 2    # R:R 1:2
+            tp3  = entry - sl_dist * 3    # R:R 1:3
+        orient = ""
     else:
         # Fallback: fixed backtested constants — valid as orientation levels
         if s in ("buy", "long"):
-            sl = entry * (1 - HIT_RATE_SL_PCT / 100)
-            tp = entry * (1 + HIT_RATE_TP_PCT / 100)
+            sl   = entry * (1 - HIT_RATE_SL_PCT / 100)
+            tp2  = entry * (1 + HIT_RATE_TP_PCT / 100)
+            tp1  = entry + (tp2 - entry) * 0.5
+            tp3  = entry + (tp2 - entry) * 1.5
         else:
-            sl = entry * (1 + SHORT_HOLD_SL_PCT / 100)
-            tp = entry * (1 - SHORT_HOLD_TP_PCT / 100)
-        rr_label = "ориент."
+            sl   = entry * (1 + SHORT_HOLD_SL_PCT / 100)
+            tp2  = entry * (1 - SHORT_HOLD_TP_PCT / 100)
+            tp1  = entry - (entry - tp2) * 0.5
+            tp3  = entry - (entry - tp2) * 1.5
+        orient = " ориент."
 
-    if sl <= 0 or tp <= 0:
+    if sl <= 0 or tp1 <= 0 or tp2 <= 0:
         return ""
-    sl_roi = abs(sl - entry) / entry * 100 * DISPLAY_LEVERAGE
-    tp_roi = abs(tp - entry) / entry * 100 * DISPLAY_LEVERAGE
+
+    def _roi(p: float) -> float:
+        return abs(p - entry) / entry * 100 * DISPLAY_LEVERAGE
+
     sl_sign = "−" if s in ("buy", "long") else "+"
     tp_sign = "+" if s in ("buy", "long") else "−"
-    return (
-        f"🛡️ Стоп: <code>${sl:,.6g}</code> ({sl_sign}{sl_roi:.0f}% ROI)  •  "
-        f"🎯 Цель: <code>${tp:,.6g}</code> ({tp_sign}{tp_roi:.0f}% ROI)  •  {rr_label}"
-    )
+
+    lines = [
+        f"🛡️ SL: <code>${sl:,.6g}</code> ({sl_sign}{_roi(sl):.0f}% ROI{orient})",
+        f"🎯 TP1: <code>${tp1:,.6g}</code> ({tp_sign}{_roi(tp1):.0f}% ROI) · снять 40%",
+        f"🎯 TP2: <code>${tp2:,.6g}</code> ({tp_sign}{_roi(tp2):.0f}% ROI) · снять 40%",
+    ]
+    if show_tp3 and tp3 > 0:
+        lines.append(
+            f"🎯 TP3: <code>${tp3:,.6g}</code> ({tp_sign}{_roi(tp3):.0f}% ROI) · снять 20%"
+        )
+    return "\n".join(lines)
 
 
 def _vol_threshold(symbol: str, base_pct: float, k_sigma: float) -> float:
@@ -3772,7 +3796,6 @@ def check_intraday_streak(
                 ema = state["ema200_4h"].get(symbol)
 
             above_ema = (ema is not None and price > ema)
-            sl_tp = _format_sl_tp("buy", price, atr)
             whale = _get_gate_whale_stats(symbol)
 
             score = compute_signal_score(
@@ -3784,6 +3807,7 @@ def check_intraday_streak(
                 _funding_lsr_score_and_text(symbol, "buy")
             )
             score = max(0, min(100, score + _fl_delta_sl))
+            sl_tp = _format_sl_tp("buy", price, atr, score=score)
             ema_note = "📍 Выше EMA-200 ✅" if above_ema else "📍 Ниже EMA-200 ⚠️"
             rsi_str  = f"{rsi:.1f}" if rsi is not None else "н/д"
             body = (
@@ -3850,7 +3874,6 @@ def check_intraday_streak(
                 ema = state["ema200_4h"].get(symbol)
 
             below_ema = (ema is not None and price < ema)
-            sl_tp = _format_sl_tp("sell", price, atr)
             whale = _get_gate_whale_stats(symbol)
 
             score = compute_signal_score(
@@ -3862,6 +3885,7 @@ def check_intraday_streak(
                 _funding_lsr_score_and_text(symbol, "sell")
             )
             score = max(0, min(100, score + _fl_delta_ss))
+            sl_tp = _format_sl_tp("sell", price, atr, score=score)
             ema_note = "📍 Ниже EMA-200 ✅" if below_ema else "📍 Выше EMA-200 ⚠️"
             rsi_str  = f"{rsi:.1f}" if rsi is not None else "н/д"
             body = (
@@ -4449,7 +4473,7 @@ def check_momentum(
         score = compute_signal_score(kind, side, btc_pct24=btc_pct24)
         with state_lock:
             atr = state["atr_4h"].get(symbol)
-        sl_tp = _format_sl_tp(side, price, atr)
+        sl_tp = _format_sl_tp(side, price, atr, score=score)
         if pct > 0:
             body = (
                 f"{emoji} <b><code>{symbol}</code> памп +{pct:.1f}% за 10м → SHORT</b>\n"
@@ -4564,7 +4588,7 @@ def check_overheated_oversold(
                     _funding_lsr_score_and_text(symbol, "buy")
                 )
                 score = max(0, min(100, score + _fl_delta_oh))
-                sl_tp = _format_sl_tp("buy", price, atr)
+                sl_tp = _format_sl_tp("buy", price, atr, score=score)
                 # Co-movers: up to 3 other coins also in the overheated zone
                 _oh_others = [
                     f"<code>{s}</code> +{p:.1f}%"
@@ -4669,7 +4693,7 @@ def check_overheated_oversold(
                     _funding_lsr_score_and_text(symbol, "sell")
                 )
                 score = max(0, min(100, score + _fl_delta_os))
-                sl_tp = _format_sl_tp("sell", price, atr)
+                sl_tp = _format_sl_tp("sell", price, atr, score=score)
                 # Co-movers: up to 3 other coins also in the oversold zone
                 _os_others = [
                     f"<code>{s}</code> {p:.1f}%"
@@ -4970,7 +4994,7 @@ def check_momentum_long(
             )
             continue
 
-        sl_tp = _format_sl_tp("sell", price, atr)
+        sl_tp = _format_sl_tp("sell", price, atr, score=score)
         body = (
             f"🧪 <b>[ТЕСТ] ПАМП ИССЯКАЕТ — шорт на развороте</b>\n"
             f"Монета выросла +{pct24:.1f}% за 24ч, но начинает откат\n"
@@ -5086,7 +5110,7 @@ def check_new_listing_pumps(
         if score < min_score:
             continue
 
-        sl_tp = _format_sl_tp("sell", price, atr)
+        sl_tp = _format_sl_tp("sell", price, atr, score=score)
         body = (
             f"🧪 <b>[ТЕСТ] ПАМП НОВОГО ЛИСТИНГА — возможен шорт</b>\n"
             f"Монета выросла от цены листинга, возможен разворот вниз\n"
@@ -5199,7 +5223,7 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
         )
         with state_lock:
             atr = state["atr_4h"].get(symbol)
-        sl_tp = _format_sl_tp(side, price, atr)
+        sl_tp = _format_sl_tp(side, price, atr, score=score)
         body = (
             f"🌋 <b>ОБЪЁМНЫЙ ВЗРЫВ + CRSI — {dir_word}</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -5322,7 +5346,7 @@ def check_listing_dump_long(
         if score < min_score:
             continue
 
-        sl_tp = _format_sl_tp("buy", price, atr)
+        sl_tp = _format_sl_tp("buy", price, atr, score=score)
         body = (
             f"🧪 <b>[ТЕСТ] ЛИСТИНГ-ДАМП — возможен отскок (ЛОНГ)</b>\n"
             f"Монета упала далеко от пика после листинга\n"
@@ -6435,7 +6459,7 @@ def run_checks():
                     header.append(f"Объём за 24ч: ${b['volume']:,.0f}")
                 with state_lock:
                     atr = state["atr_4h"].get(sym)
-                sl_tp = _format_sl_tp(side_for_score, b["price"], atr)
+                sl_tp = _format_sl_tp(side_for_score, b["price"], atr, score=score)
                 _trend_warn = _trend_warning_line(sym, rec_label)
                 # ── Whale stats (fetched after veto passes, no wasted calls) ──
                 _whale_cf = _get_gate_whale_stats(sym)
