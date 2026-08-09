@@ -339,6 +339,7 @@ BEAR_DOWNTREND_FILTER_ENABLED = False   # ← True чтобы включить �
 #   LONG  + дамп активен → неправильно блокировать (тренд продолжения, 57% TP у теней)
 PUMP_FILTER_SHORT_ENABLED = True        # блокировать SHORT во время активного памп-тренда
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
+UPTREND_FLIP_MIN_DAYS     = 3           # если тренд вверх ≥ N дней — SHORT→LONG (0=выкл.)
 
 # --- Display leverage for ROI calculation in Telegram messages ---
 # All P&L / SL / TP percentages shown to the user are multiplied by this
@@ -6454,6 +6455,94 @@ def run_checks():
                                 shadow_reason=f"ai_veto: {_ai_note}",
                                 alert_type="confluence",
                             )
+                    continue
+
+                # ── Uptrend flip: block SHORT, send LONG if N+ day uptrend ─────
+                # When UPTREND_FLIP_MIN_DAYS > 0 and signal is SHORT but the coin
+                # has been rising for ≥ N consecutive daily closes → shadow the
+                # SHORT and emit a LONG "trend continuation" signal instead.
+                _uptrend_days_cf = 0
+                if UPTREND_FLIP_MIN_DAYS > 0 and rec_label == "SHORT":
+                    _dc_flip = _fetch_daily_closes_for_crsi(sym)
+                    if _dc_flip:
+                        _uptrend_days_cf = _count_consecutive_trend_days(_dc_flip, "up")
+                if _uptrend_days_cf >= UPTREND_FLIP_MIN_DAYS:
+                    logger.info(
+                        "Confluence SHORT %s flipped to LONG — %d day uptrend",
+                        sym, _uptrend_days_cf,
+                    )
+                    summary["confluence_ema_blocked"] = (
+                        summary.get("confluence_ema_blocked", 0) + 1
+                    )
+                    # Shadow the original SHORT for win-rate tracking
+                    with state_lock:
+                        _atr_flip = state["atr_4h"].get(sym)
+                    if b["price"]:
+                        _dsl_flip, _dtp_flip = _compute_demo_sl_tp(
+                            "SHORT", b["price"], _atr_flip
+                        )
+                        if _dsl_flip and _dtp_flip:
+                            _demo_open_position(
+                                sym, "SHORT", b["price"], _dsl_flip, _dtp_flip,
+                                is_shadow=True,
+                                shadow_reason=f"uptrend_flip: {_uptrend_days_cf}d",
+                                alert_type="confluence",
+                            )
+                    # Recalculate funding/LSR for LONG direction
+                    _fl_delta_flip, _fl_text_flip, _fl_fpts_flip, _fl_lpts_flip = (
+                        _funding_lsr_score_and_text(sym, "buy")
+                    )
+                    _flip_score = min(score + _fl_delta_flip, 100)
+                    _flip_sl_tp = _format_sl_tp("buy", b["price"], _atr_flip, score=_flip_score)
+                    _flip_whale = _get_gate_whale_stats(sym)
+                    _flip_lines: list[str] = [
+                        f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>",
+                    ]
+                    if b["price"] is not None:
+                        _flip_lines.append(f"Цена: <b>${b['price']:,.6g}</b>")
+                    if b["volume"] is not None:
+                        _flip_lines.append(f"Объём за 24ч: ${b['volume']:,.0f}")
+                    _flip_lines += [
+                        "",
+                        f"<b>Сработавшие сигналы ({len(b['lines'])}):</b>",
+                        *[f"  • {ln}" for ln in b["lines"]],
+                        "",
+                        f"📊 Рекомендация: <b>ЛОНГ 📈</b>",
+                        (
+                            f"Причина: устойчивый тренд вверх "
+                            f"<b>{_uptrend_days_cf} дней</b> — сигналы перекупленности "
+                            f"не блокируют импульс, тренд продолжается"
+                        ),
+                        f"🎯 Сила сигнала: <b>{_flip_score}/100</b> ({_strength_label(_flip_score)})",
+                    ]
+                    if _flip_sl_tp:
+                        _flip_lines.append(_flip_sl_tp)
+                    if _fl_text_flip:
+                        _flip_lines.append(_fl_text_flip)
+                    if _flip_whale:
+                        _flip_lines.append(_flip_whale)
+                    if _ai_note:
+                        _flip_lines.append(
+                            f"🤖 ИИ подтвердил: <i>{html.escape(_ai_note)}</i>"
+                        )
+                    _flip_body = "\n".join(_flip_lines)
+                    _delivered_flip, _ = send_alert_with_log(
+                        sym, "confluence", "LONG", b["price"], _flip_body, _flip_score,
+                        rsi=b.get("rsi"), pct24=_pct24_v,
+                        factor_funding_pts=_fl_fpts_flip, factor_lsr_pts=_fl_lpts_flip,
+                    )
+                    if _delivered_flip and b["price"]:
+                        _dsl_f2, _dtp_f2 = _compute_demo_sl_tp(
+                            "LONG", b["price"], _atr_flip
+                        )
+                        if _dsl_f2 and _dtp_f2:
+                            _demo_open_position(
+                                sym, "LONG", b["price"], _dsl_f2, _dtp_f2,
+                                alert_type="confluence",
+                            )
+                        with state_lock:
+                            for key, s in b["cooldowns"]:
+                                state[key][s] = now_ts
                     continue
 
                 header = [f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>"]
