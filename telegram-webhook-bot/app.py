@@ -4753,6 +4753,16 @@ def check_overheated_oversold(
                     if _os_others else ""
                 )
                 _os_trend_warn = _trend_warning_line(symbol, "LONG")
+                # Сколько дней подряд монета падала перед сигналом
+                _os_closes = _fetch_daily_closes_for_crsi(symbol)
+                _os_down_days = _count_consecutive_trend_days(_os_closes, "down") if _os_closes else 0
+                _os_down_line = ""
+                if _os_down_days >= 2:
+                    _os_down_line = f"\n📆 Падает <b>{_os_down_days} дн. подряд</b>"
+                    if _os_down_days >= 5:
+                        _os_down_line += " 🔥 экстремальная перепроданность"
+                    elif _os_down_days >= 3:
+                        _os_down_line += " ⚠️"
                 body = (
                     f"🟢 <b>ПЕРЕПРОДАННОСТЬ — разворот вверх</b>\n"
                     f"Монета сильно упала, RSI в зоне перепроданности — отскок вероятен\n"
@@ -4763,6 +4773,7 @@ def check_overheated_oversold(
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
+                    + _os_down_line
                     + _co_line_os
                     + (f"\n{_os_trend_warn}" if _os_trend_warn else "")
                 )
