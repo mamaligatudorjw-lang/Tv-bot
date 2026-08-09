@@ -305,6 +305,19 @@ HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asym
 SHORT_HOLD_TIMEOUT_HOURS = 168.0   # hold SHORTs up to 7 days
 SHORT_HOLD_SL_PCT        = 15.0    # wide stop above entry — survives noise
 SHORT_HOLD_TP_PCT        = 20.0    # take-profit 20% below entry
+
+# ATR-based SL/TP multipliers (crunch from demo data 2026-08-08):
+#   9/10 real SHORT demo positions stopped out at avg SL=4.98% (1.5×ATR too tight).
+#   The only TP hit had SL=15%/TP=20% (fixed fallback). Shadow SHORTs with
+#   wider ATR had 34% win rate vs 10% for tight-ATR regulars.
+#   Fix: raise SHORT SL to 2.0×ATR + enforce 2.5% minimum floor.
+SHORT_ATR_SL_MULT    = 2.0    # was 1.5; wider stop survives intraday noise
+SHORT_ATR_SL_MIN_PCT = 2.5    # floor: SL at least 2.5% above entry even if ATR is tiny
+# TP is derived from actual SL distance × 2.0 to keep R:R 1:2
+SHORT_ATR_TP_MULT_RR = 2.0    # TP = (SL dist) × this factor
+
+# In BULL market, counter-trend SHORTs require stronger conviction.
+SHORT_BULL_REGIME_MIN_SCORE = 80   # raised from type-default 75 when regime=BULL
 MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
 # Раздельные лимиты по направлениям (2026-08-04): SHORT-ы теперь живут до
 # 7 дней (listing_peak_short — до 30), поэтому без квоты они могут занять
@@ -1135,7 +1148,12 @@ def _compute_demo_sl_tp(
     if atr and atr > 0:
         if direction == "LONG":
             return price - 1.5 * atr, price + 3.0 * atr
-        return price + 1.5 * atr, price - 3.0 * atr
+        # SHORT: wider SL with minimum floor to survive crypto noise
+        raw_sl   = price + SHORT_ATR_SL_MULT * atr
+        floor_sl = price * (1 + SHORT_ATR_SL_MIN_PCT / 100)
+        sl       = max(raw_sl, floor_sl)
+        tp       = price - (sl - price) * SHORT_ATR_TP_MULT_RR  # R:R 1:2
+        return sl, tp
     # Fixed fallback
     if direction == "LONG":
         return price * (1 - HIT_RATE_SL_PCT / 100), price * (1 + HIT_RATE_TP_PCT / 100)
@@ -2966,8 +2984,11 @@ def _format_sl_tp(side: str, entry: float | None, atr: float | None) -> str:
             sl = entry - 1.5 * atr
             tp = entry + 3.0 * atr
         else:
-            sl = entry + 1.5 * atr
-            tp = entry - 3.0 * atr
+            # SHORT: wider SL with minimum floor so crypto noise does not stop us out
+            raw_sl   = entry + SHORT_ATR_SL_MULT * atr
+            floor_sl = entry * (1 + SHORT_ATR_SL_MIN_PCT / 100)
+            sl       = max(raw_sl, floor_sl)
+            tp       = entry - (sl - entry) * SHORT_ATR_TP_MULT_RR  # R:R 1:2
         rr_label = "R/R 1:2"
     else:
         # Fallback: fixed backtested constants — valid as orientation levels
@@ -3025,19 +3046,20 @@ MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "50"))
 # Per-type score minimums — override the global MIN_ALERT_SCORE for specific
 # signal types where historical data shows a higher bar improves quality.
 MIN_SCORE_BY_TYPE: dict[str, int] = {
-    # ── SHORT / SELL — backtest 30d: score≥70 → 63% WR at 1д (vs 52% unfiltered) ──
-    "overheated_24h":      70,
-    "confluence":          70,   # SHORT: score≥70 → good; LONG uses MIN_SCORE_LONG_BY_TYPE
-    "breakdown_short":     70,   # raised from 55
-    "momentum_up_2":       70,   # raised from default 50
-    "momentum_up_3":       70,   # raised from default 50
-    "momentum_up_5":       70,   # raised from default 50
-    "momentum_up_10":      70,   # raised from default 50
-    "momentum_down_5":     70,   # raised from 65
-    "momentum_down_10":    70,   # raised from 65
-    "volume_surge_short":  70,   # raised from default 50
-    "new_listing_short":   70,   # raised from 55
-    "listing_peak_short":  70,   # raised from 55
+    # ── SHORT / SELL — raised from 70→75 (2026-08-08): demo data showed 10% win rate
+    # for regular SHORTs. Only the highest-conviction shorts should fire.
+    "overheated_24h":      75,
+    "confluence":          75,   # SHORT: score≥75; LONG uses MIN_SCORE_LONG_BY_TYPE
+    "breakdown_short":     75,   # raised from 70
+    "momentum_up_2":       75,   # raised from 70
+    "momentum_up_3":       75,   # raised from 70
+    "momentum_up_5":       75,   # raised from 70
+    "momentum_up_10":      75,   # raised from 70
+    "momentum_down_5":     75,   # raised from 70
+    "momentum_down_10":    75,   # raised from 70
+    "volume_surge_short":  75,   # raised from 70
+    "new_listing_short":   75,   # raised from 70
+    "listing_peak_short":  75,   # raised from 70
     # ── LONG / BUY — score filter doesn't improve quality; keep lower bar ──
     "momentum_long":       55,
     "listing_dump_long":   50,
@@ -3281,6 +3303,18 @@ def send_alert_with_log(
             symbol, alert_type, score, min_score,
         )
         return (False, None)
+    # BULL market penalty for counter-trend SHORTs: crypto trends up by default,
+    # shorting against a BULL regime needs stronger conviction than the type floor.
+    if recommendation == "SHORT" and score < SHORT_BULL_REGIME_MIN_SCORE:
+        try:
+            if get_market_regime() == "BULL":
+                logger.info(
+                    "Suppressed %s/%s SHORT (BULL regime, score=%s < %d)",
+                    symbol, alert_type, score, SHORT_BULL_REGIME_MIN_SCORE,
+                )
+                return (False, None)
+        except Exception:
+            pass  # regime unavailable — let signal through
     # LONG score ceiling — above the ceiling quality degrades (backtest-driven).
     if recommendation == "LONG":
         max_score_long = MAX_SCORE_LONG_BY_TYPE.get(alert_type)
