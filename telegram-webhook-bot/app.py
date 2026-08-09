@@ -3046,12 +3046,15 @@ def _format_sl_tp(side: str, entry: float | None, atr: float | None, score: int 
         suffix = orient if orient else ""
         return f"×2:{r2} / ×5:{r5} / ×10:{r10}{suffix}"
 
+    has_tp3 = show_tp3 and tp3 > 0
+    tp1_label = "снять 40%" if has_tp3 else "снять 50%"
+    tp2_label = "снять 40%" if has_tp3 else "закрыть всё"
     lines = [
         f"🛡️ SL:  <code>${sl:,.6g}</code>  {_lev_roi(sl)}",
-        f"🎯 TP1: <code>${tp1:,.6g}</code>  {_lev_roi(tp1)}  · снять 40%",
-        f"🎯 TP2: <code>${tp2:,.6g}</code>  {_lev_roi(tp2)}  · снять 40%",
+        f"🎯 TP1: <code>${tp1:,.6g}</code>  {_lev_roi(tp1)}  · {tp1_label}",
+        f"🎯 TP2: <code>${tp2:,.6g}</code>  {_lev_roi(tp2)}  · {tp2_label}",
     ]
-    if show_tp3 and tp3 > 0:
+    if has_tp3:
         lines.append(
             f"🎯 TP3: <code>${tp3:,.6g}</code>  {_lev_roi(tp3)}  · снять 20%"
         )
