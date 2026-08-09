@@ -338,15 +338,16 @@ MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (
 # ---------------------------------------------------------------------------
 # Feature flags — отключить фильтр без удаления кода
 # ---------------------------------------------------------------------------
-# bear_downtrend_blocks_long: блокировал LONG в BEAR-режиме если монета падала 3д+
-# По данным демо-позиций win rate теней = 90% → фильтр убивал хорошие сигналы
-BEAR_DOWNTREND_FILTER_ENABLED = False   # ← True чтобы включить обратно
+# bear_downtrend_blocks_long: блокировать LONG в BEAR если 3-4 дня вниз,
+# НО ПРОПУСКАТЬ при 5+ днях — демо показало 90.9% WR при экстремальном перепроданости.
+# 3-4д: 18% WR (правильно блокировать), 5д+: 90.9% WR (отскок дна, пропускать!)
+BEAR_DOWNTREND_FILTER_ENABLED = True    # включён; логика 3-4д=блок, 5д+=пропуск
 
 # pump_filter: блокировал LONG/SHORT во время активного памп/дамп тренда
 # Разделён на два флага — демо показало разное поведение для LONG и SHORT:
-#   SHORT + памп активен → правильно блокировать (не шортить в рост)
-#   LONG  + дамп активен → неправильно блокировать (тренд продолжения, 57% TP у теней)
-PUMP_FILTER_SHORT_ENABLED = True        # блокировать SHORT во время активного памп-тренда
+#   SHORT + памп: данные показали что блокировка убивала 52% WR сигналы → отключена
+#   LONG  + дамп: неправильно блокировать (тренд продолжения, 57% TP у теней)
+PUMP_FILTER_SHORT_ENABLED = False       # ОТКЛ: блокировка SHORT убивала 52% WR сигналы
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
 UPTREND_FLIP_MIN_CANDLES  = 4           # если тренд вверх ≥ N 4h-свечей — SHORT→LONG (0=выкл.)
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа (4h ≈ 16ч при N=4)
@@ -2004,7 +2005,10 @@ def _bear_downtrend_blocks_long(symbol: str) -> tuple[bool, int]:
     if not closes:
         return False, 0
     days = _count_consecutive_trend_days(closes, "down")
-    return (days >= 3, days)
+    # 3-4 дня вниз → блокировать (18% WR, монета продолжает падать)
+    # 5+ дней вниз → НЕ блокировать (90.9% WR, экстремальная перепроданность = отскок)
+    block = 3 <= days <= 4
+    return (block, days)
 
 
 def _calculate_rsi(closes: list[float], period: int) -> float:
@@ -4693,39 +4697,39 @@ def check_overheated_oversold(
                         )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
-            # SHORT continuation: coin dumped hard AND RSI is deeply oversold →
-            # extreme selling pressure, momentum still DOWN.  Enter SHORT to ride
-            # the continued decline.
+            # LONG bounce: coin dumped hard AND RSI is deeply oversold →
+            # extreme capitulation, high probability of reversal.  Enter LONG
+            # to ride the bounce. Data: 48.9% WR in shadow, R:R 2.23.
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
                 score = compute_signal_score(
-                    "oversold_24h", "sell",
+                    "oversold_24h", "buy",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
                 # Funding + LSR adjustment
                 _fl_delta_os, _fl_text_os, _fl_fpts_os, _fl_lpts_os = (
-                    _funding_lsr_score_and_text(symbol, "sell")
+                    _funding_lsr_score_and_text(symbol, "buy")
                 )
                 score = max(0, min(100, score + _fl_delta_os))
-                sl_tp = _format_sl_tp("sell", price, atr, score=score)
-                # Co-movers: up to 3 other coins also falling hard
+                sl_tp = _format_sl_tp("buy", price, atr, score=score)
+                # Co-movers: up to 3 other coins also oversold
                 _os_others = [
                     f"<code>{s}</code> {p:.1f}%"
                     for s, p in os_peers if s != symbol
                 ][:3]
                 _co_line_os = (
-                    f"\n🔗 Также падают: {', '.join(_os_others)}"
+                    f"\n🔗 Также перепроданы: {', '.join(_os_others)}"
                     if _os_others else ""
                 )
-                _os_trend_warn = _trend_warning_line(symbol, "SHORT")
+                _os_trend_warn = _trend_warning_line(symbol, "LONG")
                 body = (
-                    f"📉 <b>ИМПУЛЬС ВНИЗ — продолжение падения</b>\n"
-                    f"Монета сильно упала, давление продавцов нарастает — продолжение\n"
+                    f"🟢 <b>ПЕРЕПРОДАННОСТЬ — разворот вверх</b>\n"
+                    f"Монета сильно упала, RSI в зоне перепроданности — отскок вероятен\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
-                    f"🧊 RSI: <b>{rsi:.1f}</b> — давление продавцов\n"
+                    f"🟢 RSI: <b>{rsi:.1f}</b> — зона перепроданности\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
@@ -4734,15 +4738,15 @@ def check_overheated_oversold(
                 )
                 # ── Ликвидационное вето ──────────────────────────────────────
                 _vol24_os = float((tickers.get(symbol) or {}).get("quoteVolume", 0))
-                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "sell", _vol24_os)
+                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "buy", _vol24_os)
                 if _liq_veto_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ликвидации: %s", symbol, _liq_reason_os
                     )
-                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_lv2 and _dtp_lv2:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl_lv2, _dtp_lv2,
+                            symbol, "LONG", price, _dsl_lv2, _dtp_lv2,
                             is_shadow=True,
                             shadow_reason=f"liq_veto: {_liq_reason_os}",
                             alert_type="oversold_24h",
@@ -4750,16 +4754,16 @@ def check_overheated_oversold(
                     continue
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
-                    symbol, "SHORT", rsi, pct24, None
+                    symbol, "LONG", rsi, pct24, None
                 )
                 if not _ai_ok_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl and _dtp:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl, _dtp,
+                            symbol, "LONG", price, _dsl, _dtp,
                             is_shadow=True,
                             shadow_reason=f"ai_veto: {_ai_note_os}",
                             alert_type="oversold_24h",
@@ -4780,7 +4784,7 @@ def check_overheated_oversold(
                 if _ai_note_os:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
                 delivered, _aid = send_alert_with_log(
-                    symbol, "oversold_24h", "SHORT", price, body, score,
+                    symbol, "oversold_24h", "LONG", price, body, score,
                     rsi=rsi, pct24=pct24,
                     factor_funding_pts=_fl_fpts_os, factor_lsr_pts=_fl_lpts_os,
                 )
@@ -4789,10 +4793,10 @@ def check_overheated_oversold(
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
                     # Track real demo position so we can measure win-rate later
-                    _dsl_os, _dtp_os = _compute_demo_sl_tp("SHORT", price, atr)
+                    _dsl_os, _dtp_os = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_os and _dtp_os:
                         _demo_open_position(
-                            symbol, "SHORT", price, _dsl_os, _dtp_os,
+                            symbol, "LONG", price, _dsl_os, _dtp_os,
                             is_shadow=False,
                             alert_type="oversold_24h",
                         )
@@ -6493,7 +6497,10 @@ def run_checks():
                                 alert_type="confluence",
                             )
                         continue
-                # ── AI veto ──────────────────────────────────────────────────────
+                # ── AI veto (только для LONG) ─────────────────────────────────────
+                # Для SHORT: демо показало, что AI veto блокирует именно хорошие SHORT-ы
+                # (52% WR у теневых), а реальные SHORT-ы без вето дают 5.9% WR.
+                # Вывод: AI veto работает наоборот для SHORT → отключить для SHORT.
                 _pct24_v: float | None = None
                 if tickers:
                     _tv = tickers.get(sym)
@@ -6502,9 +6509,11 @@ def run_checks():
                             _pct24_v = float(_tv["priceChangePercent"])
                         except (ValueError, KeyError, TypeError):
                             pass
-                _ai_allow, _ai_note, _ai_hold = _ai_veto_confluence(
-                    sym, rec_label, b["rsi"], _pct24_v, above_ema
-                )
+                _ai_allow, _ai_note, _ai_hold = True, "", ""
+                if rec_label == "LONG":
+                    _ai_allow, _ai_note, _ai_hold = _ai_veto_confluence(
+                        sym, rec_label, b["rsi"], _pct24_v, above_ema
+                    )
                 if not _ai_allow:
                     logger.info(
                         "SUPPRESSED: %s %s, причина ИИ: %s",
