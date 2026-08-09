@@ -3082,18 +3082,21 @@ MAX_SCORE_LONG_BY_TYPE: dict[str, int] = {
     "oversold_24h": 65,   # above 65: TP:SL collapses to 0.32x
 }
 
-# --- Breakdown continuation SHORT (TEST) ---
-BREAKDOWN_SHORT_PCT  = -10.0   # 24h drop must be ≤ this to qualify
-BREAKDOWN_RSI_MIN    = 30.0    # RSI must be above (oversold coins excluded — different setup)
-BREAKDOWN_RSI_MAX    = 58.0    # RSI must be below (confirms selling pressure, not neutral)
-BREAKDOWN_COOLDOWN   = 14400   # 4h cooldown per coin
+# --- Breakdown continuation SHORT ---
+BREAKDOWN_SHORT_PCT          = -10.0  # 24h drop must be ≤ this for "room to fall" path
+BREAKDOWN_RSI_MIN            = 30.0   # RSI must be above (confirms room to fall)
+BREAKDOWN_RSI_MAX            = 58.0   # RSI must be below (confirms selling pressure)
+BREAKDOWN_COOLDOWN           = 14400  # 4h cooldown per coin
+# "Oversold continuation" path — RSI already low but coin keeps falling
+BREAKDOWN_RSI_OVERSOLD_MAX   = 35.0   # RSI must be ≤ this (oversold territory)
+BREAKDOWN_RSI_OVERSOLD_DROP  = -15.0  # 24h drop must be ≤ this (stronger confirmation)
 
 # --- Intraday hourly streak (6h+ consecutive green/red 1h candles) ---
 STREAK_1H_MIN          = 6       # minimum consecutive green/red hours to trigger
 STREAK_1H_COOLDOWN     = 28800   # 8h cooldown per symbol (avoid re-spamming same streak)
 STREAK_1H_PRE_FILTER   = 3.0    # min |pct24| to even fetch 1h candles (saves API calls)
 STREAK_1H_RSI_MAX_LONG = 73.0   # RSI ceiling for LONG streak (not already overbought)
-STREAK_1H_RSI_MIN_SHORT= 27.0   # RSI floor for SHORT streak (not already oversold)
+STREAK_1H_RSI_MIN_SHORT= 18.0   # RSI floor for SHORT streak (extreme oversold ≤18 skipped)
 STREAK_1H_LONG_MAX_GAIN = 15.0  # если монета уже выросла >15% за стрик — перегрета, пропустить ЛОНГ
 STREAK_1H_SHORT_MAX_LOSS= 15.0  # если монета уже упала  >15% за стрик — перепродана, пропустить SHORT
 STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_close на >0.5% — разворот, пропустить ЛОНГ
@@ -4761,19 +4764,20 @@ def check_breakdown_short(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
 ) -> int:
-    """🧪 ТЕСТ: Breakdown continuation SHORT.
+    """Breakdown continuation SHORT — два пути входа:
 
-    Fires when:
-      - 24h drop ≤ BREAKDOWN_SHORT_PCT (−10%)  — сильное дневное движение вниз
-      - Price < EMA-200 (4h)                    — подтверждённый нисходящий тренд
+    Путь A — «есть куда падать» (RSI нейтральный):
+      - 24h drop ≤ BREAKDOWN_SHORT_PCT (−10%)
       - RSI in (BREAKDOWN_RSI_MIN, BREAKDOWN_RSI_MAX) = (30, 58)
-          above 30 = не перепродана, ещё есть куда падать
-          below 58 = давление продавцов подтверждено
-      - Volume ≥ MIN_VOLUME_USDT                — ликвидная монета
+      - Price < EMA-200 (4h)
 
-    Цель: ловить монеты типа BANKUSDT, которые уже сломали структуру и
-    продолжают падение — в отличие от overheated (шорт от вершины).
-    Помечается [ТЕСТ] до накопления статистики.
+    Путь B — «перепродан, но падает дальше» (RSI низкий):
+      - 24h drop ≤ BREAKDOWN_RSI_OVERSOLD_DROP (−15%)  — более сильный импульс
+      - RSI ≤ BREAKDOWN_RSI_OVERSOLD_MAX (35)           — перепродан, тренд сильный
+      - Price < EMA-200 (4h)
+
+    Цель: ловить монеты, которые уже сломали структуру и продолжают падение.
+    Путь B закрывает паттерн «RSI низкий, но монета продолжает падать».
     """
     if not tickers:
         return 0
@@ -4803,15 +4807,15 @@ def check_breakdown_short(
         if vol24 < MIN_VOLUME_USDT:
             continue
 
-        # 1. Strong 24h drop
-        if pct24 > BREAKDOWN_SHORT_PCT:
+        # Путь A: «есть куда падать» — RSI нейтральный, сильный дроп
+        path_a = (BREAKDOWN_RSI_MIN < rsi < BREAKDOWN_RSI_MAX) and (pct24 <= BREAKDOWN_SHORT_PCT)
+        # Путь B: «перепродан, но падает дальше» — RSI низкий, ещё более сильный дроп
+        path_b = (rsi <= BREAKDOWN_RSI_OVERSOLD_MAX) and (pct24 <= BREAKDOWN_RSI_OVERSOLD_DROP)
+
+        if not (path_a or path_b):
             continue
 
-        # 2. RSI in "room to fall" zone — not oversold, not neutral
-        if not (BREAKDOWN_RSI_MIN < rsi < BREAKDOWN_RSI_MAX):
-            continue
-
-        # 3. Price below EMA-200 — confirmed downtrend
+        # Price below EMA-200 — confirmed downtrend (required for both paths)
         with state_lock:
             ema = state["ema200_4h"].get(symbol)
             atr = state["atr_4h"].get(symbol)
@@ -4837,14 +4841,23 @@ def check_breakdown_short(
             )
             continue
 
+        if path_b:
+            rsi_line = f"📊 RSI: <b>{rsi:.1f}</b> — перепродан, но тренд продолжается ↓"
+            headline = "📉 <b>ПРОБОЙ ВНИЗ — перепродан и продолжает падать</b>"
+            subtitle = "RSI низкий, но импульс вниз не исчерпан — тренд сильнее отскока"
+        else:
+            rsi_line = f"📊 RSI: <b>{rsi:.1f}</b> — давление продавцов, есть куда падать"
+            headline = "📉 <b>ПРОБОЙ ВНИЗ — шорт продолжается</b>"
+            subtitle = "Монета в нисходящем тренде, импульс не исчерпан"
+
         sl_tp = _format_sl_tp("sell", price, atr)
         body = (
-            f"🧪 <b>[ТЕСТ] ПРОБОЙ ВНИЗ — шорт продолжается</b>\n"
-            f"Монета в нисходящем тренде, импульс не исчерпан\n"
+            f"{headline}\n"
+            f"{subtitle}\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"<code>{symbol}</code>\n"
             f"📉 24ч: <b>{pct24:.1f}%</b>\n"
-            f"📊 RSI: <b>{rsi:.1f}</b> — давление продавцов, не перепродан\n"
+            f"{rsi_line}\n"
             f"📍 Ниже EMA-200: <b>{ema_pct:.1f}%</b>\n"
             f"💰 Цена: <b>${price:,.6g}</b>\n"
             f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
@@ -4857,7 +4870,10 @@ def check_breakdown_short(
         if delivered:
             with state_lock:
                 state["last_breakdown_alerted"][symbol] = now
-            logger.info("Breakdown SHORT alert sent: %s pct24=%.1f rsi=%.1f", symbol, pct24, rsi)
+            logger.info(
+                "Breakdown SHORT alert sent: %s path=%s pct24=%.1f rsi=%.1f",
+                symbol, "B(oversold)" if path_b else "A(room)", pct24, rsi,
+            )
             sent += 1
 
     return sent
