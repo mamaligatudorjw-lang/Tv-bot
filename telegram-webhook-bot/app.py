@@ -1190,6 +1190,17 @@ def _demo_open_position(
     try:
         with _db_lock:
             conn = _get_db()
+            # Skip if the same symbol+direction is already open (real or shadow separately)
+            existing = conn.execute(
+                "SELECT COUNT(*) FROM demo_positions "
+                "WHERE symbol=? AND direction=? AND status='open' AND is_shadow=?",
+                (symbol, direction, 1 if is_shadow else 0),
+            ).fetchone()[0]
+            if existing:
+                logger.debug(
+                    "Demo: skipping duplicate %s %s (already open)", symbol, direction
+                )
+                return
             conn.execute(
                 "INSERT INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
