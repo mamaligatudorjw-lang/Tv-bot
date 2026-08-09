@@ -348,7 +348,8 @@ BEAR_DOWNTREND_FILTER_ENABLED = False   # ← True чтобы включить �
 #   LONG  + дамп активен → неправильно блокировать (тренд продолжения, 57% TP у теней)
 PUMP_FILTER_SHORT_ENABLED = True        # блокировать SHORT во время активного памп-тренда
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
-UPTREND_FLIP_MIN_DAYS     = 3           # если тренд вверх ≥ N дней — SHORT→LONG (0=выкл.)
+UPTREND_FLIP_MIN_CANDLES  = 4           # если тренд вверх ≥ N 4h-свечей — SHORT→LONG (0=выкл.)
+UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа (4h ≈ 16ч при N=4)
 
 # --- Display leverage for ROI calculation in Telegram messages ---
 # All P&L / SL / TP percentages shown to the user are multiplied by this
@@ -4692,41 +4693,39 @@ def check_overheated_oversold(
                         )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
-            # Bounce LONG: coin dumped hard and RSI is deeply oversold → expect a
-            # mean-reversion bounce. RSI ≤ 30 is classically a BUY signal; the big
-            # 24h drop confirms the oversold condition is extreme.
-            # Previously this was a momentum SHORT ("ride the dump") which contradicted
-            # RSI theory and the confluence LONG signal — flipped 2026-08-09.
+            # SHORT continuation: coin dumped hard AND RSI is deeply oversold →
+            # extreme selling pressure, momentum still DOWN.  Enter SHORT to ride
+            # the continued decline.
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
                 score = compute_signal_score(
-                    "oversold_24h", "buy",
+                    "oversold_24h", "sell",
                     rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
                 )
                 # Funding + LSR adjustment
                 _fl_delta_os, _fl_text_os, _fl_fpts_os, _fl_lpts_os = (
-                    _funding_lsr_score_and_text(symbol, "buy")
+                    _funding_lsr_score_and_text(symbol, "sell")
                 )
                 score = max(0, min(100, score + _fl_delta_os))
-                sl_tp = _format_sl_tp("buy", price, atr, score=score)
-                # Co-movers: up to 3 other coins also in the oversold zone
+                sl_tp = _format_sl_tp("sell", price, atr, score=score)
+                # Co-movers: up to 3 other coins also falling hard
                 _os_others = [
                     f"<code>{s}</code> {p:.1f}%"
                     for s, p in os_peers if s != symbol
                 ][:3]
                 _co_line_os = (
-                    f"\n🔗 Также перепроданы: {', '.join(_os_others)}"
+                    f"\n🔗 Также падают: {', '.join(_os_others)}"
                     if _os_others else ""
                 )
-                _os_trend_warn = _trend_warning_line(symbol, "LONG")
+                _os_trend_warn = _trend_warning_line(symbol, "SHORT")
                 body = (
-                    f"💎 <b>ОТСКОК ОТ ДНА — перепроданность</b>\n"
-                    f"Монета сильно упала, RSI в зоне перепроданности — ожидается отскок\n"
+                    f"📉 <b>ИМПУЛЬС ВНИЗ — продолжение падения</b>\n"
+                    f"Монета сильно упала, давление продавцов нарастает — продолжение\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
-                    f"🧊 RSI: <b>{rsi:.1f}</b> — зона перепроданности\n"
+                    f"🧊 RSI: <b>{rsi:.1f}</b> — давление продавцов\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
@@ -4735,15 +4734,15 @@ def check_overheated_oversold(
                 )
                 # ── Ликвидационное вето ──────────────────────────────────────
                 _vol24_os = float((tickers.get(symbol) or {}).get("quoteVolume", 0))
-                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "buy", _vol24_os)
+                _liq_veto_os, _liq_reason_os = _check_liq_veto(symbol, "sell", _vol24_os)
                 if _liq_veto_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ликвидации: %s", symbol, _liq_reason_os
                     )
-                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("SHORT", price, atr)
                     if _dsl_lv2 and _dtp_lv2:
                         _demo_open_position(
-                            symbol, "LONG", price, _dsl_lv2, _dtp_lv2,
+                            symbol, "SHORT", price, _dsl_lv2, _dtp_lv2,
                             is_shadow=True,
                             shadow_reason=f"liq_veto: {_liq_reason_os}",
                             alert_type="oversold_24h",
@@ -4751,16 +4750,16 @@ def check_overheated_oversold(
                     continue
                 # ── AI veto ──────────────────────────────────────────────────
                 _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
-                    symbol, "LONG", rsi, pct24, None
+                    symbol, "SHORT", rsi, pct24, None
                 )
                 if not _ai_ok_os:
                     logger.info(
                         "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl, _dtp = _compute_demo_sl_tp("SHORT", price, atr)
                     if _dsl and _dtp:
                         _demo_open_position(
-                            symbol, "LONG", price, _dsl, _dtp,
+                            symbol, "SHORT", price, _dsl, _dtp,
                             is_shadow=True,
                             shadow_reason=f"ai_veto: {_ai_note_os}",
                             alert_type="oversold_24h",
@@ -4781,7 +4780,7 @@ def check_overheated_oversold(
                 if _ai_note_os:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_os)}</i>"
                 delivered, _aid = send_alert_with_log(
-                    symbol, "oversold_24h", "LONG", price, body, score,
+                    symbol, "oversold_24h", "SHORT", price, body, score,
                     rsi=rsi, pct24=pct24,
                     factor_funding_pts=_fl_fpts_os, factor_lsr_pts=_fl_lpts_os,
                 )
@@ -4790,10 +4789,10 @@ def check_overheated_oversold(
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
                     # Track real demo position so we can measure win-rate later
-                    _dsl_os, _dtp_os = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl_os, _dtp_os = _compute_demo_sl_tp("SHORT", price, atr)
                     if _dsl_os and _dtp_os:
                         _demo_open_position(
-                            symbol, "LONG", price, _dsl_os, _dtp_os,
+                            symbol, "SHORT", price, _dsl_os, _dtp_os,
                             is_shadow=False,
                             alert_type="oversold_24h",
                         )
@@ -6527,19 +6526,26 @@ def run_checks():
                             )
                     continue
 
-                # ── Uptrend flip: block SHORT, send LONG if N+ day uptrend ─────
-                # When UPTREND_FLIP_MIN_DAYS > 0 and signal is SHORT but the coin
-                # has been rising for ≥ N consecutive daily closes → shadow the
-                # SHORT and emit a LONG "trend continuation" signal instead.
-                _uptrend_days_cf = 0
-                if UPTREND_FLIP_MIN_DAYS > 0 and rec_label == "SHORT":
-                    _dc_flip = _fetch_daily_closes_for_crsi(sym)
-                    if _dc_flip:
-                        _uptrend_days_cf = _count_consecutive_trend_days(_dc_flip, "up")
-                if _uptrend_days_cf >= UPTREND_FLIP_MIN_DAYS:
+                # ── Uptrend flip: block SHORT, send LONG if N+ 4h-candle uptrend ──
+                # When UPTREND_FLIP_MIN_CANDLES > 0 and signal is SHORT but the coin
+                # has been rising for ≥ N consecutive 4h closes → shadow the SHORT
+                # and emit a LONG "trend continuation" signal instead.
+                # Using 4h candles (not daily) catches uptrends within hours, not days.
+                _uptrend_candles_cf = 0
+                if UPTREND_FLIP_MIN_CANDLES > 0 and rec_label == "SHORT":
+                    try:
+                        _4h_flip = _gateio_klines(sym, UPTREND_FLIP_INTERVAL, 20)
+                        if _4h_flip:
+                            _4h_closes_flip = [float(k[4]) for k in _4h_flip]
+                            _uptrend_candles_cf = _count_consecutive_trend_days(
+                                _4h_closes_flip, "up"
+                            )
+                    except Exception:
+                        pass
+                if _uptrend_candles_cf >= UPTREND_FLIP_MIN_CANDLES:
                     logger.info(
-                        "Confluence SHORT %s flipped to LONG — %d day uptrend",
-                        sym, _uptrend_days_cf,
+                        "Confluence SHORT %s flipped to LONG — %d x %s uptrend",
+                        sym, _uptrend_candles_cf, UPTREND_FLIP_INTERVAL,
                     )
                     summary["confluence_ema_blocked"] = (
                         summary.get("confluence_ema_blocked", 0) + 1
@@ -6555,7 +6561,9 @@ def run_checks():
                             _demo_open_position(
                                 sym, "SHORT", b["price"], _dsl_flip, _dtp_flip,
                                 is_shadow=True,
-                                shadow_reason=f"uptrend_flip: {_uptrend_days_cf}d",
+                                shadow_reason=(
+                                    f"uptrend_flip: {_uptrend_candles_cf}x{UPTREND_FLIP_INTERVAL}"
+                                ),
                                 alert_type="confluence",
                             )
                     # Recalculate funding/LSR for LONG direction
@@ -6565,6 +6573,11 @@ def run_checks():
                     _flip_score = min(score + _fl_delta_flip, 100)
                     _flip_sl_tp = _format_sl_tp("buy", b["price"], _atr_flip, score=_flip_score)
                     _flip_whale = _get_gate_whale_stats(sym)
+                    _hours_up = _uptrend_candles_cf * (
+                        4 if UPTREND_FLIP_INTERVAL == "4h" else
+                        6 if UPTREND_FLIP_INTERVAL == "6h" else
+                        1
+                    )
                     _flip_lines: list[str] = [
                         f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>",
                     ]
@@ -6580,8 +6593,8 @@ def run_checks():
                         f"📊 Рекомендация: <b>ЛОНГ 📈</b>",
                         (
                             f"Причина: устойчивый тренд вверх "
-                            f"<b>{_uptrend_days_cf} дней</b> — сигналы перекупленности "
-                            f"не блокируют импульс, тренд продолжается"
+                            f"<b>{_uptrend_candles_cf} свечей ({_hours_up}ч)</b> — "
+                            f"сигналы перекупленности не блокируют импульс, тренд продолжается"
                         ),
                         f"🎯 Сила сигнала: <b>{_flip_score}/100</b> ({_strength_label(_flip_score)})",
                     ]
