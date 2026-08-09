@@ -5534,6 +5534,10 @@ _USERPOS_RSI_PERIOD          = 14
 REVERSAL_CANDLE_MIN_MOVE_PCT = 0.5        # % total move across consecutive candles
 # Minimum position age before a correction with < 3 confirmations is sent
 REVERSAL_MIN_AGE_SECS        = 30 * 60   # 30 minutes
+# Path C — emergency reversal: sharp pump then sharp drop, bypasses EMA/RSI wait
+REVERSAL_PUMP_LOOKBACK       = 3          # candles to look back for the pump
+REVERSAL_PUMP_MIN_PCT        = 15.0       # pump must be ≥ this % to qualify
+REVERSAL_SHARP_DROP_PCT      = 5.0        # last candle must drop ≥ this % to trigger
 
 
 def _calc_rsi_simple(closes: list[float], period: int = 14) -> float | None:
@@ -5673,6 +5677,61 @@ def check_user_position_reversals() -> None:
         ema20 = ema20_curr
 
         confirmed_count = sum([rsi_confirms, candle_confirms, ema_confirms])
+
+        # ── Path C: emergency — sharp pump then sharp drop (1-2 candles) ──
+        # Fires for LONG positions immediately without waiting for EMA cross or
+        # candle streak. Designed for situations like +36% pump followed by
+        # -14% reversal within the same hour (e.g. BMTUSDT 2026-08-09).
+        if direction == "LONG" and len(closes) >= REVERSAL_PUMP_LOOKBACK + 2:
+            _pc_start = closes[-1 - REVERSAL_PUMP_LOOKBACK]
+            _pc_peak  = max(closes[-REVERSAL_PUMP_LOOKBACK:-1])
+            _pc_pump  = (
+                (_pc_peak - _pc_start) / _pc_start * 100
+                if _pc_start else 0.0
+            )
+            _pc_drop  = (
+                (closes[-1] - opens[-1]) / opens[-1] * 100
+                if opens[-1] else 0.0
+            )
+            if _pc_pump >= REVERSAL_PUMP_MIN_PCT and _pc_drop <= -REVERSAL_SHARP_DROP_PCT:
+                logger.info(
+                    "check_user_position_reversals Path C: %s LONG — "
+                    "pump +%.1f%% then candle %.1f%%",
+                    symbol, _pc_pump, _pc_drop,
+                )
+                _note_line_c = (
+                    f"\n📝 Ваша заметка: <i>{html.escape(note)}</i>" if note else ""
+                )
+                _pc_body = (
+                    f"⚡ <b>ЭКСТРЕННАЯ КОРРЕКЦИЯ по вашей позиции</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<code>{symbol}</code> · Ваш LONG → возможен ШОРТ 📉\n"
+                    f"💰 Цена: ${price:,.6g}\n"
+                    f"🚨 Острый разворот:\n"
+                    f"  • Памп <b>+{_pc_pump:.1f}%</b> за {REVERSAL_PUMP_LOOKBACK} свечи\n"
+                    f"  • Последняя свеча: <b>{_pc_drop:.1f}%</b> — резкий откат"
+                    f"{_note_line_c}\n\n"
+                    f"⚠️ Не дожидается EMA-кросса — действуй немедленно.\n"
+                    f"⚠️ Не финансовый совет — примите решение самостоятельно."
+                )
+                _ok_c = send_telegram(_pc_body)
+                if _ok_c:
+                    try:
+                        db.execute(
+                            "UPDATE user_positions SET last_alerted=? WHERE id=?",
+                            (now, pos_id),
+                        )
+                        db.commit()
+                    except Exception as e:
+                        logger.error(
+                            "check_user_position_reversals Path C: update error: %s", e
+                        )
+                    logger.info(
+                        "UserPos Path C alert sent: %s LONG pump=+%.1f%% drop=%.1f%%",
+                        symbol, _pc_pump, _pc_drop,
+                    )
+                continue   # don't also fire the regular reversal for this cycle
+
         if confirmed_count < 2:
             continue
 
