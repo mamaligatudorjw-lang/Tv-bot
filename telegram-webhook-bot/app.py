@@ -4707,19 +4707,20 @@ def check_overheated_oversold(
                 # RSI ≤ 30 + падение само по себе не значит разворот — монета может
                 # продолжать падать. Требуем close > open последней 1ч свечи как сигнал
                 # что давление продавцов ослабло и начался откуп.
-                _os_candles = _gateio_klines(symbol, "1h", 3)
+                _os_candles = _gateio_klines(symbol, "1h", 2)
                 _os_reversal_confirmed = False
-                if len(_os_candles) >= 2:
-                    _last_closed = _os_candles[-2]  # -1 ещё формируется
+                if len(_os_candles) >= 1:
+                    _cur_candle = _os_candles[-1]  # текущая формирующаяся свеча
                     try:
-                        _os_reversal_confirmed = float(_last_closed[4]) > float(_last_closed[1])
+                        # Цена выше открытия текущей свечи → откуп идёт прямо сейчас
+                        _os_reversal_confirmed = float(price) > float(_cur_candle[1])
                     except (ValueError, IndexError, TypeError):
                         _os_reversal_confirmed = True  # ошибка данных → не блокировать
                 else:
                     _os_reversal_confirmed = True  # нет данных → не блокировать
                 if not _os_reversal_confirmed:
                     logger.info(
-                        "SHADOW oversold LONG %s — последняя 1ч свеча красная, разворот не подтверждён",
+                        "SHADOW oversold LONG %s — цена ниже открытия текущей 1ч свечи, откуп не начался",
                         symbol,
                     )
                     _dsl_rc, _dtp_rc = _compute_demo_sl_tp("LONG", price, atr)
