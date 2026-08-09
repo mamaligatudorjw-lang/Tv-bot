@@ -313,6 +313,17 @@ MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
 MAX_OPEN_LONG_POSITIONS = 25       # квота для LONG (быстрые 4ч скальпы)
 MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (до 7-30 дней)
 
+# ---------------------------------------------------------------------------
+# Feature flags — отключить фильтр без удаления кода
+# ---------------------------------------------------------------------------
+# bear_downtrend_blocks_long: блокировал LONG в BEAR-режиме если монета падала 3д+
+# По данным демо-позиций win rate теней = 90% → фильтр убивал хорошие сигналы
+BEAR_DOWNTREND_FILTER_ENABLED = False   # ← True чтобы включить обратно
+
+# pump_filter: блокировал LONG/SHORT во время активного памп/дамп тренда
+# По данным демо-позиций win rate теней = 57% → сигналы продолжали идти в нужную сторону
+PUMP_FILTER_ENABLED = False             # ← True чтобы включить обратно
+
 # --- Display leverage for ROI calculation in Telegram messages ---
 # All P&L / SL / TP percentages shown to the user are multiplied by this
 # factor so the user sees ROI at their preferred leverage, not raw price move.
@@ -6103,9 +6114,9 @@ def run_checks():
                     continue
 
                 # Bear downtrend filter for LONG signals.
-                # Oversold RSI in a BEAR market with 3+ consecutive down days is
-                # NOT a bounce — it is a falling knife.  Block LONG and shadow-track.
-                if rec_label == "LONG":
+                # ОТКЛЮЧЁН: демо-позиции показали 90% win rate у теней —
+                # фильтр убивал отскоки от дна. Включить: BEAR_DOWNTREND_FILTER_ENABLED = True
+                if BEAR_DOWNTREND_FILTER_ENABLED and rec_label == "LONG":
                     _block_bd, _bd_days = _bear_downtrend_blocks_long(sym)
                     if _block_bd:
                         logger.info(
@@ -6236,8 +6247,10 @@ def run_checks():
                                 pass
 
                 # ── Trend pump/dump filter ───────────────────────────────────────
+                # ОТКЛЮЧЁН: демо-позиции показали 57% win rate у теней —
+                # памп-тренды продолжались в нужную сторону. Включить: PUMP_FILTER_ENABLED = True
                 _ai_note = ""
-                if b["price"] is not None:
+                if PUMP_FILTER_ENABLED and b["price"] is not None:
                     _pump_blocked, _pump_reason = _trend_pump_filter(
                         sym, rec_label, b["price"]
                     )

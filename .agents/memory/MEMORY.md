@@ -1,1 +1,4 @@
 - [Gate.io Futures migration](gateio-migration.md) — bot uses Gate.io Futures as primary data source; Binance blocked from Replit.
+- [Signal filter flags](signal-filter-flags.md) — two filters disabled via feature flags after demo data showed they blocked profitable signals.
+- [Funding LSR liq veto](funding-lsr-liq.md) — three new scoring factors added; constants tunable at top of file; results tracked via factor_funding_pts/factor_lsr_pts in alerts table.
+- [Streak signal guards](streak-signal-guards.md) — streak LONG/SHORT skips when gain >15% or live price already reversed vs last close.
