@@ -3135,7 +3135,7 @@ BREAKDOWN_RSI_OVERSOLD_MAX   = 35.0   # RSI must be ≤ this (oversold territory
 BREAKDOWN_RSI_OVERSOLD_DROP  = -15.0  # 24h drop must be ≤ this (stronger confirmation)
 
 # --- Intraday hourly streak (6h+ consecutive green/red 1h candles) ---
-STREAK_1H_MIN          = 6       # minimum consecutive green/red hours to trigger
+STREAK_1H_MIN          = 4       # minimum consecutive green/red hours to trigger
 STREAK_1H_COOLDOWN     = 28800   # 8h cooldown per symbol (avoid re-spamming same streak)
 STREAK_1H_PRE_FILTER   = 3.0    # min |pct24| to even fetch 1h candles (saves API calls)
 STREAK_1H_RSI_MAX_LONG = 73.0   # RSI ceiling for LONG streak (not already overbought)
