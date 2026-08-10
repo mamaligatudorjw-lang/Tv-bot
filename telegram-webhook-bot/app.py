@@ -187,6 +187,7 @@ CONFLUENCE_LONG_MIN_SCORE = 52    # skip confluence LONG when signal score is be
 # Signal enable flags — включить/выключить каждый тип сигналов
 # ---------------------------------------------------------------------------
 CONFLUENCE_ENABLED              = True   # конфлюенс (LONG + SHORT)
+CONFLUENCE_BTC_FILTER_ENABLED   = False  # False = не блокировать по тренду BTC, торговать по тренду монеты
 OVERHEATED_ENABLED              = True   # перегрев 24h (LONG) — монета сильно выросла
 OVERSOLD_REVERSAL_CANDLE_FILTER = False  # True = требовать зелёную свечу для oversold LONG
                                          # False = входить сразу (текущий режим)
@@ -6497,38 +6498,36 @@ def run_checks():
                                 )
                         continue
 
-                # BTC direction filter — alts follow BTC short-term.
-                # RSI of BTC (1h) tells us if BTC is in an up or down swing right now.
-                # 24h BTC % is a backup for when RSI is in neutral zone.
+                # BTC direction filter — CONFLUENCE_BTC_FILTER_ENABLED=False → выкл
+                # Торгуем по тренду монеты (EMA-200), а не по тренду BTC
                 btc_rsi = rsi_map.get("BTCUSDT")
-                if rec_label == "SHORT":
-                    # BTC pumping → shorting alts is risky (they'll be lifted too)
-                    btc_bullish = (
-                        (btc_rsi is not None and btc_rsi > 55) or
-                        (btc_pct24 is not None and btc_pct24 > 2.0)
-                    )
-                    if btc_bullish:
-                        logger.debug(
-                            "Confluence SHORT suppressed by BTC filter: %s "
-                            "BTC RSI=%.1f 24h=%.1f%%",
-                            sym, btc_rsi or 0, btc_pct24 or 0,
+                if CONFLUENCE_BTC_FILTER_ENABLED:
+                    if rec_label == "SHORT":
+                        btc_bullish = (
+                            (btc_rsi is not None and btc_rsi > 55) or
+                            (btc_pct24 is not None and btc_pct24 > 2.0)
                         )
-                        summary["confluence_btc_blocked"] += 1
-                        continue
-                elif rec_label == "LONG":
-                    # BTC falling → longing alts is risky (they'll be dragged down too)
-                    btc_bearish = (
-                        (btc_rsi is not None and btc_rsi < 45) or
-                        (btc_pct24 is not None and btc_pct24 < -2.0)
-                    )
-                    if btc_bearish:
-                        logger.debug(
-                            "Confluence LONG suppressed by BTC filter: %s "
-                            "BTC RSI=%.1f 24h=%.1f%%",
-                            sym, btc_rsi or 0, btc_pct24 or 0,
+                        if btc_bullish:
+                            logger.debug(
+                                "Confluence SHORT suppressed by BTC filter: %s "
+                                "BTC RSI=%.1f 24h=%.1f%%",
+                                sym, btc_rsi or 0, btc_pct24 or 0,
+                            )
+                            summary["confluence_btc_blocked"] += 1
+                            continue
+                    elif rec_label == "LONG":
+                        btc_bearish = (
+                            (btc_rsi is not None and btc_rsi < 45) or
+                            (btc_pct24 is not None and btc_pct24 < -2.0)
                         )
-                        summary["confluence_btc_blocked"] += 1
-                        continue
+                        if btc_bearish:
+                            logger.debug(
+                                "Confluence LONG suppressed by BTC filter: %s "
+                                "BTC RSI=%.1f 24h=%.1f%%",
+                                sym, btc_rsi or 0, btc_pct24 or 0,
+                            )
+                            summary["confluence_btc_blocked"] += 1
+                            continue
 
                 # Reversal confirmation filter for SHORT signals.
                 # Don't short a coin that is still at/near its 24h high —
