@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "[start-production] Starting Flask Telegram bot on :5000 ..."
+# Explicitly enable command polling in production (was previously blocked by
+# BOT_POLLING_DISABLED inherited from the artifact env).
+unset BOT_POLLING_DISABLED
 cd "$ROOT_DIR/telegram-webhook-bot"
 "$ROOT_DIR/.pythonlibs/bin/gunicorn" \
   --bind 0.0.0.0:5000 \
