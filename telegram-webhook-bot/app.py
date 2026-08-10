@@ -141,6 +141,7 @@ state = {
     "last_weekly_monthly_refresh": 0,  # unix timestamp of last 7d/30d refresh
     "volume_ranking": [],              # list[(symbol, yesterday_vol, today_vol, pct_change)] sorted desc by pct
     "volume_ranking_updated": 0,       # unix timestamp of last volume ranking refresh
+    "liquid_symbols": [],              # list[str] liquid pairs from last cycle (for startup ranking refresh)
     "last_rsi_alerted": {},            # symbol -> timestamp (overbought cooldown)
     "last_rsi_oversold_alerted": {},   # symbol -> timestamp (oversold cooldown)
     "last_high_alerted": {},           # symbol -> timestamp (24h high cooldown)
@@ -6157,6 +6158,9 @@ def run_checks():
                     len(liquid_vol_map), len(tickers), f"{MIN_VOLUME_USDT:,.0f}",
                     len(broad_pairs), f"{MIN_VOLUME_USDT_BROAD:,.0f}",
                 )
+                # Keep a snapshot of liquid symbols for the startup ranking refresh thread
+                with state_lock:
+                    state["liquid_symbols"] = list(liquid_vol_map.keys())
 
             liquid_pairs = list(liquid_vol_map.items())
 
@@ -9419,11 +9423,34 @@ scheduler.add_job(
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
 # does NOT silently disable the workers.
+def _startup_ranking_refresh() -> None:
+    """After the first check cycle populates liquid_symbols, immediately build
+    the volume ranking so /top10 works right after startup without waiting for
+    the cycle to reach step 7 (which can be skipped by the deadline check)."""
+    deadline = time.time() + 900  # give up after 15 min
+    while time.time() < deadline:
+        time.sleep(10)
+        with state_lock:
+            syms = list(state["liquid_symbols"])
+            already_built = state["volume_ranking_updated"] > 0
+        if already_built:
+            return  # ranking already built by the normal cycle — nothing to do
+        if syms:
+            logger.info("Startup ranking refresh: building volume ranking for %d liquid pairs", len(syms))
+            try:
+                refresh_weekly_monthly_highs(syms)
+            except Exception as _e:
+                logger.warning("Startup ranking refresh failed: %s", _e)
+            return
+    logger.warning("Startup ranking refresh: timed out waiting for liquid_symbols")
+
+
 if os.environ.get("TESTING", "").strip().lower() not in {"1", "true", "yes"}:
     restore_position_monitors()
     scheduler.start()
     start_command_polling()
     start_watchdog()
+    threading.Thread(target=_startup_ranking_refresh, daemon=True, name="startup-ranking").start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
