@@ -196,7 +196,7 @@ BREAKDOWN_ENABLED               = False  # пробой вниз SHORT
 MOMENTUM_LONG_ENABLED           = False  # моментум LONG (рост)
 NEW_LISTING_ENABLED             = False  # новые листинги SHORT
 LISTING_PEAK_ENABLED            = False  # пик листинга SHORT
-STREAK_1H_ENABLED               = False  # серия свечей (1h streak)
+STREAK_1H_ENABLED               = True   # серия свечей (1h streak)
 WHALE_LSR_ENABLED               = False  # сдвиг позиций китов
 COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
 COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
@@ -3192,7 +3192,7 @@ BREAKDOWN_RSI_OVERSOLD_MAX   = 35.0   # RSI must be ≤ this (oversold territory
 BREAKDOWN_RSI_OVERSOLD_DROP  = -15.0  # 24h drop must be ≤ this (stronger confirmation)
 
 # --- Intraday hourly streak (6h+ consecutive green/red 1h candles) ---
-STREAK_1H_MIN          = 4       # minimum consecutive green/red hours to trigger
+STREAK_1H_MIN          = 6       # minimum consecutive green/red hours to trigger
 STREAK_1H_COOLDOWN     = 28800   # 8h cooldown per symbol (avoid re-spamming same streak)
 STREAK_1H_PRE_FILTER   = 3.0    # min |pct24| to even fetch 1h candles (saves API calls)
 STREAK_1H_RSI_MAX_LONG = 73.0   # RSI ceiling for LONG streak (not already overbought)
