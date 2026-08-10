@@ -7218,22 +7218,43 @@ class PositionMonitor(threading.Thread):
             if self.direction == "LONG"
             else (self.entry - exit_price) / self.entry * 100
         )
+        # Атомарная проверка + обновление: защита от двойного уведомления при
+        # перезапуске бота. Если старый поток успел закрыть позицию до рестарта,
+        # новый восстановленный поток увидит status != 'open' и выйдет без уведомления.
+        already_closed = False
         try:
             with _db_lock:
                 conn = _get_db()
-                conn.execute(
-                    "UPDATE position_monitors "
-                    "SET status=?, ts_close=?, exit_price=?, pnl_pct=? "
-                    "WHERE id=?",
-                    (
-                        result.lower(), int(time.time()),
-                        exit_price, round(pnl_pct, 4),
-                        self.position_id,
-                    ),
-                )
-                conn.commit()
+                cur_row = conn.execute(
+                    "SELECT status FROM position_monitors WHERE id=?",
+                    (self.position_id,),
+                ).fetchone()
+                if cur_row and cur_row[0] != "open":
+                    already_closed = True
+                    logger.warning(
+                        "PositionMonitor %d %s: already closed (status=%s) — "
+                        "skipping duplicate exit notification",
+                        self.position_id, self.symbol, cur_row[0],
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE position_monitors "
+                        "SET status=?, ts_close=?, exit_price=?, pnl_pct=? "
+                        "WHERE id=?",
+                        (
+                            result.lower(), int(time.time()),
+                            exit_price, round(pnl_pct, 4),
+                            self.position_id,
+                        ),
+                    )
+                    conn.commit()
         except Exception as exc:
             logger.warning("PositionMonitor DB update failed: %s", exc)
+
+        if already_closed:
+            with _monitors_lock:
+                _active_monitors.pop(self.position_id, None)
+            return
 
         # Guard: if the entry signal was never delivered (Telegram failure,
         # silent drop, or bot restart), send it now before the exit so the
