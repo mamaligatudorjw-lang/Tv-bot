@@ -3647,6 +3647,30 @@ def handle_callback_query(cb: dict) -> None:
                     _telegram_answer_callback(cb_id, "❌ Ошибка базы данных")
             else:
                 _telegram_answer_callback(cb_id)
+        elif kind == "unmute_all":
+            # Clear all hidden types/symbols AND silenced state
+            try:
+                with _db_lock:
+                    conn = _get_db()
+                    conn.execute("DELETE FROM hidden_items")
+                    conn.commit()
+                with _prefs_lock:
+                    _hidden_types.clear()
+                    _hidden_symbols.clear()
+                with state_lock:
+                    state["silenced"] = False
+                    state["silenced_at"] = None
+                _telegram_answer_callback(cb_id, "✅ Все заглушки сняты")
+                logger.info("unmute_all via button from chat_id=%s", chat_id)
+                if chat_id:
+                    _telegram_send(
+                        chat_id,
+                        "🔔 <b>Всё разглушено</b>\n"
+                        "Все скрытые типы и монеты восстановлены. Сигналы снова активны.",
+                    )
+            except Exception as _e:
+                logger.error("unmute_all callback failed: %s", _e)
+                _telegram_answer_callback(cb_id, "❌ Ошибка")
         elif kind == "noop":
             _telegram_answer_callback(cb_id)
         else:
@@ -7441,9 +7465,41 @@ def handle_status_command(chat_id: int) -> None:
     error_line = f"\n⚠️ Ошибок: {len(errors)}" if errors else ""
     silence_line = f"\n🔕 <b>Алерты заглушены</b> с {silenced_at}" if silenced else "\n🔔 Алерты активны"
 
+    # ── Hidden items section ────────────────────────────────────────────────
+    _ensure_prefs_loaded()
+    with _prefs_lock:
+        hidden_types_snap = set(_hidden_types)
+        hidden_symbols_snap = set(_hidden_symbols)
+    _type_names = {
+        "oversold_24h":   "перепроданность",
+        "overheated_24h": "импульс вверх",
+        "confluence":     "конфлюэнция",
+        "streak_1h":      "серия свечей",
+        "breakdown_short": "пробой вниз",
+        "momentum_long":  "моментум лонг",
+    }
+    hidden_lines = []
+    for t in sorted(hidden_types_snap):
+        friendly = _type_names.get(t, t)
+        hidden_lines.append(f"  ⛔ тип: <b>{friendly}</b>")
+    for s in sorted(hidden_symbols_snap):
+        hidden_lines.append(f"  ⛔ монета: <code>{s}</code>")
+
+    has_mutes = bool(hidden_lines) or silenced
+    if hidden_lines:
+        hidden_section = "\n\n🔕 <b>Заглушено (сигналы не отправляются!):</b>\n" + "\n".join(hidden_lines)
+    else:
+        hidden_section = ""
+    status_markup = (
+        {"inline_keyboard": [[{"text": "🔓 Разглушить всё", "callback_data": "unmute_all"}]]}
+        if has_mutes else None
+    )
+    # ────────────────────────────────────────────────────────────────────────
+
     msg = (
         f"<b>📊 Статус монитора Binance</b>"
-        f"{silence_line}\n\n"
+        f"{silence_line}"
+        f"{hidden_section}\n\n"
         f"<b>Отслеживается пар:</b> {tracked} USDT\n"
         f"<b>Ликвидных пар:</b> {liquid} (≥${MIN_VOLUME_USDT:,.0f} объёма)\n"
         f"<b>Активный хост:</b> <code>{active_host}</code>\n\n"
@@ -7487,7 +7543,7 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Настройки:</b>\n"
         f"  /silence · /unmute"
     )
-    _telegram_send(chat_id, msg)
+    _telegram_send(chat_id, msg, reply_markup=status_markup)
 
 
 def handle_top10_command(chat_id: int) -> None:
@@ -8734,10 +8790,21 @@ def handle_unmute_command(chat_id: int) -> None:
     with state_lock:
         state["silenced"] = False
         state["silenced_at"] = None
+    # Also clear all hidden types and symbols from DB
+    try:
+        with _db_lock:
+            conn = _get_db()
+            conn.execute("DELETE FROM hidden_items")
+            conn.commit()
+        with _prefs_lock:
+            _hidden_types.clear()
+            _hidden_symbols.clear()
+    except Exception as e:
+        logger.warning("handle_unmute_command: failed to clear hidden_items: %s", e)
     logger.info("Alerts unmuted via /unmute from chat_id=%s", chat_id)
     _telegram_send(chat_id, (
         "<b>🔔 Алерты возобновлены</b>\n"
-        "Рыночные алерты снова активны."
+        "Все скрытые типы и монеты разблокированы. Сигналы снова активны."
     ))
 
 
