@@ -3153,7 +3153,7 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     # ── SHORT / SELL — raised from 70→75 (2026-08-08): demo data showed 10% win rate
     # for regular SHORTs. Only the highest-conviction shorts should fire.
     "overheated_24h":      75,
-    "confluence":          75,   # SHORT: score≥75; LONG uses MIN_SCORE_LONG_BY_TYPE
+    "confluence":          52,   # LONG и SHORT: score≥52 (тренд по EMA-200)
     "breakdown_short":     75,   # raised from 70
     "momentum_up_2":       75,   # raised from 70
     "momentum_up_3":       75,   # raised from 70
@@ -3179,7 +3179,7 @@ MIN_SCORE_LONG_BY_TYPE: dict[str, int] = {
     "oversold_24h": 55,   # score 55-65: TP 37-40%; ≥60 SL rate spikes to 50%+
 }
 MAX_SCORE_LONG_BY_TYPE: dict[str, int] = {
-    "confluence":   65,   # above 65: TP:SL degrades to 0.71x → 0.59x
+    # "confluence" max removed — EMA-based direction, старая статистика RSI неактуальна
     "oversold_24h": 65,   # above 65: TP:SL collapses to 0.32x
 }
 
@@ -6440,37 +6440,27 @@ def run_checks():
                 if ema is not None and b["price"] is not None:
                     above_ema = b["price"] > ema
 
-                rec_line, reason_line = make_recommendation(
-                    rsi=b["rsi"],
-                    spike_ratio=b["spike_ratio"],
-                    broke_weekly=b["broke_weekly"],
-                    broke_monthly=b["broke_monthly"],
-                    near_24h_high=b["near_24h_high"],
-                    above_ema200=above_ema,
-                )
-                rec_label = _rec_label(rec_line)
-
-                # EMA-200 trend filter
-                # SHORT: suppress if price is above EMA-200 (uptrend — don't fight it)
-                if rec_label == "SHORT" and above_ema is True:
-                    logger.debug(
-                        "Confluence SHORT suppressed by EMA-200 filter: "
-                        "%s price=%.6g ema=%.6g",
-                        sym, b["price"] or 0, ema or 0,
+                # Направление определяется трендом монеты (EMA-200):
+                # выше EMA → LONG, ниже EMA → SHORT.
+                # Если EMA не загружена — fallback на make_recommendation().
+                if above_ema is True:
+                    rec_label = "LONG"
+                    rec_line = "📊 Рекомендация: ЛОНГ 📈"
+                    reason_line = "Причина: монета выше EMA-200 (4ч) — восходящий тренд"
+                elif above_ema is False:
+                    rec_label = "SHORT"
+                    rec_line = "📊 Рекомендация: ШОРТ 📉"
+                    reason_line = "Причина: монета ниже EMA-200 (4ч) — нисходящий тренд"
+                else:
+                    rec_line, reason_line = make_recommendation(
+                        rsi=b["rsi"],
+                        spike_ratio=b["spike_ratio"],
+                        broke_weekly=b["broke_weekly"],
+                        broke_monthly=b["broke_monthly"],
+                        near_24h_high=b["near_24h_high"],
+                        above_ema200=above_ema,
                     )
-                    summary["confluence_ema_blocked"] += 1
-                    continue
-                # LONG: suppress if price is below EMA-200 (downtrend)
-                # Exception: oversold bounce (RSI ≤ 30) fires naturally below EMA
-                is_conf_oversold = b["rsi"] is not None and b["rsi"] <= RSI_OVERSOLD
-                if rec_label == "LONG" and above_ema is False and not is_conf_oversold:
-                    logger.debug(
-                        "Confluence LONG suppressed by EMA-200 filter: "
-                        "%s price=%.6g ema=%.6g (below EMA)",
-                        sym, b["price"] or 0, ema or 0,
-                    )
-                    summary["confluence_ema_blocked"] += 1
-                    continue
+                    rec_label = _rec_label(rec_line)
 
                 # Bear downtrend filter for LONG signals.
                 # ОТКЛЮЧЁН: демо-позиции показали 90% win rate у теней —
