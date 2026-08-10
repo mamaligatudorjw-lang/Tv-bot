@@ -190,6 +190,7 @@ CONFLUENCE_ENABLED              = True   # конфлюенс (LONG + SHORT)
 OVERHEATED_ENABLED              = True   # перегрев 24h (LONG) — монета сильно выросла
 OVERSOLD_REVERSAL_CANDLE_FILTER = False  # True = требовать зелёную свечу для oversold LONG
                                          # False = входить сразу (текущий режим)
+AI_VETO_ENABLED                 = False  # False = ИИ не блокирует сигналы (все теневые ai_veto → реальные)
 VOL_SURGE_ENABLED               = False  # объёмный всплеск + CRSI
 BREAKDOWN_ENABLED               = False  # пробой вниз SHORT
 MOMENTUM_LONG_ENABLED           = False  # моментум LONG (рост)
@@ -1315,17 +1316,6 @@ def handle_demo_command(chat_id: int) -> None:
                 "COALESCE(SUM(pnl_usd),0) "
                 "FROM demo_positions WHERE status!='open' AND is_shadow=0"
             ).fetchone()
-            tc_open = conn.execute(
-                "SELECT COUNT(*) FROM demo_positions "
-                "WHERE status='open' AND is_shadow=0 AND is_top=1"
-            ).fetchone()[0]
-            tc = conn.execute(
-                "SELECT COUNT(*), "
-                "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
-                "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
-                "COALESCE(SUM(pnl_usd),0) "
-                "FROM demo_positions WHERE status!='open' AND is_shadow=0 AND is_top=1"
-            ).fetchone()
             sc_open = conn.execute(
                 "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=1"
             ).fetchone()[0]
@@ -1352,10 +1342,8 @@ def handle_demo_command(chat_id: int) -> None:
 
     rc_total, rc_tp, rc_sl, rc_pnl = rc
     sc_total, sc_tp, sc_sl, sc_pnl = sc
-    tc_total, tc_tp, tc_sl, tc_pnl = tc
     rc_wr = (rc_tp / rc_total * 100) if rc_total else 0
     sc_wr = (sc_tp / sc_total * 100) if sc_total else 0
-    tc_wr = (tc_tp / tc_total * 100) if tc_total else 0
 
     # Fetch current prices for all open positions (real + shadow)
     all_open_syms = {r[0] for r in open_rows} | {r[0] for r in shadow_open_rows}
@@ -1397,20 +1385,6 @@ def handle_demo_command(chat_id: int) -> None:
     if rc_open:
         u_sign = "+" if unrealized_real >= 0 else ""
         lines.append(f"  Нереализованный PnL: <b>{u_sign}${unrealized_real:.2f}</b> (открытые)")
-
-    lines += [
-        "",
-        f"🏆 <b>ТОП сигналы (score ≥ {TOP_SIGNAL_SCORE})</b>",
-        f"  Открытых: <b>{tc_open}</b>  │  Закрытых: <b>{tc_total}</b>",
-    ]
-    if tc_total:
-        sign = "+" if tc_pnl >= 0 else ""
-        lines += [
-            f"  Win-rate: <b>{tc_wr:.0f}%</b>  (TP: {tc_tp} / SL: {tc_sl})",
-            f"  PnL закрытых: <b>{sign}${tc_pnl:.2f}</b>",
-        ]
-    else:
-        lines.append("  Пока нет закрытых ТОП позиций.")
 
     lines += [
         "",
@@ -4778,23 +4752,25 @@ def check_overheated_oversold(
                             alert_type="overheated_24h",
                         )
                     continue
-                # ── AI veto ──────────────────────────────────────────────────
-                _ai_ok_oh, _ai_note_oh, _ai_hold_oh = _ai_veto_confluence(
-                    symbol, "LONG", rsi, pct24, None
-                )
-                if not _ai_ok_oh:
-                    logger.info(
-                        "SUPPRESSED overheated %s — ИИ: %s", symbol, _ai_note_oh,
+                # ── AI veto (AI_VETO_ENABLED=False → отключён) ───────────────
+                _ai_ok_oh, _ai_note_oh, _ai_hold_oh = True, "", ""
+                if AI_VETO_ENABLED:
+                    _ai_ok_oh, _ai_note_oh, _ai_hold_oh = _ai_veto_confluence(
+                        symbol, "LONG", rsi, pct24, None
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
-                    if _dsl and _dtp:
-                        _demo_open_position(
-                            symbol, "LONG", price, _dsl, _dtp,
-                            is_shadow=True,
-                            shadow_reason=f"ai_veto: {_ai_note_oh}",
-                            alert_type="overheated_24h",
+                    if not _ai_ok_oh:
+                        logger.info(
+                            "SUPPRESSED overheated %s — ИИ: %s", symbol, _ai_note_oh,
                         )
-                    continue
+                        _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
+                        if _dsl and _dtp:
+                            _demo_open_position(
+                                symbol, "LONG", price, _dsl, _dtp,
+                                is_shadow=True,
+                                shadow_reason=f"ai_veto: {_ai_note_oh}",
+                                alert_type="overheated_24h",
+                            )
+                        continue
                 # ── Факторы фандинг + LSR ────────────────────────────────────
                 if _fl_text_oh:
                     body += f"\n{_fl_text_oh}"
@@ -4928,23 +4904,25 @@ def check_overheated_oversold(
                             alert_type="oversold_24h",
                         )
                     continue
-                # ── AI veto ──────────────────────────────────────────────────
-                _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
-                    symbol, "LONG", rsi, pct24, None
-                )
-                if not _ai_ok_os:
-                    logger.info(
-                        "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
+                # ── AI veto (AI_VETO_ENABLED=False → отключён) ───────────────
+                _ai_ok_os, _ai_note_os, _ai_hold_os = True, "", ""
+                if AI_VETO_ENABLED:
+                    _ai_ok_os, _ai_note_os, _ai_hold_os = _ai_veto_confluence(
+                        symbol, "LONG", rsi, pct24, None
                     )
-                    _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
-                    if _dsl and _dtp:
-                        _demo_open_position(
-                            symbol, "LONG", price, _dsl, _dtp,
-                            is_shadow=True,
-                            shadow_reason=f"ai_veto: {_ai_note_os}",
-                            alert_type="oversold_24h",
+                    if not _ai_ok_os:
+                        logger.info(
+                            "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
                         )
-                    continue
+                        _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
+                        if _dsl and _dtp:
+                            _demo_open_position(
+                                symbol, "LONG", price, _dsl, _dtp,
+                                is_shadow=True,
+                                shadow_reason=f"ai_veto: {_ai_note_os}",
+                                alert_type="oversold_24h",
+                            )
+                        continue
                 # ── Факторы фандинг + LSR ────────────────────────────────────
                 if _fl_text_os:
                     body += f"\n{_fl_text_os}"
@@ -6679,10 +6657,7 @@ def run_checks():
                                 alert_type="confluence",
                             )
                         continue
-                # ── AI veto (только для LONG) ─────────────────────────────────────
-                # Для SHORT: демо показало, что AI veto блокирует именно хорошие SHORT-ы
-                # (52% WR у теневых), а реальные SHORT-ы без вето дают 5.9% WR.
-                # Вывод: AI veto работает наоборот для SHORT → отключить для SHORT.
+                # ── AI veto (AI_VETO_ENABLED=False → отключён полностью) ─────────
                 _pct24_v: float | None = None
                 if tickers:
                     _tv = tickers.get(sym)
@@ -6692,7 +6667,7 @@ def run_checks():
                         except (ValueError, KeyError, TypeError):
                             pass
                 _ai_allow, _ai_note, _ai_hold = True, "", ""
-                if rec_label == "LONG":
+                if AI_VETO_ENABLED and rec_label == "LONG":
                     _ai_allow, _ai_note, _ai_hold = _ai_veto_confluence(
                         sym, rec_label, b["rsi"], _pct24_v, above_ema
                     )
