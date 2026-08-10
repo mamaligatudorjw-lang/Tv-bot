@@ -1698,6 +1698,7 @@ def start_command_polling() -> None:
         target=_poll_telegram_commands, daemon=True, name="tg-poll"
     )
     _tg_poll_thread.start()
+    logger.info("Telegram command polling started")
 
 
 # ---------------------------------------------------------------------------
@@ -2674,6 +2675,13 @@ def _get_db() -> sqlite3.Connection:
             if "duplicate column" not in str(_mig_exc).lower():
                 logger.error("demo_positions is_top migration failed: %s", _mig_exc)
                 raise
+        # Backfill: all real (non-shadow) positions created before is_top was added
+        # should be marked is_top=1, since any sent signal had score >= MIN_SEND_SCORE > TOP_SIGNAL_SCORE.
+        _backfilled = _db_conn.execute(
+            "UPDATE demo_positions SET is_top=1 WHERE is_shadow=0 AND is_top=0"
+        ).rowcount
+        if _backfilled:
+            logger.info("demo_positions: backfilled is_top=1 for %d existing real positions", _backfilled)
         # Personal positions tracker — user registers their own open positions;
         # bot monitors and sends confirmed reversal alerts.
         _db_conn.execute("""
