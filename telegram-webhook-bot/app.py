@@ -1558,7 +1558,8 @@ def _poll_telegram_commands() -> None:
         "/ai":       handle_ai_command,
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
-        "/demo":     handle_demo_command,
+        "/demo":        handle_demo_command,
+        "/scorestats":  handle_scorestats_command,
         "/addpos":   handle_addpos_command,
         "/mypos":    handle_mypos_command,
         "/closepos": handle_closepos_command,
@@ -7443,6 +7444,99 @@ def log_cycle(summary: dict) -> None:
 # ---------------------------------------------------------------------------
 # Telegram command handlers
 # ---------------------------------------------------------------------------
+
+def handle_scorestats_command(chat_id: int) -> None:
+    """Show PnL breakdown by score bucket across all signal types."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            # Overall breakdown by score bucket
+            buckets = conn.execute("""
+                SELECT
+                    (a.score / 10) * 10 AS bucket,
+                    COUNT(*) AS cnt,
+                    ROUND(100.0 * SUM(CASE WHEN pm.pnl_pct > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) AS wr,
+                    ROUND(AVG(pm.pnl_pct), 2) AS avg_pnl,
+                    ROUND(SUM(pm.pnl_pct), 2) AS total_pnl
+                FROM alerts a
+                JOIN position_monitors pm ON pm.alert_id = a.id
+                WHERE a.score IS NOT NULL
+                  AND pm.pnl_pct IS NOT NULL
+                  AND pm.status != 'open'
+                  AND a.ts >= ?
+                GROUP BY bucket
+                ORDER BY bucket
+            """, (int(time.time()) - 30 * 86400,)).fetchall()
+
+            # Per-type breakdown (top signal types only, ≥5 closed positions)
+            by_type = conn.execute("""
+                SELECT
+                    a.alert_type,
+                    a.recommendation,
+                    (a.score / 10) * 10 AS bucket,
+                    COUNT(*) AS cnt,
+                    ROUND(100.0 * SUM(CASE WHEN pm.pnl_pct > 0 THEN 1 ELSE 0 END) / COUNT(*), 1) AS wr,
+                    ROUND(AVG(pm.pnl_pct), 2) AS avg_pnl
+                FROM alerts a
+                JOIN position_monitors pm ON pm.alert_id = a.id
+                WHERE a.score IS NOT NULL
+                  AND pm.pnl_pct IS NOT NULL
+                  AND pm.status != 'open'
+                  AND a.ts >= ?
+                GROUP BY a.alert_type, a.recommendation, bucket
+                HAVING cnt >= 5
+                ORDER BY a.alert_type, a.recommendation, bucket
+            """, (int(time.time()) - 30 * 86400,)).fetchall()
+    except Exception as e:
+        logger.warning("handle_scorestats_command failed: %s", e)
+        _telegram_send(chat_id, "❌ Ошибка при чтении статистики.")
+        return
+
+    if not buckets:
+        _telegram_send(chat_id, "⏳ Недостаточно данных — нет закрытых позиций со score.")
+        return
+
+    lines = ["📊 <b>Статистика по уровню сигнала (score)</b>", "За последние 30 дней\n"]
+
+    # Overall table
+    lines.append("<b>Все типы сигналов:</b>")
+    for bucket, cnt, wr, avg_pnl, total_pnl in buckets:
+        emoji = "✅" if avg_pnl > 0 else "❌"
+        bar_len = min(int(abs(avg_pnl) * 4), 10)
+        bar = ("▲" if avg_pnl > 0 else "▼") * bar_len
+        avg_sign = "+" if avg_pnl >= 0 else ""
+        lines.append(
+            f"{emoji} <b>Score {bucket}–{bucket+9}</b>  cnt={cnt}  "
+            f"WR={wr:.0f}%  avg={avg_sign}{avg_pnl:.2f}%  {bar}"
+        )
+
+    # Per-type details (grouped by type+side)
+    if by_type:
+        lines.append("\n<b>По типу сигнала (≥5 позиций):</b>")
+        prev_key = None
+        for atype, rec, bucket, cnt, wr, avg_pnl in by_type:
+            key = (atype, rec)
+            if key != prev_key:
+                type_label = _label_alert_type(atype) if atype in (
+                    "confluence", "oversold_24h", "overheated_24h",
+                    "breakdown_short", "streak_1h", "volume_surge_short",
+                    "volume_surge_long", "momentum_long",
+                ) else atype
+                lines.append(f"\n<i>{type_label} {rec}:</i>")
+                prev_key = key
+            e = "✅" if avg_pnl > 0 else "❌"
+            s = "+" if avg_pnl >= 0 else ""
+            lines.append(f"  {e} {bucket}–{bucket+9}: WR={wr:.0f}%  avg={s}{avg_pnl:.2f}%  (n={cnt})")
+
+    # Quick insight
+    lines.append("\n<b>💡 Вывод:</b>")
+    best = max(buckets, key=lambda r: r[3])   # highest avg_pnl
+    worst = min(buckets, key=lambda r: r[3])  # lowest avg_pnl
+    lines.append(f"Лучший диапазон: score {best[0]}–{best[0]+9} (avg {'+' if best[3]>=0 else ''}{best[3]:.2f}%)")
+    lines.append(f"Худший диапазон: score {worst[0]}–{worst[0]+9} (avg {'+' if worst[3]>=0 else ''}{worst[3]:.2f}%)")
+
+    _telegram_send(chat_id, "\n".join(lines))
+
 
 def handle_status_command(chat_id: int) -> None:
     with state_lock:
