@@ -335,6 +335,10 @@ MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
 MAX_OPEN_LONG_POSITIONS = 25       # квота для LONG (быстрые 4ч скальпы)
 MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (до 7-30 дней)
 
+# TOP signals: score >= this → «🏆 ТОП СИГНАЛ» marker in Telegram and a
+# separate bucket in /demo (real vs shadow vs top comparison).
+TOP_SIGNAL_SCORE = 70
+
 # ---------------------------------------------------------------------------
 # Feature flags — отключить фильтр без удаления кода
 # ---------------------------------------------------------------------------
@@ -1185,8 +1189,11 @@ def _demo_open_position(
     is_shadow: bool = False,
     shadow_reason: str | None = None,
     alert_type: str | None = None,
+    score: int | None = None,
 ) -> None:
-    """Insert a paper-trading position row."""
+    """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
+    a real position as TOP for the /demo three-way comparison."""
+    is_top = (not is_shadow) and score is not None and score >= TOP_SIGNAL_SCORE
     try:
         with _db_lock:
             conn = _get_db()
@@ -1204,11 +1211,12 @@ def _demo_open_position(
             conn.execute(
                 "INSERT INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
-                " size_usd, status, is_shadow, shadow_reason, alert_type) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+                " size_usd, status, is_shadow, shadow_reason, alert_type, is_top) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
                 (int(time.time()), symbol, direction, entry_price,
                  sl_price, tp_price, size_usd,
-                 1 if is_shadow else 0, shadow_reason, alert_type),
+                 1 if is_shadow else 0, shadow_reason, alert_type,
+                 1 if is_top else 0),
             )
             conn.commit()
         logger.info(
@@ -1292,6 +1300,17 @@ def handle_demo_command(chat_id: int) -> None:
                 "COALESCE(SUM(pnl_usd),0) "
                 "FROM demo_positions WHERE status!='open' AND is_shadow=0"
             ).fetchone()
+            tc_open = conn.execute(
+                "SELECT COUNT(*) FROM demo_positions "
+                "WHERE status='open' AND is_shadow=0 AND is_top=1"
+            ).fetchone()[0]
+            tc = conn.execute(
+                "SELECT COUNT(*), "
+                "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
+                "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
+                "COALESCE(SUM(pnl_usd),0) "
+                "FROM demo_positions WHERE status!='open' AND is_shadow=0 AND is_top=1"
+            ).fetchone()
             sc_open = conn.execute(
                 "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=1"
             ).fetchone()[0]
@@ -1318,8 +1337,10 @@ def handle_demo_command(chat_id: int) -> None:
 
     rc_total, rc_tp, rc_sl, rc_pnl = rc
     sc_total, sc_tp, sc_sl, sc_pnl = sc
+    tc_total, tc_tp, tc_sl, tc_pnl = tc
     rc_wr = (rc_tp / rc_total * 100) if rc_total else 0
     sc_wr = (sc_tp / sc_total * 100) if sc_total else 0
+    tc_wr = (tc_tp / tc_total * 100) if tc_total else 0
 
     # Fetch current prices for all open positions (real + shadow)
     all_open_syms = {r[0] for r in open_rows} | {r[0] for r in shadow_open_rows}
@@ -1361,6 +1382,20 @@ def handle_demo_command(chat_id: int) -> None:
     if rc_open:
         u_sign = "+" if unrealized_real >= 0 else ""
         lines.append(f"  Нереализованный PnL: <b>{u_sign}${unrealized_real:.2f}</b> (открытые)")
+
+    lines += [
+        "",
+        f"🏆 <b>ТОП сигналы (score ≥ {TOP_SIGNAL_SCORE})</b>",
+        f"  Открытых: <b>{tc_open}</b>  │  Закрытых: <b>{tc_total}</b>",
+    ]
+    if tc_total:
+        sign = "+" if tc_pnl >= 0 else ""
+        lines += [
+            f"  Win-rate: <b>{tc_wr:.0f}%</b>  (TP: {tc_tp} / SL: {tc_sl})",
+            f"  PnL закрытых: <b>{sign}${tc_pnl:.2f}</b>",
+        ]
+    else:
+        lines.append("  Пока нет закрытых ТОП позиций.")
 
     lines += [
         "",
@@ -2620,13 +2655,21 @@ def _get_db() -> sqlite3.Connection:
                 pnl_usd       REAL,
                 is_shadow     INTEGER NOT NULL DEFAULT 0,
                 shadow_reason TEXT,
-                alert_type    TEXT
+                alert_type    TEXT,
+                is_top        INTEGER NOT NULL DEFAULT 0
             )
         """)
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
             "ON demo_positions(status, is_shadow)"
         )
+        # Migrate: is_top flag for existing installs
+        try:
+            _db_conn.execute(
+                "ALTER TABLE demo_positions ADD COLUMN is_top INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass  # column already exists
         # Personal positions tracker — user registers their own open positions;
         # bot monitors and sends confirmed reversal alerts.
         _db_conn.execute("""
@@ -3387,6 +3430,10 @@ def send_alert_with_log(
                 symbol, alert_type, score, max_score_long,
             )
             return (False, None)
+    # TOP marker: strongest signals get a visible header so the user can
+    # treat them as a separate, higher-conviction stream.
+    if score is not None and score >= TOP_SIGNAL_SCORE:
+        body_text = "🏆 <b>ТОП СИГНАЛ</b>\n" + body_text
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
         # consume cooldowns so we don't spam every cycle.
@@ -4708,6 +4755,7 @@ def check_overheated_oversold(
                             symbol, "LONG", price, _dsl_oh, _dtp_oh,
                             is_shadow=False,
                             alert_type="overheated_24h",
+                            score=score,
                         )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
@@ -4854,6 +4902,7 @@ def check_overheated_oversold(
                             symbol, "LONG", price, _dsl_os, _dtp_os,
                             is_shadow=False,
                             alert_type="oversold_24h",
+                            score=score,
                         )
     return sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked
 
@@ -6686,6 +6735,7 @@ def run_checks():
                             _demo_open_position(
                                 sym, "LONG", b["price"], _dsl_f2, _dtp_f2,
                                 alert_type="confluence",
+                                score=_flip_score,
                             )
                         with state_lock:
                             for key, s in b["cooldowns"]:
@@ -6757,6 +6807,7 @@ def run_checks():
                         _demo_open_position(
                             sym, rec_label, b["price"], _dsl, _dtp,
                             alert_type="confluence",
+                            score=score,
                         )
 
                 # Mark cooldowns only for signals that actually contributed to a sent alert
