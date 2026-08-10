@@ -183,6 +183,7 @@ RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
 CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
 CONFLUENCE_LONG_MIN_SCORE = 52    # skip confluence LONG when signal score is below this threshold
+OVERSOLD_ONLY_MODE = True         # Если True — отправлять только oversold_24h, всё остальное молчать
 COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
 COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
 COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
@@ -4671,6 +4672,8 @@ def check_overheated_oversold(
             atr = state["atr_4h"].get(symbol)
 
         if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
+            if OVERSOLD_ONLY_MODE:
+                continue  # OVERSOLD_ONLY_MODE: overheated_24h заблокирован
             # Momentum LONG: coin pumped hard with high RSI → ride the momentum.
             # Backtest shows 63% of overheated events continue rising in next 12h.
             # Require price ABOVE EMA-200 (strong uptrend confirmation).
@@ -4811,19 +4814,21 @@ def check_overheated_oversold(
                 else:
                     _os_reversal_confirmed = True  # нет данных → не блокировать
                 if not _os_reversal_confirmed:
-                    logger.info(
-                        "SHADOW oversold LONG %s — цена ниже открытия текущей 1ч свечи, откуп не начался",
-                        symbol,
-                    )
-                    _dsl_rc, _dtp_rc = _compute_demo_sl_tp("LONG", price, atr)
-                    if _dsl_rc and _dtp_rc:
-                        _demo_open_position(
-                            symbol, "LONG", price, _dsl_rc, _dtp_rc,
-                            is_shadow=True,
-                            shadow_reason="no_reversal_candle",
-                            alert_type="oversold_24h",
+                    if not OVERSOLD_ONLY_MODE:
+                        logger.info(
+                            "SHADOW oversold LONG %s — цена ниже открытия текущей 1ч свечи, откуп не начался",
+                            symbol,
                         )
-                    continue
+                        _dsl_rc, _dtp_rc = _compute_demo_sl_tp("LONG", price, atr)
+                        if _dsl_rc and _dtp_rc:
+                            _demo_open_position(
+                                symbol, "LONG", price, _dsl_rc, _dtp_rc,
+                                is_shadow=True,
+                                shadow_reason="no_reversal_candle",
+                                alert_type="oversold_24h",
+                            )
+                        continue
+                    # OVERSOLD_ONLY_MODE: входим сразу, без ожидания свечи разворота
 
                 score = compute_signal_score(
                     "oversold_24h", "buy",
@@ -6225,28 +6230,28 @@ def run_checks():
 
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
                 # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
-                summary["vol_surge_alerts"] = check_volume_surge_crsi(tickers)
+                summary["vol_surge_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_volume_surge_crsi(tickers)
 
                 # 6d. TEST: Breakdown continuation SHORT (drop ≥10% + below EMA + RSI 30-58)
-                summary["breakdown_alerts"] = check_breakdown_short(tickers, rsi_map)
+                summary["breakdown_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_breakdown_short(tickers, rsi_map)
 
                 # 6e. TEST: Momentum continuation LONG (rise ≥10% + above EMA + RSI 42-68)
-                summary["momentum_long_alerts"] = check_momentum_long(tickers, rsi_map)
+                summary["momentum_long_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_momentum_long(tickers, rsi_map)
 
                 # 6f. TEST: New listing pump→dump SHORT (≥+20% from listing + RSI≥65)
-                summary["new_listing_short_alerts"] = check_new_listing_pumps(tickers, rsi_map)
+                summary["new_listing_short_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_new_listing_pumps(tickers, rsi_map)
 
                 # 6g. listing_dump_long disabled — backtest 30d: 0 TP of 4 signals, 50% SL
                 summary["listing_dump_long_alerts"] = 0
 
                 # 6h. TEST: New listing ATH peak → SHORT long-duration (pump≥30% + RSI≥70)
-                summary["listing_peak_short_alerts"] = check_listing_peak_short(tickers, rsi_map)
+                summary["listing_peak_short_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_listing_peak_short(tickers, rsi_map)
 
                 # 6i. Intraday hourly streak — 6+ consecutive green/red 1h candles
-                summary["streak_1h_alerts"] = check_intraday_streak(tickers, rsi_map)
+                summary["streak_1h_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_intraday_streak(tickers, rsi_map)
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
-                summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs)
+                summary["whale_lsr_shift_alerts"] = 0 if OVERSOLD_ONLY_MODE else check_whale_lsr_shift(liquid_pairs)
 
                 # 6k. Personal position tracker — check user's own open positions
                 check_user_position_reversals()
@@ -6406,6 +6411,8 @@ def run_checks():
                     except (ValueError, KeyError, TypeError):
                         btc_pct24 = None
             for sym, b in buckets.items():
+                if OVERSOLD_ONLY_MODE:
+                    continue  # OVERSOLD_ONLY_MODE: confluence заблокирован
                 if len(b["lines"]) < CONFLUENCE_MIN_SIGNALS:
                     summary["single_signals_skipped"] += 1
                     logger.debug("Skipped single-signal coin %s: %s", sym, sorted(b["flags"]))
