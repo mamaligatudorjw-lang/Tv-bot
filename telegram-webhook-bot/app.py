@@ -2668,8 +2668,10 @@ def _get_db() -> sqlite3.Connection:
             _db_conn.execute(
                 "ALTER TABLE demo_positions ADD COLUMN is_top INTEGER NOT NULL DEFAULT 0"
             )
-        except Exception:
-            pass  # column already exists
+        except sqlite3.OperationalError as _mig_exc:
+            if "duplicate column" not in str(_mig_exc).lower():
+                logger.error("demo_positions is_top migration failed: %s", _mig_exc)
+                raise
         # Personal positions tracker — user registers their own open positions;
         # bot monitors and sends confirmed reversal alerts.
         _db_conn.execute("""
