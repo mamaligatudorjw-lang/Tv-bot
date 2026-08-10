@@ -3922,6 +3922,15 @@ def check_intraday_streak(
                     symbol, streak_up, streak_gain, rsi_str,
                 )
                 sent += 1
+                # Track real demo position so streak signals join the /demo stats
+                _dsl_st, _dtp_st = _compute_demo_sl_tp("LONG", price, atr)
+                if _dsl_st and _dtp_st:
+                    _demo_open_position(
+                        symbol, "LONG", price, _dsl_st, _dtp_st,
+                        is_shadow=False,
+                        alert_type="streak_1h",
+                        score=score,
+                    )
 
         elif streak_down >= STREAK_1H_MIN and pct24 < 0:
             # SHORT signal — sustained downtrend
@@ -4000,6 +4009,15 @@ def check_intraday_streak(
                     symbol, streak_down, streak_loss, rsi_str,
                 )
                 sent += 1
+                # Track real demo position so streak signals join the /demo stats
+                _dsl_st2, _dtp_st2 = _compute_demo_sl_tp("SHORT", price, atr)
+                if _dsl_st2 and _dtp_st2:
+                    _demo_open_position(
+                        symbol, "SHORT", price, _dsl_st2, _dtp_st2,
+                        is_shadow=False,
+                        alert_type="streak_1h",
+                        score=score,
+                    )
 
     return sent
 
