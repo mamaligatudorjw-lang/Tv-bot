@@ -85,3 +85,8 @@ externalPort = 5173
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.development]
+BOT_POLLING_DISABLED = "true"

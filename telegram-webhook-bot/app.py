@@ -1717,17 +1717,18 @@ def _watchdog_loop() -> None:
     logger.info("Watchdog started (interval=%ds)", WATCHDOG_INTERVAL)
     while True:
         try:
-            # 1. Telegram polling thread
-            if _tg_poll_thread is None or not _tg_poll_thread.is_alive():
-                logger.error("Watchdog: Telegram polling thread died — restarting")
-                try:
-                    _tg_poll_thread = threading.Thread(
-                        target=_poll_telegram_commands, daemon=True, name="tg-poll"
-                    )
-                    _tg_poll_thread.start()
-                except Exception as e:
-                    logger.exception("Watchdog: failed to restart tg-poll: %s", e)
-                    time.sleep(WATCHDOG_BACKOFF)
+            # 1. Telegram polling thread (skip if polling is disabled)
+            if os.getenv("BOT_POLLING_DISABLED", "").lower() != "true":
+                if _tg_poll_thread is None or not _tg_poll_thread.is_alive():
+                    logger.error("Watchdog: Telegram polling thread died — restarting")
+                    try:
+                        _tg_poll_thread = threading.Thread(
+                            target=_poll_telegram_commands, daemon=True, name="tg-poll"
+                        )
+                        _tg_poll_thread.start()
+                    except Exception as e:
+                        logger.exception("Watchdog: failed to restart tg-poll: %s", e)
+                        time.sleep(WATCHDOG_BACKOFF)
 
             # 2. APScheduler background thread
             if not scheduler.running:
