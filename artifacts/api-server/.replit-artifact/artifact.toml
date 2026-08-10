@@ -26,7 +26,6 @@ args = ["bash", "scripts/start-production.sh"]
 [services.production.run.env]
 PORT = "8080"
 NODE_ENV = "production"
-BOT_POLLING_DISABLED = "true"
 
 [services.production.health.startup]
 path = "/api/healthz"
