@@ -3350,6 +3350,22 @@ def send_alert_with_log(
     if SHADOW_ONLY_MODE and alert_type not in SHADOW_MODE_EXEMPT_TYPES:
         logger.debug("SHADOW_ONLY_MODE: suppressing real signal %s/%s", symbol, alert_type)
         return (False, None)
+    # Don't send a new signal if the same symbol already has an open real position.
+    # Prevents duplicate alerts for the same coin until the current trade closes.
+    try:
+        with _db_lock:
+            _already_open = _get_db().execute(
+                "SELECT COUNT(*) FROM demo_positions "
+                "WHERE symbol=? AND status='open' AND is_shadow=0",
+                (symbol,),
+            ).fetchone()[0]
+        if _already_open:
+            logger.info(
+                "Suppressed %s/%s — already has an open real position", symbol, alert_type
+            )
+            return (False, None)
+    except Exception:
+        pass  # DB unavailable — let the signal through
     # Only directional signals — drop NEUTRAL/WATCH so the channel stays
     # actionable. New-listing alerts use a separate sender and are unaffected.
     if recommendation not in ("LONG", "SHORT"):
