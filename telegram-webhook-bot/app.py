@@ -371,6 +371,7 @@ BEAR_DOWNTREND_FILTER_ENABLED = True    # включён; логика 3-4д=б�
 PUMP_FILTER_SHORT_ENABLED = False       # ВЫКЛ: теневые данные показали, что памп → SHORT прибылен
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
 UPTREND_FLIP_MIN_CANDLES  = 0           # ВЫКЛ: теневые данные показали, что uptrend_flip блокирует прибыльные SHORT-ы
+SHADOW_ONLY_MODE          = True        # True = отправлять теневые сигналы в Telegram, реальные — молчать
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа (4h ≈ 16ч при N=4)
 
 # --- Display leverage for ROI calculation in Telegram messages ---
@@ -1207,9 +1208,11 @@ def _demo_open_position(
     shadow_reason: str | None = None,
     alert_type: str | None = None,
     score: int | None = None,
+    notify_body: str | None = None,
 ) -> None:
     """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
-    a real position as TOP for the /demo three-way comparison."""
+    a real position as TOP for the /demo three-way comparison.
+    When SHADOW_ONLY_MODE=True, shadow positions are sent to Telegram."""
     is_top = (not is_shadow) and score is not None and score >= TOP_SIGNAL_SCORE
     try:
         with _db_lock:
@@ -1241,6 +1244,8 @@ def _demo_open_position(
             "shadow" if is_shadow else "pos",
             symbol, direction, entry_price, sl_price, tp_price,
         )
+        if SHADOW_ONLY_MODE and is_shadow and notify_body:
+            send_telegram(f"👻 ТЕНЕВОЙ\n{notify_body}")
     except Exception as exc:
         logger.warning("_demo_open_position failed for %s: %s", symbol, exc)
 
@@ -3390,6 +3395,9 @@ def send_alert_with_log(
         if state["silenced"]:
             logger.info("Suppressed %s/%s (silenced): %s", symbol, alert_type, body_text[:60])
             return (False, None)
+    if SHADOW_ONLY_MODE:
+        logger.debug("SHADOW_ONLY_MODE: suppressing real signal %s/%s", symbol, alert_type)
+        return (False, None)
     # Only directional signals — drop NEUTRAL/WATCH so the channel stays
     # actionable. New-listing alerts use a separate sender and are unaffected.
     if recommendation not in ("LONG", "SHORT"):
@@ -4752,6 +4760,7 @@ def check_overheated_oversold(
                             is_shadow=True,
                             shadow_reason=f"liq_veto: {_liq_reason_oh}",
                             alert_type="overheated_24h",
+                            notify_body=body,
                         )
                     continue
                 # ── AI veto (AI_VETO_ENABLED=False → отключён) ───────────────
@@ -4771,6 +4780,7 @@ def check_overheated_oversold(
                                 is_shadow=True,
                                 shadow_reason=f"ai_veto: {_ai_note_oh}",
                                 alert_type="overheated_24h",
+                                notify_body=body,
                             )
                         continue
                 # ── Факторы фандинг + LSR ────────────────────────────────────
@@ -4904,6 +4914,7 @@ def check_overheated_oversold(
                             is_shadow=True,
                             shadow_reason=f"liq_veto: {_liq_reason_os}",
                             alert_type="oversold_24h",
+                            notify_body=body,
                         )
                     continue
                 # ── AI veto (AI_VETO_ENABLED=False → отключён) ───────────────
@@ -4923,6 +4934,7 @@ def check_overheated_oversold(
                                 is_shadow=True,
                                 shadow_reason=f"ai_veto: {_ai_note_os}",
                                 alert_type="oversold_24h",
+                                notify_body=body,
                             )
                         continue
                 # ── Факторы фандинг + LSR ────────────────────────────────────
@@ -6481,11 +6493,19 @@ def run_checks():
                                 _atr_bd = state["atr_4h"].get(sym)
                             _dsl, _dtp = _compute_demo_sl_tp("LONG", b["price"], _atr_bd)
                             if _dsl and _dtp:
+                                _bd_body = (
+                                    f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
+                                    f"💰 Цена: ${b['price']:,.6g}\n"
+                                    + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
+                                    + f"📊 Рекомендация: <b>LONG 📈</b>\n"
+                                    f"🔒 Блок: медвежий тренд {_bd_days} дн. подряд"
+                                )
                                 _demo_open_position(
                                     sym, "LONG", b["price"], _dsl, _dtp,
                                     is_shadow=True,
                                     shadow_reason=f"bear_downtrend_{_bd_days}d",
                                     alert_type="confluence",
+                                    notify_body=_bd_body,
                                 )
                         continue
 
@@ -6616,11 +6636,20 @@ def run_checks():
                             _atr_p = state["atr_4h"].get(sym)
                         _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_p)
                         if _dsl and _dtp:
+                            _pf_body = (
+                                f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
+                                f"💰 Цена: ${b['price']:,.6g}\n"
+                                + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
+                                + f"📊 Рекомендация: <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>\n"
+                                f"🎯 Сила сигнала: <b>{score}/100</b>\n"
+                                f"🔒 Блок: {_pump_reason}"
+                            )
                             _demo_open_position(
                                 sym, rec_label, b["price"], _dsl, _dtp,
                                 is_shadow=True,
                                 shadow_reason=f"pump_filter: {_pump_reason}",
                                 alert_type="confluence",
+                                notify_body=_pf_body,
                             )
                         continue
 
@@ -6640,11 +6669,20 @@ def run_checks():
                             _atr_lv = state["atr_4h"].get(sym)
                         _dsl_lv3, _dtp_lv3 = _compute_demo_sl_tp(rec_label, b["price"], _atr_lv)
                         if _dsl_lv3 and _dtp_lv3:
+                            _lv_body = (
+                                f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
+                                f"💰 Цена: ${b['price']:,.6g}\n"
+                                + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
+                                + f"📊 Рекомендация: <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>\n"
+                                f"🎯 Сила сигнала: <b>{score}/100</b>\n"
+                                f"🔒 Блок: ликвидации — {_liq_reason_cf}"
+                            )
                             _demo_open_position(
                                 sym, rec_label, b["price"], _dsl_lv3, _dtp_lv3,
                                 is_shadow=True,
                                 shadow_reason=f"liq_veto: {_liq_reason_cf}",
                                 alert_type="confluence",
+                                notify_body=_lv_body,
                             )
                         continue
                 # ── AI veto (AI_VETO_ENABLED=False → отключён полностью) ─────────
@@ -6674,11 +6712,20 @@ def run_checks():
                             _atr_v = state["atr_4h"].get(sym)
                         _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_v)
                         if _dsl and _dtp:
+                            _av_body = (
+                                f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
+                                f"💰 Цена: ${b['price']:,.6g}\n"
+                                + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
+                                + f"📊 Рекомендация: <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>\n"
+                                f"🎯 Сила сигнала: <b>{score}/100</b>\n"
+                                f"🔒 Блок: ИИ — {_ai_note}"
+                            )
                             _demo_open_position(
                                 sym, rec_label, b["price"], _dsl, _dtp,
                                 is_shadow=True,
                                 shadow_reason=f"ai_veto: {_ai_note}",
                                 alert_type="confluence",
+                                notify_body=_av_body,
                             )
                     continue
 
