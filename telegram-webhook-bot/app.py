@@ -1380,19 +1380,41 @@ def check_liquidity_orders() -> None:
                     logger.info("Liquidity: missed_move %s %s id=%d", sym, dr, oid)
                     continue
 
-            # Filled? (price touches/crosses limit level)
+            # Filled? Check current price AND last completed 1m candle extremes
+            # (wicks can touch the level between 60-second polling ticks)
             filled_cond = (cur <= lp if dr == "LONG" else cur >= lp) if lp else False
-            if filled_cond:
+            wick_filled = False
+            fill_price  = cur          # default: fill at last traded price
+            if not filled_cond and lp:
+                try:
+                    _c1m = _gateio_klines(sym, "1m", 2)
+                    if len(_c1m) >= 2:
+                        # Use the last *completed* candle (index -2); -1 is still forming
+                        last_closed = _c1m[-2]
+                        c_low  = float(last_closed[3])
+                        c_high = float(last_closed[2])
+                        if dr == "LONG" and c_low <= lp:
+                            wick_filled = True
+                        elif dr == "SHORT" and c_high >= lp:
+                            wick_filled = True
+                except Exception as _wf_exc:
+                    logger.debug("Liquidity wick-fill check %s: %s", sym, _wf_exc)
+            if wick_filled:
+                fill_price = lp   # simulate fill at the exact limit level, not the wick tip
+            if filled_cond or wick_filled:
+                wick_tag = " (прокол свечи)" if wick_filled else ""
                 with _db_lock:
                     _get_db().execute(
                         "UPDATE liquidity_orders SET status='filled',entry_price=?,ts_filled=? WHERE id=?",
-                        (cur, now, oid))
+                        (fill_price, now, oid))
                     _get_db().commit()
                 send_telegram(
-                    f"✅ <b>Лимитка исполнена</b>: {sym} {dr} @<b>${cur:,.6g}</b>\n"
+                    f"✅ <b>Лимитка исполнена{wick_tag}</b>: {sym} {dr} "
+                    f"@<b>${fill_price:,.6g}</b>\n"
                     f"🛑 SL: ${sl:,.6g}  │  🎯 TP: ${tp:,.6g}"
                 )
-                logger.info("Liquidity: filled %s %s @%.6g id=%d", sym, dr, cur, oid)
+                logger.info("Liquidity: filled%s %s %s @%.6g id=%d",
+                            " (wick)" if wick_filled else "", sym, dr, fill_price, oid)
 
         # ── Filled orders: check SL/TP ───────────────────────────────────────
         for oid, sym, dr, ep, sl, tp, orig_sl in filled:
@@ -1417,12 +1439,34 @@ def check_liquidity_orders() -> None:
 
             hit_tp = (cur >= tp if dr == "LONG" else cur <= tp)
             hit_sl = (cur <= sl if dr == "LONG" else cur >= sl)
+            # Also check last completed 1m candle for wick hits on SL/TP
+            _exit_by_wick = False
+            if not hit_tp and not hit_sl:
+                try:
+                    _c1m_f = _gateio_klines(sym, "1m", 2)
+                    if len(_c1m_f) >= 2:
+                        _lc = _c1m_f[-2]
+                        _c_low  = float(_lc[3])
+                        _c_high = float(_lc[2])
+                        wick_tp = (_c_high >= tp if dr == "LONG" else _c_low <= tp)
+                        wick_sl = (_c_low  <= sl if dr == "LONG" else _c_high >= sl)
+                        if wick_tp or wick_sl:
+                            hit_tp = wick_tp
+                            hit_sl = wick_sl and not wick_tp   # TP wins if both wick
+                            _exit_by_wick = True
+                except Exception as _we:
+                    logger.debug("Liquidity wick SL/TP check %s: %s", sym, _we)
             if not hit_tp and not hit_sl:
                 continue
 
+            # For wick exits, use the level price (SL or TP) as exit, not current price
+            if _exit_by_wick:
+                exit_price = tp if hit_tp else sl
+            else:
+                exit_price = cur
             result  = "tp" if hit_tp else "sl"
-            pnl_usd = (100.0 * (cur - ep) / ep if dr == "LONG"
-                       else 100.0 * (ep - cur) / ep)
+            pnl_usd = (100.0 * (exit_price - ep) / ep if dr == "LONG"
+                       else 100.0 * (ep - exit_price) / ep)
             # "saved" = price crossed original SL but smart SL held, closed TP
             saved = 0
             if result == "tp":
@@ -1438,18 +1482,20 @@ def check_liquidity_orders() -> None:
                     "UPDATE liquidity_orders "
                     "SET result=?,ts_closed=?,exit_price=?,pnl_usd=?,saved_from_sl=? "
                     "WHERE id=?",
-                    (result, now, cur, pnl_usd, saved, oid))
+                    (result, now, exit_price, pnl_usd, saved, oid))
                 _get_db().commit()
 
             sign = "+" if pnl_usd >= 0 else ""
             r_icon = "✅ TP" if result == "tp" else "❌ SL"
             saved_note = "  💾 Умный SL спас сделку!" if saved else ""
+            wick_note  = " (wick)" if _exit_by_wick else ""
             send_telegram(
-                f"{r_icon} <b>Ликвидность {sym} {dr}</b>  "
-                f"${ep:,.6g} → ${cur:,.6g}  <b>{sign}${pnl_usd:.2f}</b>{saved_note}"
+                f"{r_icon}{wick_note} <b>Ликвидность {sym} {dr}</b>  "
+                f"${ep:,.6g} → ${exit_price:,.6g}  <b>{sign}${pnl_usd:.2f}</b>{saved_note}"
             )
-            logger.info("Liquidity: closed %s %s result=%s pnl=%.2f id=%d",
-                        sym, dr, result, pnl_usd, oid)
+            logger.info("Liquidity: closed%s %s %s result=%s exit=%.6g pnl=%.2f id=%d",
+                        " (wick)" if _exit_by_wick else "",
+                        sym, dr, result, exit_price, pnl_usd, oid)
 
     except Exception as exc:
         logger.warning("check_liquidity_orders failed: %s", exc)
