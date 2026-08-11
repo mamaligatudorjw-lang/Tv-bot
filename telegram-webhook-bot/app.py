@@ -323,6 +323,11 @@ HIT_RATE_SL_PCT = 2.5              # stop-loss % (raised from 2.0 to reduce nois
 HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
 HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
 
+# Timestamp when wick-based SL/TP detection was enabled in check_demo_positions.
+# Positions closed BEFORE this ts used lastPrice only ("old" / "старые").
+# Positions closed ON OR AFTER use last-completed-1m-candle low/high ("honest" / "честные").
+WICK_CHECK_ENABLED_TS: int = 1786478696   # 2026-08-11 20:04:56 UTC
+
 # --- Long-duration SHORT regime (2026-08-04) ---
 # Backtest on 522+ historical signals from alerts.db: SHORT signals held
 # 3–7 days average +7…+10% PnL with 73–80% win rate, while the old 4-hour
@@ -1523,7 +1528,13 @@ def check_liquidity_orders() -> None:
 
 
 def check_demo_positions() -> None:
-    """Close demo positions that reached TP or SL. Called every 60 s."""
+    """Close demo positions that reached TP or SL. Called every 60 s.
+
+    Exit detection (since WICK_CHECK_ENABLED_TS):
+      1. lastPrice crosses SL/TP  → exit at lastPrice  (wick_close=0)
+      2. last completed 1m candle low/high crosses SL/TP → exit at the level  (wick_close=1)
+    Exit price is always the level (SL or TP), never the wick extreme, for honest PnL.
+    """
     try:
         with _db_lock:
             conn = _get_db()
@@ -1538,13 +1549,22 @@ def check_demo_positions() -> None:
     if not rows:
         return
 
+    # Batch: fetch lastPrice AND last completed 1m candle for each unique symbol
     symbols = list({r[1] for r in rows})
     prices: dict[str, float] = {}
+    candles_1m: dict[str, tuple[float, float]] = {}   # symbol → (c_low, c_high)
     for sym in symbols:
         try:
             t = _gateio_ticker(sym)
             if t:
                 prices[sym] = float(t["lastPrice"])
+        except Exception:
+            pass
+        try:
+            _c = _gateio_klines(sym, "1m", 2)
+            if len(_c) >= 2:
+                _lc = _c[-2]   # last *completed* candle; index -1 is still forming
+                candles_1m[sym] = (float(_lc[3]), float(_lc[2]))   # (low, high)
         except Exception:
             pass
 
@@ -1553,27 +1573,47 @@ def check_demo_positions() -> None:
         price = prices.get(symbol)
         if price is None:
             continue
+
+        # ── 1. Price check (unchanged behaviour) ────────────────────────────
         hit_tp = (direction == "LONG" and price >= tp) or (direction == "SHORT" and price <= tp)
         hit_sl = (direction == "LONG" and price <= sl) or (direction == "SHORT" and price >= sl)
+        wick_close = 0
+        exit_price = price   # default: last traded price
+
+        # ── 2. Wick check (new: catches wicks between polling ticks) ────────
+        if not hit_tp and not hit_sl:
+            lc = candles_1m.get(symbol)
+            if lc:
+                c_low, c_high = lc
+                wick_tp = (c_high >= tp if direction == "LONG" else c_low <= tp)
+                wick_sl = (c_low  <= sl if direction == "LONG" else c_high >= sl)
+                if wick_tp or wick_sl:
+                    hit_tp     = wick_tp
+                    hit_sl     = wick_sl and not wick_tp   # TP wins if both
+                    wick_close = 1
+                    exit_price = tp if hit_tp else sl       # level, not wick extreme
+
         if not hit_tp and not hit_sl:
             continue
+
         status = "tp" if hit_tp else "sl"
         pnl_usd = (
-            100.0 * (price - entry) / entry if direction == "LONG"
-            else 100.0 * (entry - price) / entry
+            100.0 * (exit_price - entry) / entry if direction == "LONG"
+            else 100.0 * (entry - exit_price) / entry
         )
         try:
             with _db_lock:
                 conn = _get_db()
                 conn.execute(
                     "UPDATE demo_positions "
-                    "SET status=?, ts_close=?, exit_price=?, pnl_usd=? WHERE id=?",
-                    (status, now_ts, price, pnl_usd, row_id),
+                    "SET status=?, ts_close=?, exit_price=?, pnl_usd=?, wick_close=? WHERE id=?",
+                    (status, now_ts, exit_price, pnl_usd, wick_close, row_id),
                 )
                 conn.commit()
             logger.info(
-                "Demo pos %d %s %s: %s exit=%.6g pnl=$%.2f",
-                row_id, symbol, direction, status.upper(), price, pnl_usd,
+                "Demo pos %d %s %s: %s exit=%.6g pnl=$%.2f%s",
+                row_id, symbol, direction, status.upper(), exit_price, pnl_usd,
+                " (wick)" if wick_close else "",
             )
         except Exception as exc:
             logger.warning("check_demo_positions update %d: %s", row_id, exc)
@@ -3107,9 +3147,18 @@ def _get_db() -> sqlite3.Connection:
                 is_shadow     INTEGER NOT NULL DEFAULT 0,
                 shadow_reason TEXT,
                 alert_type    TEXT,
-                is_top        INTEGER NOT NULL DEFAULT 0
+                is_top        INTEGER NOT NULL DEFAULT 0,
+                wick_close    INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Migrate: wick_close for existing installs
+        try:
+            _db_conn.execute(
+                "ALTER TABLE demo_positions ADD COLUMN wick_close INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError as _mig_wc:
+            if "duplicate column" not in str(_mig_wc).lower():
+                raise
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
             "ON demo_positions(status, is_shadow)"
@@ -8331,6 +8380,29 @@ def handle_stats_command(chat_id: int) -> None:
     sl_pct = HIT_RATE_SL_PCT
     tp_pct = HIT_RATE_TP_PCT
 
+    # ── Old-vs-honest split per alert_type from demo_positions ──────────────
+    # "старые" = closed before WICK_CHECK_ENABLED_TS (lastPrice only)
+    # "честные" = closed on/after (lastPrice + 1m candle wick detection)
+    _demo_split: dict[str, tuple[int, int]] = {}   # alert_type → (old, honest)
+    try:
+        with _db_lock:
+            _rows = _get_db().execute(
+                """
+                SELECT alert_type,
+                       SUM(CASE WHEN ts_close <  ? THEN 1 ELSE 0 END) AS old_n,
+                       SUM(CASE WHEN ts_close >= ? THEN 1 ELSE 0 END) AS hon_n
+                FROM demo_positions
+                WHERE status != 'open' AND is_shadow = 0
+                  AND ts_close IS NOT NULL AND alert_type IS NOT NULL
+                GROUP BY alert_type
+                """,
+                (WICK_CHECK_ENABLED_TS, WICK_CHECK_ENABLED_TS),
+            ).fetchall()
+            for _atype, _old, _hon in _rows:
+                _demo_split[_atype] = (int(_old or 0), int(_hon or 0))
+    except Exception as _ds_exc:
+        logger.debug("demo_split query failed: %s", _ds_exc)
+
     def fmt_horizon(h: dict) -> str:
         """Format one horizon bucket as  TP%/SL% avg_pnl."""
         n = h["n"]
@@ -8353,8 +8425,17 @@ def handle_stats_command(chat_id: int) -> None:
         h15  = r["horizons"]["15м"]
         h1h  = r["horizons"]["1ч"]
         h4h  = r["horizons"]["4ч"]
+        _old_n, _hon_n = _demo_split.get(r["alert_type"], (0, 0))
+        _total_closed = _old_n + _hon_n
+        if _total_closed:
+            _closed_note = (
+                f" · закрыто: {_total_closed} "
+                f"({_old_n} старых / {_hon_n} честных)"
+            )
+        else:
+            _closed_note = ""
         lines.append(
-            f"<b>{r['alert_type']}</b> · {r['recommendation']} · {r['total']} алертов\n"
+            f"<b>{r['alert_type']}</b> · {r['recommendation']} · {r['total']} алертов{_closed_note}\n"
             f"   3м: {fmt_horizon(h3m)}\n"
             f"   5м: {fmt_horizon(h5m)}\n"
             f"  15м: {fmt_horizon(h15)}\n"
@@ -8365,6 +8446,11 @@ def handle_stats_command(chat_id: int) -> None:
     lines.append(
         f"<i>🟢 = TP достигнут (+{tp_pct:.0f}%)  🔴 = стоп (−{sl_pct:.0f}%)  "
         f"в скобках — средний P&L включая таймауты</i>"
+    )
+    import datetime as _dt
+    _wick_dt = _dt.datetime.utcfromtimestamp(WICK_CHECK_ENABLED_TS).strftime("%d.%m.%Y %H:%M UTC")
+    lines.append(
+        f"<i>честные = закрыты по свечному фитилю с {_wick_dt}</i>"
     )
 
     # ── 🧲 Умный вход по ликвидности ────────────────────────────────────────
