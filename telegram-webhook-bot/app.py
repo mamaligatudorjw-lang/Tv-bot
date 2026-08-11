@@ -1380,11 +1380,14 @@ def check_liquidity_orders() -> None:
                     logger.info("Liquidity: missed_move %s %s id=%d", sym, dr, oid)
                     continue
 
-            # Filled? Check current price AND last completed 1m candle extremes
-            # (wicks can touch the level between 60-second polling ticks)
+            # Filled? Check current price AND last completed 1m candle extremes.
+            # Wick fills require the candle to penetrate the limit level by at
+            # least 0.05% — a bare touch is tracked as "touched_no_fill" only.
+            _WICK_MIN_PCT = 0.0005   # 0.05%
             filled_cond = (cur <= lp if dr == "LONG" else cur >= lp) if lp else False
-            wick_filled = False
-            fill_price  = cur          # default: fill at last traded price
+            wick_filled  = False
+            wick_touched = False     # candle touched but did not penetrate 0.05%
+            fill_price   = cur       # default: fill at last traded price
             if not filled_cond and lp:
                 try:
                     _c1m = _gateio_klines(sym, "1m", 2)
@@ -1393,12 +1396,30 @@ def check_liquidity_orders() -> None:
                         last_closed = _c1m[-2]
                         c_low  = float(last_closed[3])
                         c_high = float(last_closed[2])
-                        if dr == "LONG" and c_low <= lp:
-                            wick_filled = True
-                        elif dr == "SHORT" and c_high >= lp:
-                            wick_filled = True
+                        if dr == "LONG":
+                            # Candle must close at least 0.05% below the limit price
+                            if c_low <= lp * (1.0 - _WICK_MIN_PCT):
+                                wick_filled = True
+                            elif c_low <= lp:
+                                wick_touched = True   # bare touch — no fill
+                        else:  # SHORT
+                            if c_high >= lp * (1.0 + _WICK_MIN_PCT):
+                                wick_filled = True
+                            elif c_high >= lp:
+                                wick_touched = True
                 except Exception as _wf_exc:
                     logger.debug("Liquidity wick-fill check %s: %s", sym, _wf_exc)
+
+            if wick_touched and not wick_filled:
+                # Record bare touch without fill
+                with _db_lock:
+                    _get_db().execute(
+                        "UPDATE liquidity_orders SET touched_no_fill=touched_no_fill+1 WHERE id=?",
+                        (oid,))
+                    _get_db().commit()
+                logger.info("Liquidity: touched_no_fill %s %s limit=%.6g id=%d",
+                            sym, dr, lp, oid)
+
             if wick_filled:
                 fill_price = lp   # simulate fill at the exact limit level, not the wick tip
             if filled_cond or wick_filled:
@@ -3132,9 +3153,18 @@ def _get_db() -> sqlite3.Connection:
                 pnl_usd           REAL,
                 result            TEXT,
                 saved_from_sl     INTEGER NOT NULL DEFAULT 0,
-                touched_orig_sl   INTEGER NOT NULL DEFAULT 0
+                touched_orig_sl   INTEGER NOT NULL DEFAULT 0,
+                touched_no_fill   INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Migrate: touched_no_fill for existing installs
+        try:
+            _db_conn.execute(
+                "ALTER TABLE liquidity_orders ADD COLUMN touched_no_fill INTEGER NOT NULL DEFAULT 0"
+            )
+        except sqlite3.OperationalError as _mig_liq:
+            if "duplicate column" not in str(_mig_liq).lower():
+                raise
         # Personal positions tracker — user registers their own open positions;
         # bot monitors and sends confirmed reversal alerts.
         _db_conn.execute("""
@@ -8356,7 +8386,8 @@ def handle_stats_command(chat_id: int) -> None:
                   COALESCE(AVG(CASE WHEN result IS NOT NULL THEN pnl_usd END), 0)         AS avg_pnl,
                   COALESCE(SUM(CASE WHEN entry_type='limit' AND result IS NOT NULL THEN pnl_usd ELSE 0 END),0) AS limit_pnl,
                   COALESCE(SUM(CASE WHEN entry_type='market' AND result IS NOT NULL THEN pnl_usd ELSE 0 END),0) AS market_pnl,
-                  SUM(saved_from_sl)                                             AS saved
+                  SUM(saved_from_sl)                                             AS saved,
+                  COALESCE(SUM(touched_no_fill), 0)                               AS tnf
                 FROM liquidity_orders
             """).fetchone()
             liq_open_rows = conn.execute(
@@ -8368,7 +8399,7 @@ def handle_stats_command(chat_id: int) -> None:
 
     if liq:
         (lp, lf, exp, miss, mkt, open_pos, ct, ctp, csl,
-         cpnl, avg_pnl, lpnl, mpnl, saved) = liq
+         cpnl, avg_pnl, lpnl, mpnl, saved, tnf) = liq
         fill_rate = lf / lp * 100.0 if lp else 0.0
         wr = ctp / ct * 100.0 if ct else 0.0
 
@@ -8393,6 +8424,7 @@ def handle_stats_command(chat_id: int) -> None:
             "",
             "🧲 <b>Умный вход по ликвидности</b>",
             f"  Лимиток выставлено: <b>{lp}</b>  │  Исполнено: <b>{lf}</b>  │  Fill rate: <b>{fill_rate:.0f}%</b>",
+            f"  Касаний без заполнения: <b>{tnf}</b>  (прокол <0.05%)",
             f"  Истекло: {exp}  │  Ушло без входа: {miss}  │  Рыночных входов: {mkt}",
             f"  Открытых: <b>{open_pos}</b>  │  Нереализованный: <b>{us}${unreal:.2f}</b>",
         ]
