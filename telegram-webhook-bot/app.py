@@ -6498,6 +6498,7 @@ def run_checks():
                                     f"💰 Цена: ${b['price']:,.6g}\n"
                                     + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
                                     + f"📊 Рекомендация: <b>LONG 📈</b>\n"
+                                    f"🟢 TP: <b>${_dtp:,.6g}</b>  │  🔴 SL: <b>${_dsl:,.6g}</b>\n"
                                     f"🔒 Блок: медвежий тренд {_bd_days} дн. подряд"
                                 )
                                 _demo_open_position(
@@ -6642,6 +6643,7 @@ def run_checks():
                                 + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
                                 + f"📊 Рекомендация: <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>\n"
                                 f"🎯 Сила сигнала: <b>{score}/100</b>\n"
+                                f"🟢 TP: <b>${_dtp:,.6g}</b>  │  🔴 SL: <b>${_dsl:,.6g}</b>\n"
                                 f"🔒 Блок: {_pump_reason}"
                             )
                             _demo_open_position(
@@ -6675,6 +6677,7 @@ def run_checks():
                                 + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
                                 + f"📊 Рекомендация: <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>\n"
                                 f"🎯 Сила сигнала: <b>{score}/100</b>\n"
+                                f"🟢 TP: <b>${_dtp_lv3:,.6g}</b>  │  🔴 SL: <b>${_dsl_lv3:,.6g}</b>\n"
                                 f"🔒 Блок: ликвидации — {_liq_reason_cf}"
                             )
                             _demo_open_position(
@@ -6718,6 +6721,7 @@ def run_checks():
                                 + "".join(f"  • {ln}\n" for ln in b.get("lines", []))
                                 + f"📊 Рекомендация: <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>\n"
                                 f"🎯 Сила сигнала: <b>{score}/100</b>\n"
+                                f"🟢 TP: <b>${_dtp:,.6g}</b>  │  🔴 SL: <b>${_dsl:,.6g}</b>\n"
                                 f"🔒 Блок: ИИ — {_ai_note}"
                             )
                             _demo_open_position(
