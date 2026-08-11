@@ -1346,9 +1346,11 @@ def handle_demo_command(chat_id: int) -> None:
                 ).fetchall()
 
             # Shadow totals (all types combined)
-            sc_open = conn.execute(
-                "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=1"
-            ).fetchone()[0]
+            sc_open_rows = conn.execute(
+                "SELECT symbol, direction, entry_price FROM demo_positions "
+                "WHERE status='open' AND is_shadow=1"
+            ).fetchall()
+            sc_open = len(sc_open_rows)
             sc_total, sc_tp, sc_sl, sc_pnl = conn.execute(
                 "SELECT COUNT(*), "
                 "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
@@ -1360,11 +1362,13 @@ def handle_demo_command(chat_id: int) -> None:
         _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
         return
 
-    # Fetch current prices for all displayed open positions
+    # Fetch current prices for all displayed open positions (real + shadow)
     all_syms: set[str] = set()
     for rows in open_by_type.values():
         for sym, *_ in rows:
             all_syms.add(sym)
+    for sym, *_ in sc_open_rows:
+        all_syms.add(sym)
     open_prices: dict[str, float] = {}
     for sym in all_syms:
         try:
@@ -1438,6 +1442,11 @@ def handle_demo_command(chat_id: int) -> None:
 
     # Shadow summary
     sc_wr = sc_tp / sc_total * 100 if sc_total else 0
+    sc_unrealized = sum(
+        100.0 * ((open_prices[sym] - entry) / entry if dr == "LONG" else (entry - open_prices[sym]) / entry)
+        for sym, dr, entry in sc_open_rows
+        if sym in open_prices and entry
+    )
     lines += [
         "", "━━━━━━━━━━━━━━━━━━━━",
         f"👻 <b>Теневые (заблокированы)</b>",
@@ -1449,6 +1458,9 @@ def handle_demo_command(chat_id: int) -> None:
             f"  Win-rate: <b>{sc_wr:.0f}%</b>  (TP: {sc_tp} / SL: {sc_sl})",
             f"  PnL если бы открыли: <b>{s_sign}${sc_pnl:.2f}</b>",
         ]
+    if sc_open:
+        u_sign = "+" if sc_unrealized >= 0 else ""
+        lines.append(f"  Нереализованный: <b>{u_sign}${sc_unrealized:.2f}</b> ({sc_open} поз.)")
 
     _telegram_send(chat_id, "\n".join(lines))
 
