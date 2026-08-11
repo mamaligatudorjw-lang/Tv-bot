@@ -40,7 +40,7 @@ via Gemini Vision and runs them through the same analysis pipeline.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- **Никогда самостоятельно не отключай прибыльные сигналы.** Можно написать об этом, спросить мнение пользователя — но не трогать без явного разрешения. Отключение/изменение прибыльного сигнала допустимо только по прямой просьбе пользователя.
 
 ## Gotchas
 
