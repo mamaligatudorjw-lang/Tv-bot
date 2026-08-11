@@ -4804,32 +4804,6 @@ def check_overheated_oversold(
             with state_lock:
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
-                # ── Фильтр: 3 зелёных 1м свечи подряд перед отправкой ──────────────
-                # Без подтверждения монета может продолжать падать — ждём откуп.
-                _1m_candles = _gateio_klines(symbol, "1m", OVERSOLD_1M_GREEN_CANDLES + 1)
-                _completed_1m = _1m_candles[:-1]  # исключаем текущую формирующуюся
-                _green_streak_ok = (
-                    len(_completed_1m) >= OVERSOLD_1M_GREEN_CANDLES
-                    and all(
-                        float(c[4]) > float(c[1])
-                        for c in _completed_1m[-OVERSOLD_1M_GREEN_CANDLES:]
-                    )
-                )
-                if not _green_streak_ok:
-                    logger.info(
-                        "SHADOW oversold LONG %s — нет %d зелёных 1м свечей подряд",
-                        symbol, OVERSOLD_1M_GREEN_CANDLES,
-                    )
-                    _dsl_1m, _dtp_1m = _compute_demo_sl_tp("LONG", price, atr)
-                    if _dsl_1m and _dtp_1m:
-                        _demo_open_position(
-                            symbol, "LONG", price, _dsl_1m, _dtp_1m,
-                            is_shadow=True,
-                            shadow_reason=f"no_1m_green_streak_{OVERSOLD_1M_GREEN_CANDLES}",
-                            alert_type="oversold_24h",
-                        )
-                    continue
-
                 # ── Подтверждение разворота: последняя завершённая 1ч свеча зелёная ──
                 # RSI ≤ 30 + падение само по себе не значит разворот — монета может
                 # продолжать падать. Требуем close > open последней 1ч свечи как сигнал
