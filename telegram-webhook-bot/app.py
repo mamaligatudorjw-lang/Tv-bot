@@ -368,9 +368,9 @@ BEAR_DOWNTREND_FILTER_ENABLED = True    # включён; логика 3-4д=б�
 # Разделён на два флага — демо показало разное поведение для LONG и SHORT:
 #   SHORT + памп: данные показали что блокировка убивала 52% WR сигналы → отключена
 #   LONG  + дамп: неправильно блокировать (тренд продолжения, 57% TP у теней)
-PUMP_FILTER_SHORT_ENABLED = True        # ВКЛ: блокировать SHORT только при пампе >15% (≤15% пропускать — 68.8% WR)
+PUMP_FILTER_SHORT_ENABLED = False       # ВЫКЛ: теневые данные показали, что памп → SHORT прибылен
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
-UPTREND_FLIP_MIN_CANDLES  = 4           # если тренд вверх ≥ N 4h-свечей — SHORT→LONG (0=выкл.)
+UPTREND_FLIP_MIN_CANDLES  = 0           # ВЫКЛ: теневые данные показали, что uptrend_flip блокирует прибыльные SHORT-ы
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа (4h ≈ 16ч при N=4)
 
 # --- Display leverage for ROI calculation in Telegram messages ---
