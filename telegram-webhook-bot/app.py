@@ -440,7 +440,12 @@ def _telegram_send(
         resp.raise_for_status()
         return True
     except Exception as e:
-        logger.error("Telegram send failed: %s", e)
+        body = ""
+        try:
+            body = resp.text[:300]
+        except Exception:
+            pass
+        logger.error("Telegram send failed: %s | body: %s", e, body)
         return False
 
 
@@ -8445,7 +8450,7 @@ def handle_stats_command(chat_id: int) -> None:
     lines.append("")
     lines.append(
         f"<i>🟢 = TP достигнут (+{tp_pct:.0f}%)  🔴 = стоп (−{sl_pct:.0f}%)  "
-        f"в скобках — средний P&L включая таймауты</i>"
+        f"в скобках — средний P&amp;L включая таймауты</i>"
     )
     import datetime as _dt
     _wick_dt = _dt.datetime.utcfromtimestamp(WICK_CHECK_ENABLED_TS).strftime("%d.%m.%Y %H:%M UTC")
