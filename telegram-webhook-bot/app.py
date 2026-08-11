@@ -1346,6 +1346,18 @@ def handle_demo_command(chat_id: int) -> None:
                     (at,)
                 ).fetchall()
 
+            # Last-3 closed positions per type (most recent first)
+            closed_by_type: dict[str, list] = {}
+            for row in type_stats:
+                at = row[0]
+                closed_by_type[at] = conn.execute(
+                    "SELECT symbol, direction, entry_price, exit_price, pnl_usd, status, ts_open, ts_close "
+                    "FROM demo_positions "
+                    "WHERE status!='open' AND is_shadow=0 AND alert_type=? "
+                    "ORDER BY ts_close DESC LIMIT 3",
+                    (at,)
+                ).fetchall()
+
             # Shadow totals (all types combined)
             sc_open_rows = conn.execute(
                 "SELECT symbol, direction, entry_price FROM demo_positions "
@@ -1381,18 +1393,21 @@ def handle_demo_command(chat_id: int) -> None:
 
     now_ts = int(time.time())
 
-    def _fmt_pos(sym: str, dr: str, entry: float, sl: float, tp: float, ts: int) -> list[str]:
+    def _fmt_open(sym: str, dr: str, entry: float, sl: float, tp: float, ts: int) -> list[str]:
+        """Open position: нереализованный PnL в % и $."""
         age_h = (now_ts - ts) / 3600
         icon = "📈" if dr == "LONG" else "📉"
         cur = open_prices.get(sym)
         out: list[str] = []
         if cur and entry:
-            upnl = (cur - entry) / entry * 100.0 if dr == "LONG" else (entry - cur) / entry * 100.0
-            upnl_icon = "🟢" if upnl >= 0 else "🔴"
+            upnl_pct = (cur - entry) / entry * 100.0 if dr == "LONG" else (entry - cur) / entry * 100.0
+            upnl_usd = upnl_pct  # $100/сделка → 1% = $1
+            pnl_icon = "🟢" if upnl_pct >= 0 else "🔴"
+            s = "+" if upnl_pct >= 0 else ""
             out.append(
                 f"  {icon} <code>{sym}</code> {dr}  "
                 f"вход <b>{entry:,.5g}</b> → <b>{cur:,.5g}</b>  "
-                f"{upnl_icon} <b>{'+' if upnl >= 0 else ''}{upnl:.1f}%</b>  ⏱{age_h:.1f}ч"
+                f"{pnl_icon} <b>{s}{upnl_pct:.1f}%</b> (<b>{s}${upnl_usd:.2f}</b>)  ⏱{age_h:.1f}ч"
             )
         else:
             out.append(f"  {icon} <code>{sym}</code> {dr}  вход <b>{entry:,.5g}</b>  ⏱{age_h:.1f}ч")
@@ -1400,17 +1415,35 @@ def handle_demo_command(chat_id: int) -> None:
             out.append(f"      🎯 TP: <b>${tp:,.5g}</b>  │  🛑 SL: <b>${sl:,.5g}</b>")
         return out
 
+    def _fmt_closed(sym: str, dr: str, entry: float, exit_p: float,
+                    pnl_usd: float, status: str, ts_open: int, ts_close: int) -> list[str]:
+        """Closed position: реализованный PnL в $ и статус TP/SL."""
+        icon = "📈" if dr == "LONG" else "📉"
+        result_icon = "✅" if status == "tp" else "❌"
+        pnl_icon = "🟢" if (pnl_usd or 0) >= 0 else "🔴"
+        s = "+" if (pnl_usd or 0) >= 0 else ""
+        dur_h = (ts_close - ts_open) / 3600 if ts_close and ts_open else 0
+        entry_s = f"{entry:,.5g}" if entry else "—"
+        exit_s  = f"{exit_p:,.5g}" if exit_p else "—"
+        pnl_s   = f"{s}${pnl_usd:.2f}" if pnl_usd is not None else "—"
+        tag = "TP" if status == "tp" else ("SL" if status == "sl" else status.upper())
+        return [
+            f"  {result_icon} <code>{sym}</code> {dr}  "
+            f"{entry_s} → {exit_s}  "
+            f"{pnl_icon} <b>{pnl_s}</b>  [{tag}]  ⏱{dur_h:.0f}ч"
+        ]
+
     lines: list[str] = ["📊 <b>ДЕМО-РЕЖИМ (paper trading, $100/сделка)</b>"]
 
     for alert_type, open_cnt, closed_cnt, tp_cnt, sl_cnt, closed_pnl, avg_pnl in type_stats:
         label = TYPE_LABELS.get(alert_type, alert_type)
         wr = tp_cnt / closed_cnt * 100 if closed_cnt else 0
 
-        # Unrealized PnL for displayed rows
-        disp_rows = open_by_type.get(alert_type, [])
-        unrealized = sum(
+        # Unrealized PnL across all displayed open rows
+        disp_open = open_by_type.get(alert_type, [])
+        unrealized_usd = sum(
             100.0 * ((open_prices[sym] - entry) / entry if dr == "LONG" else (entry - open_prices[sym]) / entry)
-            for sym, dr, entry, *_ in disp_rows
+            for sym, dr, entry, *_ in disp_open
             if sym in open_prices and entry
         )
 
@@ -1420,26 +1453,32 @@ def handle_demo_command(chat_id: int) -> None:
         else:
             prof = "🔄"
 
-        lines += ["", f"━━━━━━━━━━━━━━━━━━━━", f"{prof} <b>{label}</b>"]
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━", f"{prof} <b>{label}</b>"]
         lines.append(f"  Открытых: <b>{open_cnt}</b>  │  Закрытых: <b>{closed_cnt}</b>")
         if closed_cnt > 0:
             c_sign = "+" if closed_pnl >= 0 else ""
             a_sign = "+" if avg_pnl >= 0 else ""
-            lines.append(
-                f"  Win-rate: <b>{wr:.0f}%</b>  (TP: {tp_cnt} / SL: {sl_cnt})"
-            )
+            lines.append(f"  Win-rate: <b>{wr:.0f}%</b>  (TP: {tp_cnt} / SL: {sl_cnt})")
             lines.append(
                 f"  PnL закрытых: <b>{c_sign}${closed_pnl:.2f}</b>  ·  avg: <b>{a_sign}${avg_pnl:.2f}</b>"
             )
-        if open_cnt > 0:
-            u_sign = "+" if unrealized >= 0 else ""
-            suffix = f"(показаны 5 из {open_cnt})" if open_cnt > 5 else f"({open_cnt} поз.)"
-            lines.append(f"  Нереализованный: <b>{u_sign}${unrealized:.2f}</b> {suffix}")
 
-        if disp_rows:
-            lines.append("")
-            for sym, dr, entry, sl, tp, ts in disp_rows:
-                lines += _fmt_pos(sym, dr, entry, sl, tp, ts)
+        # --- Открытые позиции (топ-5) ---
+        if disp_open:
+            u_sign = "+" if unrealized_usd >= 0 else ""
+            suffix = f"топ-5 из {open_cnt}" if open_cnt > 5 else f"{open_cnt} поз."
+            lines.append(
+                f"\n  📂 <b>Открытые</b> ({suffix})  нереализованный: <b>{u_sign}${unrealized_usd:.2f}</b>"
+            )
+            for sym, dr, entry, sl, tp, ts in disp_open:
+                lines += _fmt_open(sym, dr, entry, sl, tp, ts)
+
+        # --- Последние 3 закрытые позиции ---
+        disp_closed = closed_by_type.get(alert_type, [])
+        if disp_closed:
+            lines.append(f"\n  📁 <b>Последние закрытые</b> (из {closed_cnt})")
+            for sym, dr, entry, exit_p, pnl_usd, status, ts_open, ts_close in disp_closed:
+                lines += _fmt_closed(sym, dr, entry, exit_p, pnl_usd, status, ts_open, ts_close)
 
     # Shadow summary
     sc_wr = sc_tp / sc_total * 100 if sc_total else 0
