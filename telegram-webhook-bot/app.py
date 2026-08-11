@@ -1505,6 +1505,132 @@ def handle_demo_command(chat_id: int) -> None:
     _telegram_send(chat_id, "\n".join(lines))
 
 
+def handle_demo2_command(chat_id: int) -> None:
+    """Detailed list of every open demo position with individual PnL, grouped LONG/SHORT."""
+    TYPE_SHORT: dict[str, str] = {
+        "confluence":     "Конфл",
+        "oversold_24h":   "Перепрод",
+        "streak_1h":      "Серия",
+        "overheated_24h": "Перегрев",
+    }
+    try:
+        with _db_lock:
+            conn = _get_db()
+            open_rows = conn.execute(
+                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_open, alert_type "
+                "FROM demo_positions "
+                "WHERE status='open' AND is_shadow=0 "
+                "ORDER BY direction DESC, ts_open DESC"
+            ).fetchall()
+            closed_rows = conn.execute(
+                "SELECT symbol, direction, entry_price, exit_price, pnl_usd, "
+                "status, ts_open, ts_close, alert_type "
+                "FROM demo_positions "
+                "WHERE status!='open' AND is_shadow=0 "
+                "ORDER BY ts_close DESC LIMIT 15"
+            ).fetchall()
+    except Exception as exc:
+        _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
+        return
+
+    # Fetch prices for all open positions in parallel
+    syms = list({r[0] for r in open_rows})
+    prices: dict[str, float] = {}
+    def _fetch_price(sym: str) -> None:
+        try:
+            t = _gateio_ticker(sym)
+            if t:
+                prices[sym] = float(t["lastPrice"])
+        except Exception:
+            pass
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        list(ex.map(_fetch_price, syms))
+
+    now_ts = int(time.time())
+    longs  = [r for r in open_rows if r[1] == "LONG"]
+    shorts = [r for r in open_rows if r[1] == "SHORT"]
+
+    # Total unrealized PnL
+    total_unreal = 0.0
+    for sym, dr, entry, *_ in open_rows:
+        cur = prices.get(sym)
+        if cur and entry:
+            total_unreal += (cur - entry) / entry * 100.0 if dr == "LONG" \
+                       else (entry - cur) / entry * 100.0
+
+    def _pos_line(sym: str, dr: str, entry: float, sl: float, tp: float,
+                  ts: int, at: str) -> str:
+        age_h = (now_ts - ts) / 3600
+        icon  = "📈" if dr == "LONG" else "📉"
+        cur   = prices.get(sym)
+        t_lbl = TYPE_SHORT.get(at or "", at or "")
+        if cur and entry:
+            pct = (cur - entry) / entry * 100.0 if dr == "LONG" \
+                 else (entry - cur) / entry * 100.0
+            usd = pct           # $100 per trade → 1% = $1
+            p_icon = "🟢" if pct >= 0 else "🔴"
+            s = "+" if pct >= 0 else ""
+            return (
+                f"{icon} <code>{sym}</code>  "
+                f"вход <b>{entry:,.5g}</b> → <b>{cur:,.5g}</b>  "
+                f"{p_icon} <b>{s}{pct:.1f}% ({s}${usd:.2f})</b>  "
+                f"⏱{age_h:.0f}ч  <i>[{t_lbl}]</i>\n"
+                f"     🎯 TP: <b>${tp:,.5g}</b>  │  🛑 SL: <b>${sl:,.5g}</b>"
+            )
+        return (
+            f"{icon} <code>{sym}</code>  вход <b>{entry:,.5g}</b>  "
+            f"⏱{age_h:.0f}ч  <i>[{t_lbl}]</i>"
+        )
+
+    u_sign = "+" if total_unreal >= 0 else ""
+    all_lines: list[str] = [
+        "📋 <b>ДЕМО — все открытые позиции</b>",
+        f"  📈 LONG: <b>{len(longs)}</b>  │  📉 SHORT: <b>{len(shorts)}</b>  │  Итого: <b>{len(open_rows)}</b>",
+        f"  Нереализованный PnL: <b>{u_sign}${total_unreal:.2f}</b>",
+    ]
+
+    if longs:
+        all_lines += ["", f"━━━━━━━ 📈 LONG ({len(longs)}) ━━━━━━━"]
+        for sym, dr, entry, sl, tp, ts, at in longs:
+            all_lines.append(_pos_line(sym, dr, entry, sl, tp, ts, at))
+
+    if shorts:
+        all_lines += ["", f"━━━━━━━ 📉 SHORT ({len(shorts)}) ━━━━━━━"]
+        for sym, dr, entry, sl, tp, ts, at in shorts:
+            all_lines.append(_pos_line(sym, dr, entry, sl, tp, ts, at))
+
+    if closed_rows:
+        all_lines += ["", "━━━━━━━ 📁 Последние закрытые ━━━━━━━"]
+        for sym, dr, entry, exit_p, pnl_usd, status, ts_open, ts_close, at in closed_rows:
+            icon     = "📈" if dr == "LONG" else "📉"
+            res_icon = "✅" if status == "tp" else "❌"
+            p_icon   = "🟢" if (pnl_usd or 0) >= 0 else "🔴"
+            s        = "+" if (pnl_usd or 0) >= 0 else ""
+            tag      = "TP" if status == "tp" else ("SL" if status == "sl" else status.upper())
+            t_lbl    = TYPE_SHORT.get(at or "", at or "")
+            dur_h    = (ts_close - ts_open) / 3600 if ts_close and ts_open else 0
+            all_lines.append(
+                f"{res_icon} <code>{sym}</code> {dr}  "
+                f"{entry:,.5g} → {exit_p:,.5g}  "
+                f"{p_icon} <b>{s}${pnl_usd:.2f}</b>  [{tag}]  ⏱{dur_h:.0f}ч  <i>[{t_lbl}]</i>"
+            )
+
+    # Send in chunks (Telegram limit 4096 chars)
+    chunk: list[str] = []
+    chunk_len = 0
+    part = 1
+    for line in all_lines:
+        if chunk_len + len(line) + 1 > 3800 and chunk:
+            _telegram_send(chat_id, "\n".join(chunk))
+            chunk = [f"📋 <b>...продолжение (ч.{part})</b>"]
+            chunk_len = len(chunk[0])
+            part += 1
+        chunk.append(line)
+        chunk_len += len(line) + 1
+    if chunk:
+        _telegram_send(chat_id, "\n".join(chunk))
+
+
 def _telegram_download_photo(file_id: str) -> tuple[bytes, str] | None:
     """Resolve a Telegram file_id → raw image bytes + mime type. Returns None
     on failure. Mime is inferred from the path extension since Telegram does
@@ -1568,6 +1694,7 @@ def _poll_telegram_commands() -> None:
         "/silence":  handle_silence_command,
         "/unmute":   handle_unmute_command,
         "/demo":        handle_demo_command,
+        "/demo2":       handle_demo2_command,
         "/scorestats":  handle_scorestats_command,
         "/addpos":   handle_addpos_command,
         "/mypos":    handle_mypos_command,
