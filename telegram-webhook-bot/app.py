@@ -1308,53 +1308,64 @@ def check_demo_positions() -> None:
 
 
 def handle_demo_command(chat_id: int) -> None:
-    """Show paper-trading stats: sent signals vs AI/filter-suppressed shadow positions."""
+    """Show paper-trading stats broken down by signal type, with TP/SL/PnL per position."""
+    TYPE_LABELS: dict[str, str] = {
+        "confluence":     "🚨 Конфлюэнция",
+        "oversold_24h":   "🟢 Перепроданность",
+        "overheated_24h": "🔥 Перегрев",
+        "streak_1h":      "⚡ Серия 1ч",
+    }
+
     try:
         with _db_lock:
             conn = _get_db()
-            rc_open = conn.execute(
-                "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=0"
-            ).fetchone()[0]
-            rc = conn.execute(
-                "SELECT COUNT(*), "
-                "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
-                "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
-                "COALESCE(SUM(pnl_usd),0) "
-                "FROM demo_positions WHERE status!='open' AND is_shadow=0"
-            ).fetchone()
+            # Per-type stats: real signals only
+            type_stats = conn.execute(
+                "SELECT alert_type, "
+                "  SUM(CASE WHEN status='open'  THEN 1 ELSE 0 END) as open_cnt, "
+                "  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) as closed_cnt, "
+                "  COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0) as tp_cnt, "
+                "  COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0) as sl_cnt, "
+                "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END),0) as closed_pnl, "
+                "  COALESCE(AVG(CASE WHEN status!='open' THEN pnl_usd END),0) as avg_pnl "
+                "FROM demo_positions WHERE is_shadow=0 "
+                "GROUP BY alert_type ORDER BY closed_pnl DESC"
+            ).fetchall()
+
+            # Top-5 open positions per type (newest first)
+            open_by_type: dict[str, list] = {}
+            for row in type_stats:
+                at = row[0]
+                open_by_type[at] = conn.execute(
+                    "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_open "
+                    "FROM demo_positions "
+                    "WHERE status='open' AND is_shadow=0 AND alert_type=? "
+                    "ORDER BY ts_open DESC LIMIT 5",
+                    (at,)
+                ).fetchall()
+
+            # Shadow totals (all types combined)
             sc_open = conn.execute(
                 "SELECT COUNT(*) FROM demo_positions WHERE status='open' AND is_shadow=1"
             ).fetchone()[0]
-            sc = conn.execute(
+            sc_total, sc_tp, sc_sl, sc_pnl = conn.execute(
                 "SELECT COUNT(*), "
                 "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
                 "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
                 "COALESCE(SUM(pnl_usd),0) "
                 "FROM demo_positions WHERE status!='open' AND is_shadow=1"
             ).fetchone()
-            open_rows = conn.execute(
-                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_open "
-                "FROM demo_positions WHERE status='open' AND is_shadow=0 "
-                "ORDER BY ts_open DESC LIMIT 10"
-            ).fetchall()
-            shadow_open_rows = conn.execute(
-                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_open "
-                "FROM demo_positions WHERE status='open' AND is_shadow=1 "
-                "ORDER BY ts_open DESC LIMIT 10"
-            ).fetchall()
     except Exception as exc:
         _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
         return
 
-    rc_total, rc_tp, rc_sl, rc_pnl = rc
-    sc_total, sc_tp, sc_sl, sc_pnl = sc
-    rc_wr = (rc_tp / rc_total * 100) if rc_total else 0
-    sc_wr = (sc_tp / sc_total * 100) if sc_total else 0
-
-    # Fetch current prices for all open positions (real + shadow)
-    all_open_syms = {r[0] for r in open_rows} | {r[0] for r in shadow_open_rows}
+    # Fetch current prices for all displayed open positions
+    all_syms: set[str] = set()
+    for rows in open_by_type.values():
+        for sym, *_ in rows:
+            all_syms.add(sym)
     open_prices: dict[str, float] = {}
-    for sym in all_open_syms:
+    for sym in all_syms:
         try:
             t = _gateio_ticker(sym)
             if t:
@@ -1362,141 +1373,81 @@ def handle_demo_command(chat_id: int) -> None:
         except Exception:
             pass
 
-    def _calc_unrealized(rows) -> float:
-        total = 0.0
-        for sym, dr, entry, sl, tp, ts in rows:
-            cur = open_prices.get(sym)
-            if cur is not None and entry:
-                total += 100.0 * (cur - entry) / entry if dr == "LONG" else 100.0 * (entry - cur) / entry
-        return total
+    now_ts = int(time.time())
 
-    unrealized_real   = _calc_unrealized(open_rows)
-    unrealized_shadow = _calc_unrealized(shadow_open_rows)
+    def _fmt_pos(sym: str, dr: str, entry: float, sl: float, tp: float, ts: int) -> list[str]:
+        age_h = (now_ts - ts) / 3600
+        icon = "📈" if dr == "LONG" else "📉"
+        cur = open_prices.get(sym)
+        out: list[str] = []
+        if cur and entry:
+            upnl = (cur - entry) / entry * 100.0 if dr == "LONG" else (entry - cur) / entry * 100.0
+            upnl_icon = "🟢" if upnl >= 0 else "🔴"
+            out.append(
+                f"  {icon} <code>{sym}</code> {dr}  "
+                f"вход <b>{entry:,.5g}</b> → <b>{cur:,.5g}</b>  "
+                f"{upnl_icon} <b>{'+' if upnl >= 0 else ''}{upnl:.1f}%</b>  ⏱{age_h:.1f}ч"
+            )
+        else:
+            out.append(f"  {icon} <code>{sym}</code> {dr}  вход <b>{entry:,.5g}</b>  ⏱{age_h:.1f}ч")
+        if tp and sl:
+            out.append(f"      🎯 TP: <b>${tp:,.5g}</b>  │  🛑 SL: <b>${sl:,.5g}</b>")
+        return out
 
-    lines = [
-        "📊 <b>ДЕМО-РЕЖИМ (paper trading, $100/сделка)</b>",
-        "",
-        "🟢 <b>Реальные сигналы (отправлены)</b>",
-        f"  Открытых: <b>{rc_open}</b>  │  Закрытых: <b>{rc_total}</b>",
-    ]
-    if rc_total:
-        sign = "+" if rc_pnl >= 0 else ""
-        lines += [
-            f"  Win-rate: <b>{rc_wr:.0f}%</b>  (TP: {rc_tp} / SL: {rc_sl})",
-            f"  PnL закрытых: <b>{sign}${rc_pnl:.2f}</b>",
-        ]
-    else:
-        lines.append("  Пока нет закрытых позиций.")
+    lines: list[str] = ["📊 <b>ДЕМО-РЕЖИМ (paper trading, $100/сделка)</b>"]
 
-    if rc_open:
-        u_sign = "+" if unrealized_real >= 0 else ""
-        lines.append(f"  Нереализованный PnL: <b>{u_sign}${unrealized_real:.2f}</b> (открытые)")
+    for alert_type, open_cnt, closed_cnt, tp_cnt, sl_cnt, closed_pnl, avg_pnl in type_stats:
+        label = TYPE_LABELS.get(alert_type, alert_type)
+        wr = tp_cnt / closed_cnt * 100 if closed_cnt else 0
 
+        # Unrealized PnL for displayed rows
+        disp_rows = open_by_type.get(alert_type, [])
+        unrealized = sum(
+            100.0 * ((open_prices[sym] - entry) / entry if dr == "LONG" else (entry - open_prices[sym]) / entry)
+            for sym, dr, entry, *_ in disp_rows
+            if sym in open_prices and entry
+        )
+
+        # Profitability marker
+        if closed_cnt >= 3:
+            prof = "✅" if closed_pnl > 0 else "❌"
+        else:
+            prof = "🔄"
+
+        lines += ["", f"━━━━━━━━━━━━━━━━━━━━", f"{prof} <b>{label}</b>"]
+        lines.append(f"  Открытых: <b>{open_cnt}</b>  │  Закрытых: <b>{closed_cnt}</b>")
+        if closed_cnt > 0:
+            c_sign = "+" if closed_pnl >= 0 else ""
+            a_sign = "+" if avg_pnl >= 0 else ""
+            lines.append(
+                f"  Win-rate: <b>{wr:.0f}%</b>  (TP: {tp_cnt} / SL: {sl_cnt})"
+            )
+            lines.append(
+                f"  PnL закрытых: <b>{c_sign}${closed_pnl:.2f}</b>  ·  avg: <b>{a_sign}${avg_pnl:.2f}</b>"
+            )
+        if open_cnt > 0:
+            u_sign = "+" if unrealized >= 0 else ""
+            suffix = f"(показаны 5 из {open_cnt})" if open_cnt > 5 else f"({open_cnt} поз.)"
+            lines.append(f"  Нереализованный: <b>{u_sign}${unrealized:.2f}</b> {suffix}")
+
+        if disp_rows:
+            lines.append("")
+            for sym, dr, entry, sl, tp, ts in disp_rows:
+                lines += _fmt_pos(sym, dr, entry, sl, tp, ts)
+
+    # Shadow summary
+    sc_wr = sc_tp / sc_total * 100 if sc_total else 0
     lines += [
-        "",
-        "👻 <b>Теневые (заблокированы ИИ / фильтром)</b>",
+        "", "━━━━━━━━━━━━━━━━━━━━",
+        f"👻 <b>Теневые (заблокированы)</b>",
         f"  Открытых: <b>{sc_open}</b>  │  Закрытых: <b>{sc_total}</b>",
     ]
     if sc_total:
-        sign = "+" if sc_pnl >= 0 else ""
+        s_sign = "+" if sc_pnl >= 0 else ""
         lines += [
             f"  Win-rate: <b>{sc_wr:.0f}%</b>  (TP: {sc_tp} / SL: {sc_sl})",
-            f"  PnL если бы открыли: <b>{sign}${sc_pnl:.2f}</b>",
+            f"  PnL если бы открыли: <b>{s_sign}${sc_pnl:.2f}</b>",
         ]
-    else:
-        lines.append("  Пока нет закрытых теневых сигналов.")
-
-    if sc_open:
-        u_sign = "+" if unrealized_shadow >= 0 else ""
-        lines.append(f"  Нереализованный PnL: <b>{u_sign}${unrealized_shadow:.2f}</b> (открытые теневые)")
-
-    if rc_total >= 3 and sc_total >= 3:
-        diff = rc_pnl - sc_pnl
-        verdict = (
-            "✅ Фильтр улучшает результат"
-            if diff > 0 else
-            "⚠️ Фильтр блокирует прибыльные сигналы — возможно, стоит ослабить"
-        )
-        lines += ["", f"🤖 <b>Оценка фильтра:</b> {verdict}"]
-    else:
-        lines += ["", "<i>Нужно ≥3 закрытых позиции для оценки фильтра.</i>"]
-
-    # ── Разбивка по факторам фандинга и LSR (данные за последние 7 дней) ──
-    try:
-        with _db_lock:
-            conn = _get_db()
-            since7d = int(time.time()) - 7 * 86400
-            _frows = conn.execute(
-                "SELECT factor_funding_pts, factor_lsr_pts, COUNT(*) as cnt "
-                "FROM alerts WHERE ts >= ? AND recommendation IN ('LONG','SHORT') "
-                "GROUP BY factor_funding_pts != 0, factor_lsr_pts != 0",
-                (since7d,)
-            ).fetchall()
-            _f_with  = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_funding_pts != 0",
-                (since7d,)
-            ).fetchone()[0]
-            _f_without = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_funding_pts = 0",
-                (since7d,)
-            ).fetchone()[0]
-            _l_with  = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_lsr_pts != 0",
-                (since7d,)
-            ).fetchone()[0]
-            _l_without = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND factor_lsr_pts = 0",
-                (since7d,)
-            ).fetchone()[0]
-            _total7d = conn.execute(
-                "SELECT COUNT(*) FROM alerts WHERE ts >= ? AND recommendation IN ('LONG','SHORT')",
-                (since7d,)
-            ).fetchone()[0]
-        lines += [
-            "",
-            "📊 <b>Факторы за 7 дней (сигналы с/без бонуса):</b>",
-            f"  💰 Фандинг дал бонус/штраф: <b>{_f_with}</b> сигналов из {_total7d}",
-            f"  👥 LSR дал бонус:             <b>{_l_with}</b> сигналов из {_total7d}",
-            f"  ℹ️ Через неделю используй /demo чтобы сравнить winrate",
-        ]
-    except Exception as _demo_exc:
-        logger.warning("demo factor stats failed: %s", _demo_exc)
-
-    def _format_open_rows(rows, label: str) -> list[str]:
-        if not rows:
-            return []
-        now_ts = int(time.time())
-        out = ["", f"📋 <b>{label}:</b>"]
-        for sym, dr, entry, sl, tp, ts in rows:
-            age_h = (now_ts - ts) / 3600
-            icon = "📈" if dr == "LONG" else "📉"
-            cur = open_prices.get(sym)
-            if cur is not None and entry and tp and sl:
-                if dr == "LONG":
-                    upnl = 100.0 * (cur - entry) / entry
-                    pct_to_tp = 100.0 * (tp - cur) / cur
-                    pct_to_sl = 100.0 * (cur - sl) / cur
-                else:
-                    upnl = 100.0 * (entry - cur) / entry
-                    pct_to_tp = 100.0 * (cur - tp) / cur
-                    pct_to_sl = 100.0 * (sl - cur) / cur
-                upnl_sign = "+" if upnl >= 0 else ""
-                upnl_icon = "🟢" if upnl >= 0 else "🔴"
-                out.append(
-                    f"  {icon} <code>{sym}</code> {dr} │ "
-                    f"вход {entry:,.4g} → сейчас {cur:,.4g} "
-                    f"{upnl_icon} <b>{upnl_sign}{upnl:.1f}%</b>"
-                )
-                out.append(
-                    f"      до TP: {pct_to_tp:+.1f}%  │  до SL: -{abs(pct_to_sl):.1f}%  │  "
-                    f"⏱ {age_h:.1f}ч"
-                )
-            else:
-                out.append(f"  {icon} <code>{sym}</code> {dr} @{entry:,.4g} ({age_h:.1f}ч)")
-        return out
-
-    lines += _format_open_rows(open_rows, "Открытые реальные позиции")
-    lines += _format_open_rows(shadow_open_rows, "Открытые теневые позиции")
 
     _telegram_send(chat_id, "\n".join(lines))
 
