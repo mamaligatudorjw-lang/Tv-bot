@@ -1397,7 +1397,7 @@ def check_liquidity_orders() -> None:
             filled_cond = (cur <= lp if dr == "LONG" else cur >= lp) if lp else False
             wick_filled  = False
             wick_touched = False     # candle touched but did not penetrate 0.05%
-            fill_price   = cur       # default: fill at last traded price
+            fill_price   = lp        # limit orders always fill at the limit price, not market price
             if not filled_cond and lp:
                 try:
                     _c1m = _gateio_klines(sym, "1m", 2)
