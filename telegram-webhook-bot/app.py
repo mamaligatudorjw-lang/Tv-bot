@@ -9652,7 +9652,44 @@ def _startup_ranking_refresh() -> None:
     logger.warning("Startup ranking refresh: timed out waiting for liquid_symbols")
 
 
+def _restore_cooldowns_from_db() -> None:
+    """Restore per-symbol alert cooldowns from demo_positions after a restart.
+    Without this, every restart clears in-memory state and the same coins
+    re-signal immediately even though their positions are still open."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            # oversold_24h: take ts_open of the most recent real position per symbol
+            os_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='oversold_24h' AND is_shadow=0 "
+                "  AND ts_open > ? "
+                "GROUP BY symbol",
+                (int(time.time()) - OVERSOLD_COOLDOWN,),
+            ).fetchall()
+            # streak_1h: same logic with its own cooldown
+            sk_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='streak_1h' AND is_shadow=0 "
+                "  AND ts_open > ? "
+                "GROUP BY symbol",
+                (int(time.time()) - STREAK_1H_COOLDOWN,),
+            ).fetchall()
+        with state_lock:
+            for sym, ts in os_rows:
+                state["last_oversold_alerted"][sym] = ts
+            for sym, ts in sk_rows:
+                state["last_streak_1h_alerted"][sym] = ts
+        logger.info(
+            "Cooldowns restored from DB: %d oversold, %d streak_1h symbols",
+            len(os_rows), len(sk_rows),
+        )
+    except Exception as exc:
+        logger.warning("_restore_cooldowns_from_db failed: %s", exc)
+
+
 if os.environ.get("TESTING", "").strip().lower() not in {"1", "true", "yes"}:
+    _restore_cooldowns_from_db()
     restore_position_monitors()
     scheduler.start()
     start_command_polling()
