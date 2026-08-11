@@ -1702,16 +1702,45 @@ def handle_demo_command(chat_id: int) -> None:
                 "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) "
                 "FROM demo_positions WHERE is_shadow=1 GROUP BY alert_type"
             ).fetchall()
+
+            # Liquidity orders summary
+            liq_row = conn.execute("""
+                SELECT
+                  SUM(CASE WHEN entry_type='limit' THEN 1 ELSE 0 END)                       AS lp,
+                  SUM(CASE WHEN status='filled' AND entry_type='limit' THEN 1 ELSE 0 END)    AS lf,
+                  SUM(CASE WHEN entry_type='market' THEN 1 ELSE 0 END)                       AS mkt,
+                  SUM(CASE WHEN status='expired'    THEN 1 ELSE 0 END)                       AS exp,
+                  SUM(CASE WHEN status='missed_move' THEN 1 ELSE 0 END)                      AS miss,
+                  SUM(CASE WHEN result IS NULL AND status='filled' THEN 1 ELSE 0 END)        AS open_n,
+                  SUM(CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END)                        AS ct,
+                  SUM(CASE WHEN result='tp'         THEN 1 ELSE 0 END)                       AS ctp,
+                  SUM(CASE WHEN result='sl'         THEN 1 ELSE 0 END)                       AS csl,
+                  COALESCE(SUM(CASE WHEN result IS NOT NULL THEN pnl_usd ELSE 0 END), 0)     AS cpnl,
+                  COALESCE(SUM(touched_no_fill), 0)                                           AS tnf
+                FROM liquidity_orders
+            """).fetchone()
+            liq_open_rows = conn.execute(
+                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_placed "
+                "FROM liquidity_orders WHERE status='filled' AND result IS NULL "
+                "ORDER BY ts_placed DESC LIMIT 5"
+            ).fetchall()
+            liq_closed_rows = conn.execute(
+                "SELECT symbol, direction, entry_price, exit_price, pnl_usd, result, ts_placed, ts_closed "
+                "FROM liquidity_orders WHERE result IS NOT NULL "
+                "ORDER BY ts_closed DESC LIMIT 3"
+            ).fetchall()
     except Exception as exc:
         _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
         return
 
-    # Fetch current prices for all displayed open positions (real + shadow)
+    # Fetch current prices for all displayed open positions (real + shadow + liquidity)
     all_syms: set[str] = set()
     for rows in open_by_type.values():
         for sym, *_ in rows:
             all_syms.add(sym)
     for sym, *_ in sc_open_rows:
+        all_syms.add(sym)
+    for sym, *_ in liq_open_rows:
         all_syms.add(sym)
     open_prices: dict[str, float] = {}
     for sym in all_syms:
@@ -1868,6 +1897,69 @@ def handle_demo_command(chat_id: int) -> None:
                 f"Прибыль <b>{ps}${t_pnl:.2f}</b>  │  "
                 f"Нереал. <b>{us}${t_unreal:.2f}</b>"
             )
+
+    # ── 🧲 Умный вход по ликвидности ────────────────────────────────────────
+    if liq_row:
+        lp, lf, mkt, exp, miss, open_n, ct, ctp, csl, cpnl, tnf = liq_row
+        lp = lp or 0; lf = lf or 0; mkt = mkt or 0; exp = exp or 0
+        miss = miss or 0; open_n = open_n or 0; ct = ct or 0
+        ctp = ctp or 0; csl = csl or 0; cpnl = cpnl or 0.0; tnf = tnf or 0
+        fill_rate = lf / lp * 100.0 if lp else 0.0
+        wr = ctp / ct * 100.0 if ct else 0.0
+
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━",
+                  "🧲 <b>Умный вход по ликвидности</b>"]
+        lines.append(
+            f"  Лимиток: <b>{lp}</b>  →  исполнено <b>{lf}</b> ({fill_rate:.0f}%)"
+            + (f"  │  рыночных: <b>{mkt}</b>" if mkt else "")
+        )
+        if tnf or exp or miss:
+            parts = []
+            if tnf:  parts.append(f"касаний без входа: {tnf}")
+            if exp:  parts.append(f"истекло: {exp}")
+            if miss: parts.append(f"ушло без входа: {miss}")
+            lines.append("  " + "  │  ".join(parts))
+
+        # Open liquidity positions
+        if liq_open_rows:
+            unreal_liq = 0.0
+            liq_open_lines = []
+            for sym, dr, ep, sl, tp, ts in liq_open_rows:
+                icon = "📈" if dr == "LONG" else "📉"
+                age_h = (now_ts - (ts or now_ts)) / 3600
+                cur = open_prices.get(sym)
+                if cur and ep:
+                    upct = (cur - ep) / ep * 100.0 if dr == "LONG" else (ep - cur) / ep * 100.0
+                    unreal_liq += upct
+                    s = "+" if upct >= 0 else ""
+                    pi = "🟢" if upct >= 0 else "🔴"
+                    liq_open_lines.append(
+                        f"  {icon} <code>{sym}</code> {dr}  {ep:,.5g}→{cur:,.5g}  {pi}<b>{s}{upct:.1f}%</b>  ⏱{age_h:.1f}ч"
+                    )
+                else:
+                    liq_open_lines.append(f"  {icon} <code>{sym}</code> {dr}  вход {ep:,.5g}  ⏱{age_h:.1f}ч")
+            us = "+" if unreal_liq >= 0 else ""
+            lines.append(f"\n  📂 <b>Открытые</b> ({open_n} поз.)  нереализованный: <b>{us}${unreal_liq:.2f}</b>")
+            lines += liq_open_lines
+
+        # Closed liquidity positions
+        if ct:
+            cs = "+" if cpnl >= 0 else ""
+            lines.append(
+                f"\n  📁 <b>Закрытых: {ct}</b>  Win-rate: <b>{wr:.0f}%</b> (TP:{ctp}/SL:{csl})  "
+                f"PnL: <b>{cs}${cpnl:.2f}</b>"
+            )
+            for sym, dr, ep, ex_p, pnl, res, ts_o, ts_c in (liq_closed_rows or []):
+                icon = "📈" if dr == "LONG" else "📉"
+                ri = "✅" if res == "tp" else "❌"
+                pi = "🟢" if (pnl or 0) >= 0 else "🔴"
+                s = "+" if (pnl or 0) >= 0 else ""
+                dur_h = (ts_c - ts_o) / 3600 if ts_c and ts_o else 0
+                tag = "TP" if res == "tp" else "SL"
+                lines.append(
+                    f"  {ri} <code>{sym}</code> {dr}  {ep:,.5g}→{ex_p:,.5g}  "
+                    f"{pi}<b>{s}${pnl:.2f}</b>  [{tag}]  ⏱{dur_h:.0f}ч"
+                )
 
     _telegram_send(chat_id, "\n".join(lines))
 
