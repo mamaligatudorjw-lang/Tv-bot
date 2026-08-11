@@ -1360,7 +1360,7 @@ def handle_demo_command(chat_id: int) -> None:
 
             # Shadow totals (all types combined)
             sc_open_rows = conn.execute(
-                "SELECT symbol, direction, entry_price FROM demo_positions "
+                "SELECT symbol, direction, entry_price, alert_type FROM demo_positions "
                 "WHERE status='open' AND is_shadow=1"
             ).fetchall()
             sc_open = len(sc_open_rows)
@@ -1371,6 +1371,22 @@ def handle_demo_command(chat_id: int) -> None:
                 "COALESCE(SUM(pnl_usd),0) "
                 "FROM demo_positions WHERE status!='open' AND is_shadow=1"
             ).fetchone()
+            # Shadow breakdown by direction (LONG / SHORT)
+            sc_dir_stats = conn.execute(
+                "SELECT direction, "
+                "  SUM(CASE WHEN status='open' THEN 1 ELSE 0 END), "
+                "  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END), "
+                "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) "
+                "FROM demo_positions WHERE is_shadow=1 GROUP BY direction"
+            ).fetchall()
+            # Shadow breakdown by signal type
+            sc_type_stats = conn.execute(
+                "SELECT alert_type, "
+                "  SUM(CASE WHEN status='open' THEN 1 ELSE 0 END), "
+                "  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END), "
+                "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) "
+                "FROM demo_positions WHERE is_shadow=1 GROUP BY alert_type"
+            ).fetchall()
     except Exception as exc:
         _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
         return
@@ -1480,16 +1496,22 @@ def handle_demo_command(chat_id: int) -> None:
             for sym, dr, entry, exit_p, pnl_usd, status, ts_open, ts_close in disp_closed:
                 lines += _fmt_closed(sym, dr, entry, exit_p, pnl_usd, status, ts_open, ts_close)
 
-    # Shadow summary
+    # Shadow summary — compute unrealized per direction and per type
     sc_wr = sc_tp / sc_total * 100 if sc_total else 0
-    sc_unrealized = sum(
-        100.0 * ((open_prices[sym] - entry) / entry if dr == "LONG" else (entry - open_prices[sym]) / entry)
-        for sym, dr, entry in sc_open_rows
-        if sym in open_prices and entry
-    )
+    sc_unrealized = 0.0
+    sc_unreal_dir: dict[str, float] = {}
+    sc_unreal_type: dict[str, float] = {}
+    for sym, dr, entry, at in sc_open_rows:
+        cur = open_prices.get(sym)
+        if cur and entry:
+            pct = (cur - entry) / entry * 100.0 if dr == "LONG" else (entry - cur) / entry * 100.0
+            sc_unrealized += pct
+            sc_unreal_dir[dr]  = sc_unreal_dir.get(dr, 0.0)  + pct
+            sc_unreal_type[at] = sc_unreal_type.get(at, 0.0) + pct
+
     lines += [
         "", "━━━━━━━━━━━━━━━━━━━━",
-        f"👻 <b>Теневые (заблокированы)</b>",
+        "👻 <b>Теневые (заблокированы)</b>",
         f"  Открытых: <b>{sc_open}</b>  │  Закрытых: <b>{sc_total}</b>",
     ]
     if sc_total:
@@ -1501,6 +1523,36 @@ def handle_demo_command(chat_id: int) -> None:
     if sc_open:
         u_sign = "+" if sc_unrealized >= 0 else ""
         lines.append(f"  Нереализованный: <b>{u_sign}${sc_unrealized:.2f}</b> ({sc_open} поз.)")
+
+    # --- Разбивка по LONG / SHORT ---
+    if sc_dir_stats:
+        lines.append("")
+        for dr, d_open, d_closed, d_pnl in sc_dir_stats:
+            d_unreal = sc_unreal_dir.get(dr, 0.0)
+            icon  = "📈" if dr == "LONG" else "📉"
+            ps    = "+" if d_pnl    >= 0 else ""
+            us    = "+" if d_unreal >= 0 else ""
+            lines.append(
+                f"  {icon} <b>{dr}</b>:  "
+                f"Открыто <b>{d_open}</b>  │  Закрыто <b>{d_closed}</b>  │  "
+                f"Прибыль <b>{ps}${d_pnl:.2f}</b>  │  "
+                f"Нереал. <b>{us}${d_unreal:.2f}</b>"
+            )
+
+    # --- Разбивка по типу сигнала ---
+    if sc_type_stats:
+        lines.append("")
+        for at, t_open, t_closed, t_pnl in sc_type_stats:
+            t_unreal = sc_unreal_type.get(at, 0.0)
+            lbl  = TYPE_LABELS.get(at, at or "—")
+            ps   = "+" if t_pnl    >= 0 else ""
+            us   = "+" if t_unreal >= 0 else ""
+            lines.append(
+                f"  <b>{lbl}</b>:  "
+                f"Открыто <b>{t_open}</b>  │  Закрыто <b>{t_closed}</b>  │  "
+                f"Прибыль <b>{ps}${t_pnl:.2f}</b>  │  "
+                f"Нереал. <b>{us}${t_unreal:.2f}</b>"
+            )
 
     _telegram_send(chat_id, "\n".join(lines))
 
