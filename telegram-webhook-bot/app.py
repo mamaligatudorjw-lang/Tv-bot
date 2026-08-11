@@ -1252,6 +1252,209 @@ def _demo_open_position(
         logger.warning("_demo_open_position failed for %s: %s", symbol, exc)
 
 
+def _liquidity_entry_trigger(symbol: str, direction: str, price: float,
+                              original_sl: float | None) -> None:
+    """Background: run liquidity-entry decision for an oversold signal."""
+    try:
+        from liquidity import find_liquidity_zones, liquidity_entry_decision
+        candles = _gateio_klines(symbol, "15m", 100)
+        if len(candles) < 7:
+            return
+        zones    = find_liquidity_zones(candles)
+        decision = liquidity_entry_decision(direction, price, zones)
+        if not decision:
+            logger.debug("Liquidity %s %s: no qualifying zone", symbol, direction)
+            return
+
+        now      = int(time.time())
+        etype    = decision["entry_type"]
+
+        if etype == "skip":
+            logger.info("Liquidity %s %s: skipped — %s", symbol, direction, decision.get("reason"))
+            return
+
+        sl_price    = decision["sl_price"]
+        tp_price    = decision["tp_price"]
+        zone_price  = decision["zone_price"]
+        zone_weight = decision["zone_weight"]
+        ts_expires  = now + 4 * 3600
+
+        if etype == "limit":
+            lp = decision["limit_price"]
+            with _db_lock:
+                _get_db().execute(
+                    "INSERT INTO liquidity_orders "
+                    "(ts_created,ts_expires,symbol,direction,entry_type,"
+                    " limit_price,sl_price,tp_price,zone_price,zone_weight,"
+                    " original_sl_price,status) "
+                    "VALUES (?,?,?,?,'limit',?,?,?,?,?,?,'pending')",
+                    (now, ts_expires, symbol, direction, lp,
+                     sl_price, tp_price, zone_price, zone_weight, original_sl)
+                )
+                _get_db().commit()
+            exp_h = (ts_expires - now) // 3600
+            send_telegram(
+                f"🧲 <b>ЛИМИТКА {symbol} {direction}</b> @<b>${lp:,.6g}</b>\n"
+                f"Зона ликвидности: ${zone_price:,.6g}  (вес {zone_weight})\n"
+                f"🛑 SL: <b>${sl_price:,.6g}</b>  │  🎯 TP: <b>${tp_price:,.6g}</b>\n"
+                f"⏳ Отмена через {exp_h}ч"
+            )
+            logger.info("Liquidity: limit placed %s %s @%.6g zone=%.6g w=%d",
+                        symbol, direction, lp, zone_price, zone_weight)
+
+        elif etype == "market":
+            ep = price
+            with _db_lock:
+                _get_db().execute(
+                    "INSERT INTO liquidity_orders "
+                    "(ts_created,ts_expires,symbol,direction,entry_type,"
+                    " entry_price,sl_price,tp_price,zone_price,zone_weight,"
+                    " original_sl_price,status,ts_filled) "
+                    "VALUES (?,?,?,?,'market',?,?,?,?,?,?,'filled',?)",
+                    (now, ts_expires, symbol, direction, ep,
+                     sl_price, tp_price, zone_price, zone_weight, original_sl, now)
+                )
+                _get_db().commit()
+            logger.info("Liquidity: market entry %s %s @%.6g zone=%.6g w=%d",
+                        symbol, direction, ep, zone_price, zone_weight)
+
+    except Exception as exc:
+        logger.warning("_liquidity_entry_trigger %s: %s", symbol, exc)
+
+
+def check_liquidity_orders() -> None:
+    """
+    Background job (every 60 s): manage pending and filled liquidity orders.
+
+    Pending limits: fill / expire / mark missed_move.
+    Filled orders:  close on TP/SL; track if smart SL saved a position.
+    """
+    try:
+        now = int(time.time())
+        with _db_lock:
+            conn = _get_db()
+            pending = conn.execute(
+                "SELECT id,symbol,direction,limit_price,sl_price,tp_price,"
+                "       ts_expires,zone_price,zone_weight "
+                "FROM liquidity_orders WHERE status='pending'"
+            ).fetchall()
+            filled = conn.execute(
+                "SELECT id,symbol,direction,entry_price,sl_price,tp_price,original_sl_price "
+                "FROM liquidity_orders WHERE status='filled' AND result IS NULL"
+            ).fetchall()
+
+        # ── Pending limit orders ─────────────────────────────────────────────
+        for oid, sym, dr, lp, sl, tp, ts_exp, zp, zw in pending:
+            ticker = _gateio_ticker(sym)
+            if not ticker:
+                continue
+            cur = float(ticker["lastPrice"])
+
+            # Expired?
+            if now >= ts_exp:
+                with _db_lock:
+                    _get_db().execute(
+                        "UPDATE liquidity_orders SET status='expired',ts_closed=? WHERE id=?",
+                        (now, oid))
+                    _get_db().commit()
+                send_telegram(
+                    f"⏰ <b>Лимитка истекла</b>: {sym} {dr} @${lp:,.6g} — не исполнена за 4ч"
+                )
+                logger.info("Liquidity: expired %s %s id=%d", sym, dr, oid)
+                continue
+
+            # Missed move: price moved 1.5% toward TP without filling
+            if lp:
+                toward_tp_pct = ((cur - lp) / lp * 100.0 if dr == "LONG"
+                                 else (lp - cur) / lp * 100.0)
+                if toward_tp_pct >= 1.5:
+                    with _db_lock:
+                        _get_db().execute(
+                            "UPDATE liquidity_orders SET status='missed_move',ts_closed=? WHERE id=?",
+                            (now, oid))
+                        _get_db().commit()
+                    send_telegram(
+                        f"🏃 <b>Движение без входа</b>: {sym} {dr}\n"
+                        f"Цена ушла к TP, лимитка @${lp:,.6g} не исполнена"
+                    )
+                    logger.info("Liquidity: missed_move %s %s id=%d", sym, dr, oid)
+                    continue
+
+            # Filled? (price touches/crosses limit level)
+            filled_cond = (cur <= lp if dr == "LONG" else cur >= lp) if lp else False
+            if filled_cond:
+                with _db_lock:
+                    _get_db().execute(
+                        "UPDATE liquidity_orders SET status='filled',entry_price=?,ts_filled=? WHERE id=?",
+                        (cur, now, oid))
+                    _get_db().commit()
+                send_telegram(
+                    f"✅ <b>Лимитка исполнена</b>: {sym} {dr} @<b>${cur:,.6g}</b>\n"
+                    f"🛑 SL: ${sl:,.6g}  │  🎯 TP: ${tp:,.6g}"
+                )
+                logger.info("Liquidity: filled %s %s @%.6g id=%d", sym, dr, cur, oid)
+
+        # ── Filled orders: check SL/TP ───────────────────────────────────────
+        for oid, sym, dr, ep, sl, tp, orig_sl in filled:
+            if not ep:
+                continue
+            ticker = _gateio_ticker(sym)
+            if not ticker:
+                continue
+            cur = float(ticker["lastPrice"])
+
+            # Check if price touched original SL (for "saved" tracking)
+            touched = 0
+            if orig_sl:
+                touched = (1 if (dr == "LONG" and cur < orig_sl)
+                           else (1 if (dr == "SHORT" and cur > orig_sl) else 0))
+            if touched:
+                with _db_lock:
+                    _get_db().execute(
+                        "UPDATE liquidity_orders SET touched_orig_sl=1 WHERE id=? AND touched_orig_sl=0",
+                        (oid,))
+                    _get_db().commit()
+
+            hit_tp = (cur >= tp if dr == "LONG" else cur <= tp)
+            hit_sl = (cur <= sl if dr == "LONG" else cur >= sl)
+            if not hit_tp and not hit_sl:
+                continue
+
+            result  = "tp" if hit_tp else "sl"
+            pnl_usd = (100.0 * (cur - ep) / ep if dr == "LONG"
+                       else 100.0 * (ep - cur) / ep)
+            # "saved" = price crossed original SL but smart SL held, closed TP
+            saved = 0
+            if result == "tp":
+                with _db_lock:
+                    row = _get_db().execute(
+                        "SELECT touched_orig_sl FROM liquidity_orders WHERE id=?", (oid,)
+                    ).fetchone()
+                    if row and row[0]:
+                        saved = 1
+
+            with _db_lock:
+                _get_db().execute(
+                    "UPDATE liquidity_orders "
+                    "SET result=?,ts_closed=?,exit_price=?,pnl_usd=?,saved_from_sl=? "
+                    "WHERE id=?",
+                    (result, now, cur, pnl_usd, saved, oid))
+                _get_db().commit()
+
+            sign = "+" if pnl_usd >= 0 else ""
+            r_icon = "✅ TP" if result == "tp" else "❌ SL"
+            saved_note = "  💾 Умный SL спас сделку!" if saved else ""
+            send_telegram(
+                f"{r_icon} <b>Ликвидность {sym} {dr}</b>  "
+                f"${ep:,.6g} → ${cur:,.6g}  <b>{sign}${pnl_usd:.2f}</b>{saved_note}"
+            )
+            logger.info("Liquidity: closed %s %s result=%s pnl=%.2f id=%d",
+                        sym, dr, result, pnl_usd, oid)
+
+    except Exception as exc:
+        logger.warning("check_liquidity_orders failed: %s", exc)
+
+
 def check_demo_positions() -> None:
     """Close demo positions that reached TP or SL. Called every 60 s."""
     try:
@@ -2860,6 +3063,32 @@ def _get_db() -> sqlite3.Connection:
         ).rowcount
         if _backfilled:
             logger.info("demo_positions: backfilled is_top=1 for %d existing real positions", _backfilled)
+        # Liquidity-entry strategy: parallel demo-only strategy
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS liquidity_orders (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts_created        INTEGER NOT NULL,
+                ts_expires        INTEGER NOT NULL,
+                symbol            TEXT    NOT NULL,
+                direction         TEXT    NOT NULL,
+                entry_type        TEXT    NOT NULL,
+                limit_price       REAL,
+                entry_price       REAL,
+                sl_price          REAL    NOT NULL,
+                tp_price          REAL    NOT NULL,
+                zone_price        REAL    NOT NULL,
+                zone_weight       INTEGER NOT NULL,
+                original_sl_price REAL,
+                status            TEXT    NOT NULL DEFAULT 'pending',
+                ts_filled         INTEGER,
+                ts_closed         INTEGER,
+                exit_price        REAL,
+                pnl_usd           REAL,
+                result            TEXT,
+                saved_from_sl     INTEGER NOT NULL DEFAULT 0,
+                touched_orig_sl   INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         # Personal positions tracker — user registers their own open positions;
         # bot monitors and sends confirmed reversal alerts.
         _db_conn.execute("""
@@ -5168,6 +5397,12 @@ def check_overheated_oversold(
                             alert_type="oversold_24h",
                             score=score,
                         )
+                        # ── Умный вход по ликвидности (параллельная стратегия) ──
+                        threading.Thread(
+                            target=_liquidity_entry_trigger,
+                            args=(symbol, "LONG", price, _dsl_os),
+                            daemon=True,
+                        ).start()
     return sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked
 
 
@@ -8055,6 +8290,75 @@ def handle_stats_command(chat_id: int) -> None:
         f"<i>🟢 = TP достигнут (+{tp_pct:.0f}%)  🔴 = стоп (−{sl_pct:.0f}%)  "
         f"в скобках — средний P&L включая таймауты</i>"
     )
+
+    # ── 🧲 Умный вход по ликвидности ────────────────────────────────────────
+    try:
+        with _db_lock:
+            conn = _get_db()
+            liq = conn.execute("""
+                SELECT
+                  SUM(CASE WHEN entry_type='limit' THEN 1 ELSE 0 END)          AS limits_placed,
+                  SUM(CASE WHEN status='filled' AND entry_type='limit' THEN 1 ELSE 0 END) AS limits_filled,
+                  SUM(CASE WHEN status='expired'    THEN 1 ELSE 0 END)          AS expired,
+                  SUM(CASE WHEN status='missed_move' THEN 1 ELSE 0 END)         AS missed,
+                  SUM(CASE WHEN entry_type='market' THEN 1 ELSE 0 END)          AS market_entries,
+                  SUM(CASE WHEN result IS NULL AND status='filled' THEN 1 ELSE 0 END) AS open_pos,
+                  SUM(CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END)           AS closed_total,
+                  SUM(CASE WHEN result='tp'        THEN 1 ELSE 0 END)           AS closed_tp,
+                  SUM(CASE WHEN result='sl'        THEN 1 ELSE 0 END)           AS closed_sl,
+                  COALESCE(SUM(CASE WHEN result IS NOT NULL THEN pnl_usd ELSE 0 END), 0) AS closed_pnl,
+                  COALESCE(AVG(CASE WHEN result IS NOT NULL THEN pnl_usd END), 0)         AS avg_pnl,
+                  COALESCE(SUM(CASE WHEN entry_type='limit' AND result IS NOT NULL THEN pnl_usd ELSE 0 END),0) AS limit_pnl,
+                  COALESCE(SUM(CASE WHEN entry_type='market' AND result IS NOT NULL THEN pnl_usd ELSE 0 END),0) AS market_pnl,
+                  SUM(saved_from_sl)                                             AS saved
+                FROM liquidity_orders
+            """).fetchone()
+            liq_open_rows = conn.execute(
+                "SELECT symbol, direction, entry_price FROM liquidity_orders "
+                "WHERE status='filled' AND result IS NULL"
+            ).fetchall()
+    except Exception:
+        liq = None
+
+    if liq:
+        (lp, lf, exp, miss, mkt, open_pos, ct, ctp, csl,
+         cpnl, avg_pnl, lpnl, mpnl, saved) = liq
+        fill_rate = lf / lp * 100.0 if lp else 0.0
+        wr = ctp / ct * 100.0 if ct else 0.0
+
+        # Unrealized PnL for open positions
+        unreal = 0.0
+        for sym, dr, ep in (liq_open_rows or []):
+            try:
+                t = _gateio_ticker(sym)
+                if t and ep:
+                    cur = float(t["lastPrice"])
+                    unreal += (cur - ep) / ep * 100.0 if dr == "LONG" \
+                         else (ep - cur) / ep * 100.0
+            except Exception:
+                pass
+
+        cs = "+" if cpnl >= 0 else ""
+        as_ = "+" if avg_pnl >= 0 else ""
+        us  = "+" if unreal >= 0 else ""
+        lps = "+" if lpnl >= 0 else ""
+        mps = "+" if mpnl >= 0 else ""
+        lines += [
+            "",
+            "🧲 <b>Умный вход по ликвидности</b>",
+            f"  Лимиток выставлено: <b>{lp}</b>  │  Исполнено: <b>{lf}</b>  │  Fill rate: <b>{fill_rate:.0f}%</b>",
+            f"  Истекло: {exp}  │  Ушло без входа: {miss}  │  Рыночных входов: {mkt}",
+            f"  Открытых: <b>{open_pos}</b>  │  Нереализованный: <b>{us}${unreal:.2f}</b>",
+        ]
+        if ct:
+            lines += [
+                f"  Закрытых: <b>{ct}</b>  │  Win-rate: <b>{wr:.0f}%</b>  (TP: {ctp} / SL: {csl})",
+                f"  PnL закрытых: <b>{cs}${cpnl:.2f}</b>  ·  avg: <b>{as_}${avg_pnl:.2f}</b>",
+                f"  Лимитный вход avg PnL: <b>{lps}${lpnl:.2f}</b>  │  Рыночный: <b>{mps}${mpnl:.2f}</b>",
+            ]
+        if saved:
+            lines.append(f"  💾 Спасено от выбивания: <b>{saved}</b>")
+
     _telegram_send(chat_id, "\n".join(lines))
 
 
@@ -9844,6 +10148,9 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_demo_positions, "interval", seconds=60, id="demo_check",
+)
+scheduler.add_job(
+    check_liquidity_orders, "interval", seconds=60, id="liquidity_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
