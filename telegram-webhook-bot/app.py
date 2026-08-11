@@ -372,6 +372,7 @@ PUMP_FILTER_SHORT_ENABLED = False       # ВЫКЛ: теневые данные 
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
 UPTREND_FLIP_MIN_CANDLES  = 0           # ВЫКЛ: теневые данные показали, что uptrend_flip блокирует прибыльные SHORT-ы
 SHADOW_ONLY_MODE          = True        # True = отправлять теневые сигналы в Telegram, реальные — молчать
+SHADOW_MODE_EXEMPT_TYPES  = {"oversold_24h"}  # эти типы всегда отправляются как реальные, даже в SHADOW_ONLY_MODE
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа (4h ≈ 16ч при N=4)
 
 # --- Display leverage for ROI calculation in Telegram messages ---
@@ -3346,7 +3347,7 @@ def send_alert_with_log(
         if state["silenced"]:
             logger.info("Suppressed %s/%s (silenced): %s", symbol, alert_type, body_text[:60])
             return (False, None)
-    if SHADOW_ONLY_MODE:
+    if SHADOW_ONLY_MODE and alert_type not in SHADOW_MODE_EXEMPT_TYPES:
         logger.debug("SHADOW_ONLY_MODE: suppressing real signal %s/%s", symbol, alert_type)
         return (False, None)
     # Only directional signals — drop NEUTRAL/WATCH so the channel stays
