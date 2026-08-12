@@ -1304,6 +1304,8 @@ def _liquidity_entry_trigger(symbol: str, direction: str, price: float,
                 _get_db().commit()
             exp_h = (ts_expires - now) // 3600
             send_telegram(
+                f"<i>Параллельная стратегия — вход и SL/TP рассчитаны от зоны "
+                f"ликвидности, не совпадают с сигналом выше. Это нормально.</i>\n\n"
                 f"🧲 <b>ЛИМИТКА {symbol} {direction}</b> @<b>${lp:,.6g}</b>\n"
                 f"Зона ликвидности: ${zone_price:,.6g}  (вес {zone_weight})\n"
                 f"🛑 SL: <b>${sl_price:,.6g}</b>  │  🎯 TP: <b>${tp_price:,.6g}</b>\n"
@@ -8465,6 +8467,9 @@ def handle_silence_command(chat_id: int) -> None:
 
 def handle_stats_command(chat_id: int) -> None:
     """Show simulated SL/TP P&L stats per alert type for the last HIT_RATE_RETENTION_DAYS days."""
+    import html as _html
+    import datetime as _dt
+
     stats = compute_hit_rate_stats(days=HIT_RATE_RETENTION_DAYS)
     if not stats:
         _telegram_send(
@@ -8478,9 +8483,7 @@ def handle_stats_command(chat_id: int) -> None:
     tp_pct = HIT_RATE_TP_PCT
 
     # ── Old-vs-honest split per alert_type from demo_positions ──────────────
-    # "старые" = closed before WICK_CHECK_ENABLED_TS (lastPrice only)
-    # "честные" = closed on/after (lastPrice + 1m candle wick detection)
-    _demo_split: dict[str, tuple[int, int]] = {}   # alert_type → (old, honest)
+    _demo_split: dict[str, tuple[int, int]] = {}
     try:
         with _db_lock:
             _rows = _get_db().execute(
@@ -8501,7 +8504,6 @@ def handle_stats_command(chat_id: int) -> None:
         logger.debug("demo_split query failed: %s", _ds_exc)
 
     def fmt_horizon(h: dict) -> str:
-        """Format one horizon bucket as  TP%/SL% avg_pnl."""
         n = h["n"]
         if n == 0:
             return "—"
@@ -8511,116 +8513,143 @@ def handle_stats_command(chat_id: int) -> None:
         sign = "+" if avg >= 0 else ""
         return f"🟢{tp_r:.0f}% 🔴{sl_r:.0f}% ({sign}{avg:.1f}%)"
 
-    lines = [
-        f"📊 <b>Статистика за {HIT_RATE_RETENTION_DAYS} дней</b>",
-        f"<i>SL {sl_pct:.0f}% / TP {tp_pct:.0f}% · симуляция по ценам снапшотов</i>",
-        "",
-    ]
+    # ── Header (sent with first chunk) ───────────────────────────────────────
+    header = (
+        f"📊 <b>Статистика за {HIT_RATE_RETENTION_DAYS} дней</b>\n"
+        f"<i>SL {sl_pct:.0f}% / TP {tp_pct:.0f}% · симуляция по ценам снапшотов</i>"
+    )
+
+    # ── Per-type blocks — each type = one atomic block string ────────────────
+    type_blocks: list[str] = []
     for r in stats:
-        h3m  = r["horizons"]["3м"]
-        h5m  = r["horizons"]["5м"]
-        h15  = r["horizons"]["15м"]
-        h1h  = r["horizons"]["1ч"]
-        h4h  = r["horizons"]["4ч"]
+        h3m = r["horizons"]["3м"]
+        h5m = r["horizons"]["5м"]
+        h15 = r["horizons"]["15м"]
+        h1h = r["horizons"]["1ч"]
+        h4h = r["horizons"]["4ч"]
+        # html.escape() ALL dynamic strings from DB
+        atype_safe = _html.escape(str(r["alert_type"]))
+        rec_safe   = _html.escape(str(r["recommendation"]))
         _old_n, _hon_n = _demo_split.get(r["alert_type"], (0, 0))
         _total_closed = _old_n + _hon_n
-        if _total_closed:
-            _closed_note = (
-                f" · закрыто: {_total_closed} "
-                f"({_old_n} старых / {_hon_n} честных)"
-            )
-        else:
-            _closed_note = ""
-        lines.append(
-            f"<b>{r['alert_type']}</b> · {r['recommendation']} · {r['total']} алертов{_closed_note}\n"
+        _closed_note = (
+            f" · закрыто: {_total_closed} ({_old_n} старых / {_hon_n} честных)"
+            if _total_closed else ""
+        )
+        type_blocks.append(
+            f"<b>{atype_safe}</b> · {rec_safe} · {r['total']} алертов{_closed_note}\n"
             f"   3м: {fmt_horizon(h3m)}\n"
             f"   5м: {fmt_horizon(h5m)}\n"
             f"  15м: {fmt_horizon(h15)}\n"
             f"   1ч: {fmt_horizon(h1h)}\n"
             f"   4ч: {fmt_horizon(h4h)}"
         )
-    lines.append("")
-    lines.append(
-        f"<i>🟢 = TP достигнут (+{tp_pct:.0f}%)  🔴 = стоп (−{sl_pct:.0f}%)  "
-        f"в скобках — средний P&amp;L включая таймауты</i>"
-    )
-    import datetime as _dt
+
+    # ── Footer ────────────────────────────────────────────────────────────────
     _wick_dt = _dt.datetime.utcfromtimestamp(WICK_CHECK_ENABLED_TS).strftime("%d.%m.%Y %H:%M UTC")
-    lines.append(
+    footer = (
+        f"\n<i>🟢 = TP достигнут (+{tp_pct:.0f}%)  🔴 = стоп (−{sl_pct:.0f}%)  "
+        f"в скобках — средний P&amp;L включая таймауты</i>\n"
         f"<i>честные = закрыты по свечному фитилю с {_wick_dt}</i>"
     )
 
-    # ── 🧲 Умный вход по ликвидности ────────────────────────────────────────
+    # ── Send per-type stats, splitting at 3800 chars ─────────────────────────
+    MAX_MSG = 3800
+
+    def _flush(chunk_lines: list[str], is_first: bool) -> None:
+        prefix = header + "\n\n" if is_first else ""
+        body   = "\n".join(chunk_lines)
+        _telegram_send(chat_id, prefix + body + footer)
+
+    chunk: list[str] = []
+    chunk_len  = len(header) + len(footer) + 2   # reserve header+footer
+    first_msg  = True
+
+    for block in type_blocks:
+        cost = len(block) + 1   # +1 for \n separator
+        if chunk and chunk_len + cost > MAX_MSG:
+            _flush(chunk, first_msg)
+            first_msg = False
+            chunk     = []
+            chunk_len = len(footer) + 1
+        chunk.append(block)
+        chunk_len += cost
+
+    if chunk:
+        _flush(chunk, first_msg)
+
+    # ── 🧲 Liquidity block — always a SEPARATE message ───────────────────────
     try:
         with _db_lock:
             conn = _get_db()
             liq = conn.execute("""
                 SELECT
-                  SUM(CASE WHEN entry_type='limit' THEN 1 ELSE 0 END)          AS limits_placed,
-                  SUM(CASE WHEN status='filled' AND entry_type='limit' THEN 1 ELSE 0 END) AS limits_filled,
-                  SUM(CASE WHEN status='expired'    THEN 1 ELSE 0 END)          AS expired,
-                  SUM(CASE WHEN status='missed_move' THEN 1 ELSE 0 END)         AS missed,
-                  SUM(CASE WHEN entry_type='market' THEN 1 ELSE 0 END)          AS market_entries,
-                  SUM(CASE WHEN result IS NULL AND status='filled' THEN 1 ELSE 0 END) AS open_pos,
-                  SUM(CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END)           AS closed_total,
-                  SUM(CASE WHEN result='tp'        THEN 1 ELSE 0 END)           AS closed_tp,
-                  SUM(CASE WHEN result='sl'        THEN 1 ELSE 0 END)           AS closed_sl,
-                  COALESCE(SUM(CASE WHEN result IS NOT NULL THEN pnl_usd ELSE 0 END), 0) AS closed_pnl,
-                  COALESCE(AVG(CASE WHEN result IS NOT NULL THEN pnl_usd END), 0)         AS avg_pnl,
-                  COALESCE(SUM(CASE WHEN entry_type='limit' AND result IS NOT NULL THEN pnl_usd ELSE 0 END),0) AS limit_pnl,
-                  COALESCE(SUM(CASE WHEN entry_type='market' AND result IS NOT NULL THEN pnl_usd ELSE 0 END),0) AS market_pnl,
-                  SUM(saved_from_sl)                                             AS saved,
-                  COALESCE(SUM(touched_no_fill), 0)                               AS tnf
+                  SUM(CASE WHEN entry_type='limit' THEN 1 ELSE 0 END)                       AS lp,
+                  SUM(CASE WHEN status='filled' AND entry_type='limit' THEN 1 ELSE 0 END)    AS lf,
+                  SUM(CASE WHEN status='expired'    THEN 1 ELSE 0 END)                       AS exp,
+                  SUM(CASE WHEN status='missed_move' THEN 1 ELSE 0 END)                      AS missed,
+                  SUM(CASE WHEN entry_type='market' THEN 1 ELSE 0 END)                       AS mkt,
+                  SUM(CASE WHEN result IS NULL AND status='filled' THEN 1 ELSE 0 END)        AS open_pos,
+                  SUM(CASE WHEN result IS NOT NULL THEN 1 ELSE 0 END)                        AS ct,
+                  SUM(CASE WHEN result='tp'         THEN 1 ELSE 0 END)                       AS ctp,
+                  SUM(CASE WHEN result='sl'         THEN 1 ELSE 0 END)                       AS csl,
+                  COALESCE(SUM(CASE WHEN result IS NOT NULL THEN pnl_usd ELSE 0 END), 0)     AS cpnl,
+                  COALESCE(AVG(CASE WHEN result IS NOT NULL THEN pnl_usd END), 0)             AS avg_pnl,
+                  COALESCE(SUM(CASE WHEN entry_type='limit' AND result IS NOT NULL THEN pnl_usd ELSE 0 END), 0) AS lpnl,
+                  COALESCE(SUM(CASE WHEN entry_type='market' AND result IS NOT NULL THEN pnl_usd ELSE 0 END), 0) AS mpnl,
+                  COALESCE(SUM(saved_from_sl), 0)                                             AS saved,
+                  COALESCE(SUM(touched_no_fill), 0)                                           AS tnf
                 FROM liquidity_orders
             """).fetchone()
             liq_open_rows = conn.execute(
                 "SELECT symbol, direction, entry_price FROM liquidity_orders "
                 "WHERE status='filled' AND result IS NULL"
             ).fetchall()
-    except Exception:
+    except Exception as _liq_exc:
+        logger.warning("stats liquidity query failed: %s", _liq_exc)
         liq = None
 
-    if liq:
-        (lp, lf, exp, miss, mkt, open_pos, ct, ctp, csl,
-         cpnl, avg_pnl, lpnl, mpnl, saved, tnf) = liq
+    if liq and any(v for v in liq):
+        lp, lf, exp, miss, mkt, open_pos, ct, ctp, csl, cpnl, avg_pnl, lpnl, mpnl, saved, tnf = liq
+        lp = lp or 0; lf = lf or 0; exp = exp or 0; miss = miss or 0
+        mkt = mkt or 0; open_pos = open_pos or 0; ct = ct or 0
+        ctp = ctp or 0; csl = csl or 0; saved = saved or 0; tnf = tnf or 0
+        cpnl = cpnl or 0.0; avg_pnl = avg_pnl or 0.0
+        lpnl = lpnl or 0.0; mpnl = mpnl or 0.0
         fill_rate = lf / lp * 100.0 if lp else 0.0
-        wr = ctp / ct * 100.0 if ct else 0.0
+        wr        = ctp / ct * 100.0 if ct else 0.0
 
-        # Unrealized PnL for open positions
         unreal = 0.0
         for sym, dr, ep in (liq_open_rows or []):
             try:
                 t = _gateio_ticker(sym)
                 if t and ep:
                     cur = float(t["lastPrice"])
-                    unreal += (cur - ep) / ep * 100.0 if dr == "LONG" \
-                         else (ep - cur) / ep * 100.0
+                    unreal += (cur - ep) / ep * 100.0 if dr == "LONG" else (ep - cur) / ep * 100.0
             except Exception:
                 pass
 
-        cs = "+" if cpnl >= 0 else ""
-        as_ = "+" if avg_pnl >= 0 else ""
-        us  = "+" if unreal >= 0 else ""
-        lps = "+" if lpnl >= 0 else ""
-        mps = "+" if mpnl >= 0 else ""
-        lines += [
-            "",
+        def _s(v: float) -> str: return "+" if v >= 0 else ""
+
+        liq_lines = [
             "🧲 <b>Умный вход по ликвидности</b>",
             f"  Лимиток выставлено: <b>{lp}</b>  │  Исполнено: <b>{lf}</b>  │  Fill rate: <b>{fill_rate:.0f}%</b>",
             f"  Касаний без заполнения: <b>{tnf}</b>  (прокол &lt;0.05%)",
             f"  Истекло: {exp}  │  Ушло без входа: {miss}  │  Рыночных входов: {mkt}",
-            f"  Открытых: <b>{open_pos}</b>  │  Нереализованный: <b>{us}${unreal:.2f}</b>",
+            f"  Открытых: <b>{open_pos}</b>  │  Нереализованный: <b>{_s(unreal)}${unreal:.2f}</b>",
         ]
         if ct:
-            lines += [
+            liq_lines += [
                 f"  Закрытых: <b>{ct}</b>  │  Win-rate: <b>{wr:.0f}%</b>  (TP: {ctp} / SL: {csl})",
-                f"  PnL закрытых: <b>{cs}${cpnl:.2f}</b>  ·  avg: <b>{as_}${avg_pnl:.2f}</b>",
-                f"  Лимитный вход avg PnL: <b>{lps}${lpnl:.2f}</b>  │  Рыночный: <b>{mps}${mpnl:.2f}</b>",
+                f"  PnL закрытых: <b>{_s(cpnl)}${cpnl:.2f}</b>  ·  avg: <b>{_s(avg_pnl)}${avg_pnl:.2f}</b>",
+                f"  Лимитный вход PnL: <b>{_s(lpnl)}${lpnl:.2f}</b>  │  Рыночный: <b>{_s(mpnl)}${mpnl:.2f}</b>",
             ]
         if saved:
-            lines.append(f"  💾 Спасено от выбивания: <b>{saved}</b>")
+            liq_lines.append(f"  💾 Спасено от выбивания: <b>{saved}</b>")
 
-    _telegram_send(chat_id, "\n".join(lines))
+        _telegram_send(chat_id, "\n".join(liq_lines))
+    else:
+        _telegram_send(chat_id, "🧲 <b>Умный вход по ликвидности</b>\n  Сделок пока нет.")
 
 
 # ---------------------------------------------------------------------------
