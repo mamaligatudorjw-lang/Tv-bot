@@ -1722,12 +1722,12 @@ def handle_demo_command(chat_id: int) -> None:
                 FROM liquidity_orders
             """).fetchone()
             liq_open_rows = conn.execute(
-                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_placed "
+                "SELECT symbol, direction, entry_price, sl_price, tp_price, ts_filled "
                 "FROM liquidity_orders WHERE status='filled' AND result IS NULL "
-                "ORDER BY ts_placed DESC LIMIT 5"
+                "ORDER BY ts_filled DESC LIMIT 5"
             ).fetchall()
             liq_closed_rows = conn.execute(
-                "SELECT symbol, direction, entry_price, exit_price, pnl_usd, result, ts_placed, ts_closed "
+                "SELECT symbol, direction, entry_price, exit_price, pnl_usd, result, ts_filled, ts_closed "
                 "FROM liquidity_orders WHERE result IS NOT NULL "
                 "ORDER BY ts_closed DESC LIMIT 3"
             ).fetchall()
