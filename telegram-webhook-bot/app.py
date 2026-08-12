@@ -288,6 +288,18 @@ OVERSOLD_COOLDOWN = 7200           # 2h
 # The pump_24h *alert* itself was removed in favor of volume_surge_{short,long}.
 PUMP_24H_PCT = 30.0
 
+# pump_24h_fade: fade the pump → SHORT signal
+# Shadow-only for first ~2 weeks to validate hypothesis on fresh data.
+# Условия: 24h рост ≥ PUMP_FADE_MIN_PCT + RSI > PUMP_FADE_RSI_MIN → SHORT.
+# Включить реальные позиции: PUMP_FADE_SHADOW_ONLY = False
+PUMP_FADE_SHADOW_ONLY   = True     # True = только shadow-сбор; False = реальная paper-торговля
+PUMP_FADE_MIN_PCT       = 30.0     # мин. 24h рост % для квалификации
+PUMP_FADE_RSI_MIN       = 65.0     # RSI выше порога — подтверждение перегрева
+PUMP_FADE_MAX_PCT       = 200.0    # игнорировать крайние выбросы (листинговые пампы)
+PUMP_FADE_COOLDOWN      = 86400    # 24ч кулдаун на символ
+PUMP_FADE_MIN_VOL       = 500_000  # мин. объём $500k 24ч (отфильтровать мусор)
+PUMP_FADE_MIN_SCORE     = 55       # мин. score для отправки алерта
+
 # EMA-200 (4h) trend filter
 EMA200_PERIOD = 200
 EMA200_FETCH_LIMIT = 250
@@ -352,6 +364,11 @@ SHORT_ATR_SL_MULT    = 2.0    # was 1.5; wider stop survives intraday noise
 SHORT_ATR_SL_MIN_PCT = 2.5    # floor: SL at least 2.5% above entry even if ATR is tiny
 # TP is derived from actual SL distance × 2.0 to keep R:R 1:2
 SHORT_ATR_TP_MULT_RR = 2.0    # TP = (SL dist) × this factor
+
+# Confluence-specific ATR cap: SL distance cannot exceed this % of entry price.
+# Prevents ultra-wide stops on volatile coins (e.g. COOKIEUSDT −16% SL incident).
+# Applied via _compute_confluence_sl_tp() wrapper.
+CONFLUENCE_ATR_SL_MAX_PCT = 8.0    # max SL distance as % of entry; 0=no cap
 
 # In BULL market, counter-trend SHORTs require stronger conviction.
 SHORT_BULL_REGIME_MIN_SCORE = 80   # raised from type-default 75 when regime=BULL
@@ -702,6 +719,7 @@ def _ai_signal_commentary(
         "overheated_24h": "перегретость 24ч (RSI + сильный рост)",
         "breakdown_short": "пробой уровня вниз",
         "volume_surge_short": "объёмный взрыв + CRSI перекупленность",
+        "pump_24h_fade":      "памп 24ч → шорт (fade-стратегия)",
     }
     type_desc = type_labels.get(alert_type, alert_type)
     direction = "ЛОНГ" if recommendation == "LONG" else "ШОРТ"
@@ -1194,24 +1212,48 @@ def _ai_veto_confluence(
 # ── Demo (paper trading) helpers ──────────────────────────────────────────────
 
 def _compute_demo_sl_tp(
-    direction: str, price: float, atr: float | None
+    direction: str, price: float, atr: float | None,
+    max_sl_pct: float | None = None,   # cap SL distance; None or 0 = no cap
 ) -> tuple[float | None, float | None]:
-    """Return (sl_price, tp_price) for a $100 demo position."""
+    """Return (sl_price, tp_price) for a $100 demo position.
+
+    max_sl_pct: if set, SL distance is capped at this % of entry price.
+    TP adjusts proportionally to preserve R:R ratio.
+    """
     if not price or price <= 0:
         return None, None
     if atr and atr > 0:
         if direction == "LONG":
-            return price - 1.5 * atr, price + 3.0 * atr
+            sl_dist = 1.5 * atr
+            if max_sl_pct and max_sl_pct > 0:
+                sl_dist = min(sl_dist, price * max_sl_pct / 100)
+            return price - sl_dist, price + sl_dist * 2   # R:R 1:2 maintained
         # SHORT: wider SL with minimum floor to survive crypto noise
         raw_sl   = price + SHORT_ATR_SL_MULT * atr
         floor_sl = price * (1 + SHORT_ATR_SL_MIN_PCT / 100)
         sl       = max(raw_sl, floor_sl)
-        tp       = price - (sl - price) * SHORT_ATR_TP_MULT_RR  # R:R 1:2
+        if max_sl_pct and max_sl_pct > 0:
+            cap_sl = price * (1 + max_sl_pct / 100)
+            sl     = min(sl, cap_sl)   # cap: SL no more than max_sl_pct above entry
+        sl_dist = sl - price
+        tp      = price - sl_dist * SHORT_ATR_TP_MULT_RR   # R:R 1:2
         return sl, tp
-    # Fixed fallback
+    # Fixed fallback (no ATR available)
     if direction == "LONG":
         return price * (1 - HIT_RATE_SL_PCT / 100), price * (1 + HIT_RATE_TP_PCT / 100)
     return price * (1 + SHORT_HOLD_SL_PCT / 100), price * (1 - SHORT_HOLD_TP_PCT / 100)
+
+
+def _compute_confluence_sl_tp(
+    direction: str, price: float, atr: float | None
+) -> tuple[float | None, float | None]:
+    """_compute_demo_sl_tp with confluence-specific SL cap (CONFLUENCE_ATR_SL_MAX_PCT).
+
+    Prevents excessively wide stops on volatile coins (e.g. COOKIEUSDT −16% SL incident).
+    R:R is preserved — TP scales to match the capped SL distance.
+    """
+    cap = CONFLUENCE_ATR_SL_MAX_PCT if CONFLUENCE_ATR_SL_MAX_PCT > 0 else None
+    return _compute_demo_sl_tp(direction, price, atr, max_sl_pct=cap)
 
 
 def _demo_open_position(
@@ -3953,6 +3995,7 @@ MIN_SCORE_BY_TYPE: dict[str, int] = {
     "momentum_down_5":     75,   # raised from 70
     "momentum_down_10":    75,   # raised from 70
     "volume_surge_short":  75,   # raised from 70
+    "pump_24h_fade":       65,   # fade 24h pump → SHORT; shadow-only initially
     "new_listing_short":   75,   # raised from 70
     "listing_peak_short":  75,   # raised from 70
     # ── LONG / BUY — score filter doesn't improve quality; keep lower bar ──
@@ -6243,6 +6286,125 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
     return sent
 
 
+def check_pump_24h_fade(
+    tickers: dict[str, dict] | None,
+    rsi_map: dict[str, float],
+) -> int:
+    """Fade 24h pumps → SHORT signal (pump-and-dump reversion strategy).
+
+    Fires when a coin pumped ≥ PUMP_FADE_MIN_PCT in 24h AND RSI confirms overbought.
+    Academic basis: post-pump reversion averages ~−13% in 4h (Dhawan & Putniņš, 2020).
+
+    PUMP_FADE_SHADOW_ONLY=True  → all positions shadow, no real alerts sent.
+    PUMP_FADE_SHADOW_ONLY=False → real paper-trade alerts after 2-week validation.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    with state_lock:
+        btc_t = tickers.get("BTCUSDT")
+        btc_pct24: float | None = None
+        if btc_t:
+            try:
+                btc_pct24 = float(btc_t["priceChangePercent"])
+            except (ValueError, KeyError, TypeError):
+                pass
+
+    for symbol, t in tickers.items():
+        if not symbol.endswith("USDT"):
+            continue
+        try:
+            price = float(t["lastPrice"])
+            pct24 = float(t["priceChangePercent"])
+            vol24 = float(t.get("quoteVolume", 0))
+        except (ValueError, KeyError, TypeError):
+            continue
+        if not (math.isfinite(price) and math.isfinite(pct24)) or price <= 0:
+            continue
+
+        # Pump threshold: min +30%, max 200% (avoid listing-day outliers)
+        if pct24 < PUMP_FADE_MIN_PCT or pct24 > PUMP_FADE_MAX_PCT:
+            continue
+        # Volume gate: illiquid coins have unreliable price moves
+        if vol24 < PUMP_FADE_MIN_VOL:
+            continue
+
+        rsi = rsi_map.get(symbol)
+        if rsi is None or rsi < PUMP_FADE_RSI_MIN:
+            continue
+
+        with state_lock:
+            last = state["last_pump_alerted"].get(symbol, 0)
+        if now - last < PUMP_FADE_COOLDOWN:
+            continue
+
+        with state_lock:
+            atr = state["atr_4h"].get(symbol)
+
+        score = compute_signal_score(
+            "volume_surge_short", "sell",   # conceptually identical: fade overbought
+            rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
+        )
+        sl_tp = _format_sl_tp("sell", price, atr, score=score)
+        is_shadow = PUMP_FADE_SHADOW_ONLY
+
+        body = (
+            f"📉 <b>ПАМП → ШОРТ (fade): <code>{symbol}</code></b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📈 24ч рост: <b>+{pct24:.1f}%</b> — ожидаем откат\n"
+            f"🧊 RSI: <b>{rsi:.1f}</b> — перегрет\n"
+            f"💰 Цена: <b>${price:,.6g}</b>\n"
+            f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
+            + (f"\n{sl_tp}" if sl_tp else "")
+            + ("\n⚠️ <i>[ТЕСТ: shadow-режим, ещё не торгуем]</i>" if is_shadow else "")
+        )
+
+        if not is_shadow:
+            if score < PUMP_FADE_MIN_SCORE:
+                logger.debug(
+                    "pump_24h_fade %s skipped: score=%d < %d", symbol, score, PUMP_FADE_MIN_SCORE
+                )
+                _dsl_pf, _dtp_pf = _compute_demo_sl_tp("SHORT", price, atr)
+                if _dsl_pf and _dtp_pf:
+                    _demo_open_position(
+                        symbol, "SHORT", price, _dsl_pf, _dtp_pf,
+                        is_shadow=True,
+                        shadow_reason=f"low_score: {score}<{PUMP_FADE_MIN_SCORE}",
+                        alert_type="pump_24h_fade",
+                    )
+                continue
+            delivered, _ = send_alert_with_log(
+                symbol, "pump_24h_fade", "SHORT", price, body, score,
+            )
+            if not delivered:
+                continue
+            with state_lock:
+                state["last_pump_alerted"][symbol] = now
+            sent += 1
+        else:
+            # Shadow mode: log and record, don't send real Telegram alert
+            logger.info(
+                "pump_24h_fade SHADOW: %s pct24=+%.1f%% rsi=%.1f score=%d",
+                symbol, pct24, rsi, score,
+            )
+            with state_lock:
+                state["last_pump_alerted"][symbol] = now
+
+        _dsl_pf, _dtp_pf = _compute_demo_sl_tp("SHORT", price, atr)
+        if _dsl_pf and _dtp_pf:
+            _demo_open_position(
+                symbol, "SHORT", price, _dsl_pf, _dtp_pf,
+                is_shadow=is_shadow,
+                shadow_reason=("pump_fade_shadow_mode" if is_shadow else None),
+                alert_type="pump_24h_fade",
+                score=score,
+            )
+
+    return sent
+
+
 def check_listing_dump_long(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
@@ -6959,6 +7121,7 @@ def run_checks():
         "overheated_ema_blocked": 0,   # overheated SHORTs suppressed by EMA-200 filter
         "oversold_alerts": 0,          # standalone -20% & RSI<=30
         "vol_surge_alerts": 0,         # standalone +300% daily-volume + CRSI extreme
+        "pump_fade_alerts": 0,         # pump 24h → SHORT fade signals (shadow-only initially)
         "breakdown_alerts": 0,         # TEST: breakdown continuation SHORT
         "momentum_long_alerts": 0,     # TEST: momentum fade SHORT (pamped +10% → reversal)
         "new_listing_short_alerts": 0, # TEST: new listing pump→dump SHORT
@@ -7071,6 +7234,8 @@ def run_checks():
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
                 # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
                 summary["vol_surge_alerts"] = check_volume_surge_crsi(tickers) if VOL_SURGE_ENABLED else 0
+                # pump_24h_fade: runs always (shadow=True collects data; shadow=False sends alerts)
+                summary["pump_fade_alerts"] = check_pump_24h_fade(tickers, rsi_map)
 
                 # 6d. TEST: Breakdown continuation SHORT (drop ≥10% + below EMA + RSI 30-58)
                 summary["breakdown_alerts"] = check_breakdown_short(tickers, rsi_map) if BREAKDOWN_ENABLED else 0
@@ -7308,7 +7473,7 @@ def run_checks():
                     if b["price"]:
                         with state_lock:
                             _atr_lv24 = state["atr_4h"].get(sym)
-                        _dsl_lv24, _dtp_lv24 = _compute_demo_sl_tp(rec_label, b["price"], _atr_lv24)
+                        _dsl_lv24, _dtp_lv24 = _compute_confluence_sl_tp(rec_label, b["price"], _atr_lv24)
                         if _dsl_lv24 and _dtp_lv24:
                             _demo_open_position(
                                 sym, rec_label, b["price"], _dsl_lv24, _dtp_lv24,
@@ -7334,7 +7499,7 @@ def run_checks():
                         if b["price"]:
                             with state_lock:
                                 _atr_bd = state["atr_4h"].get(sym)
-                            _dsl, _dtp = _compute_demo_sl_tp("LONG", b["price"], _atr_bd)
+                            _dsl, _dtp = _compute_confluence_sl_tp("LONG", b["price"], _atr_bd)
                             if _dsl and _dtp:
                                 _bd_body = (
                                     f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
@@ -7482,7 +7647,7 @@ def run_checks():
                         if b["price"]:
                             with state_lock:
                                 _atr_rsi = state["atr_4h"].get(sym)
-                            _dsl_rsi, _dtp_rsi = _compute_demo_sl_tp("LONG", b["price"], _atr_rsi)
+                            _dsl_rsi, _dtp_rsi = _compute_confluence_sl_tp("LONG", b["price"], _atr_rsi)
                             if _dsl_rsi and _dtp_rsi:
                                 _demo_open_position(
                                     sym, "LONG", b["price"], _dsl_rsi, _dtp_rsi,
@@ -7502,7 +7667,7 @@ def run_checks():
                         if b["price"]:
                             with state_lock:
                                 _atr_rsi = state["atr_4h"].get(sym)
-                            _dsl_rsi, _dtp_rsi = _compute_demo_sl_tp("SHORT", b["price"], _atr_rsi)
+                            _dsl_rsi, _dtp_rsi = _compute_confluence_sl_tp("SHORT", b["price"], _atr_rsi)
                             if _dsl_rsi and _dtp_rsi:
                                 _demo_open_position(
                                     sym, "SHORT", b["price"], _dsl_rsi, _dtp_rsi,
@@ -7534,7 +7699,7 @@ def run_checks():
                         summary["confluence_ema_blocked"] += 1
                         with state_lock:
                             _atr_p = state["atr_4h"].get(sym)
-                        _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_p)
+                        _dsl, _dtp = _compute_confluence_sl_tp(rec_label, b["price"], _atr_p)
                         if _dsl and _dtp:
                             _pf_body = (
                                 f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
@@ -7568,7 +7733,7 @@ def run_checks():
                         )
                         with state_lock:
                             _atr_lv = state["atr_4h"].get(sym)
-                        _dsl_lv3, _dtp_lv3 = _compute_demo_sl_tp(rec_label, b["price"], _atr_lv)
+                        _dsl_lv3, _dtp_lv3 = _compute_confluence_sl_tp(rec_label, b["price"], _atr_lv)
                         if _dsl_lv3 and _dtp_lv3:
                             _lv_body = (
                                 f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
@@ -7612,7 +7777,7 @@ def run_checks():
                     if b["price"]:
                         with state_lock:
                             _atr_v = state["atr_4h"].get(sym)
-                        _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_v)
+                        _dsl, _dtp = _compute_confluence_sl_tp(rec_label, b["price"], _atr_v)
                         if _dsl and _dtp:
                             _av_body = (
                                 f"<b>🚨 КОНФЛЮЭНЦИЯ: <code>{sym}</code></b>\n"
@@ -7660,7 +7825,7 @@ def run_checks():
                     with state_lock:
                         _atr_flip = state["atr_4h"].get(sym)
                     if b["price"]:
-                        _dsl_flip, _dtp_flip = _compute_demo_sl_tp(
+                        _dsl_flip, _dtp_flip = _compute_confluence_sl_tp(
                             "SHORT", b["price"], _atr_flip
                         )
                         if _dsl_flip and _dtp_flip:
@@ -7721,7 +7886,7 @@ def run_checks():
                         factor_funding_pts=_fl_fpts_flip, factor_lsr_pts=_fl_lpts_flip,
                     )
                     if _delivered_flip and b["price"]:
-                        _dsl_f2, _dtp_f2 = _compute_demo_sl_tp(
+                        _dsl_f2, _dtp_f2 = _compute_confluence_sl_tp(
                             "LONG", b["price"], _atr_flip
                         )
                         if _dsl_f2 and _dtp_f2:
@@ -7748,7 +7913,7 @@ def run_checks():
                     if b["price"]:
                         with state_lock:
                             _atr_cap = state["atr_4h"].get(sym)
-                        _dsl_cap, _dtp_cap = _compute_demo_sl_tp(rec_label, b["price"], _atr_cap)
+                        _dsl_cap, _dtp_cap = _compute_confluence_sl_tp(rec_label, b["price"], _atr_cap)
                         if _dsl_cap and _dtp_cap:
                             _demo_open_position(
                                 sym, rec_label, b["price"], _dsl_cap, _dtp_cap,
@@ -7820,7 +7985,7 @@ def run_checks():
                 if b["price"]:
                     with state_lock:
                         _atr_d = state["atr_4h"].get(sym)
-                    _dsl, _dtp = _compute_demo_sl_tp(rec_label, b["price"], _atr_d)
+                    _dsl, _dtp = _compute_confluence_sl_tp(rec_label, b["price"], _atr_d)
                     if _dsl and _dtp:
                         _demo_open_position(
                             sym, rec_label, b["price"], _dsl, _dtp,
@@ -8600,7 +8765,9 @@ def handle_status_command(chat_id: int) -> None:
         f"  🟢/🔴 Импульс 15м: <b>{summary.get('momentum_alerts', 0)}</b>\n"
         f"  ⚠️ Перегрета (+20% + RSI≥70): <b>{summary.get('overheated_alerts', 0)}</b>\n"
         f"  💎 Перепродана (-20% + RSI≤30): <b>{summary.get('oversold_alerts', 0)}</b>\n"
-        f"  🌋 Объём+CRSI: <b>{summary.get('vol_surge_alerts', 0)}</b>"
+        f"  🌋 Объём+CRSI: <b>{summary.get('vol_surge_alerts', 0)}</b>\n"
+        f"  📉 Памп→Шорт (fade): <b>{summary.get('pump_fade_alerts', 0)}</b>"
+        f"{'  🔬 shadow' if PUMP_FADE_SHADOW_ONLY else ''}"
         f"{error_line}\n\n"
         f"<b>Правила:</b>\n"
         f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах, RSI LONG≤{CONFLUENCE_RSI_MAX_LONG}/SHORT≥{CONFLUENCE_RSI_MIN_SHORT}, vol≥${MIN_VOLUME_CONFLUENCE/1e3:.0f}k\n"
