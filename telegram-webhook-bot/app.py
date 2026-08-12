@@ -181,8 +181,13 @@ state = {
 # ---------------------------------------------------------------------------
 RSI_ALERT_COOLDOWN = 14400         # 4h cooldown per coin per RSI direction
 HIGH_ALERT_COOLDOWN = 3600
-CONFLUENCE_MIN_SIGNALS = 2         # only alert when ≥ this many signals fire on same coin in one cycle
-CONFLUENCE_LONG_MIN_SCORE = 52    # skip confluence LONG when signal score is below this threshold
+CONFLUENCE_MIN_SIGNALS = 3         # only alert when ≥ this many signals fire on same coin in one cycle
+CONFLUENCE_LONG_MIN_SCORE  = 65   # skip confluence LONG when signal score is below this threshold
+CONFLUENCE_SHORT_MIN_SCORE = 65   # skip confluence SHORT when signal score is below this threshold
+CONFLUENCE_RSI_MAX_LONG    = 45   # LONG only when RSI ≤ this (perversely oversold)
+CONFLUENCE_RSI_MIN_SHORT   = 65   # SHORT only when RSI ≥ this (overbought confirmed)
+MIN_VOLUME_CONFLUENCE = 500_000   # 24h USDT volume floor for confluence entries
+MAX_OPEN_CONFLUENCE_POSITIONS = 15  # cap on simultaneous real confluence demo positions
 # ---------------------------------------------------------------------------
 # Signal enable flags — включить/выключить каждый тип сигналов
 # ---------------------------------------------------------------------------
@@ -1704,6 +1709,27 @@ def handle_demo_command(chat_id: int) -> None:
                 "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) "
                 "FROM demo_positions WHERE is_shadow=1 GROUP BY alert_type"
             ).fetchall()
+            # Shadow breakdown by block reason (grouped by prefix before ':')
+            sc_reason_stats = conn.execute("""
+                SELECT
+                  CASE
+                    WHEN shadow_reason LIKE 'bear_downtrend%' THEN 'bear_downtrend'
+                    WHEN shadow_reason LIKE '%:%'
+                         THEN TRIM(SUBSTR(shadow_reason, 1, INSTR(shadow_reason, ':') - 1))
+                    ELSE COALESCE(shadow_reason, '(нет причины)')
+                  END AS reason_prefix,
+                  SUM(CASE WHEN status='open'  THEN 1 ELSE 0 END)                                AS open_n,
+                  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END)                                AS closed_n,
+                  SUM(CASE WHEN status='tp'    THEN 1 ELSE 0 END)                                 AS tp_n,
+                  SUM(CASE WHEN status='sl'    THEN 1 ELSE 0 END)                                 AS sl_n,
+                  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0)             AS total_pnl,
+                  COALESCE(AVG(CASE WHEN status!='open' THEN pnl_usd END), 0)                    AS avg_pnl
+                FROM demo_positions
+                WHERE is_shadow=1
+                  AND shadow_reason IS NOT NULL AND shadow_reason != ''
+                GROUP BY reason_prefix
+                ORDER BY total_pnl DESC
+            """).fetchall()
 
             # Liquidity orders summary
             liq_row = conn.execute("""
@@ -1900,6 +1926,23 @@ def handle_demo_command(chat_id: int) -> None:
                 f"Нереал. <b>{us}${t_unreal:.2f}</b>"
             )
 
+    # --- Разбивка по причине блокировки ---
+    if sc_reason_stats:
+        lines += ["", "  🔒 <b>По причине блокировки</b> (только закрытые):"]
+        for rp, r_open, r_closed, r_tp, r_sl, r_pnl, r_avg in sc_reason_stats:
+            if r_closed == 0:
+                continue
+            wr_r = r_tp / r_closed * 100 if r_closed else 0
+            pnl_icon = "🟢" if r_pnl >= 0 else "🔴"
+            ps = "+" if r_pnl >= 0 else ""
+            as_ = "+" if r_avg >= 0 else ""
+            lines.append(
+                f"  {pnl_icon} <code>{rp}</code>: "
+                f"{r_closed} сд., WR {wr_r:.0f}% "
+                f"│ Σ <b>{ps}${r_pnl:.2f}</b> "
+                f"│ avg <b>{as_}${r_avg:.2f}</b>"
+            )
+
     # ── 🧲 Умный вход по ликвидности ────────────────────────────────────────
     if liq_row:
         lp, lf, mkt, exp, miss, open_n, ct, ctp, csl, cpnl, tnf = liq_row
@@ -1963,6 +2006,77 @@ def handle_demo_command(chat_id: int) -> None:
                     f"{pi}<b>{s}${pnl:.2f}</b>  [{tag}]  ⏱{dur_h:.0f}ч"
                 )
 
+    _telegram_send(chat_id, "\n".join(lines))
+
+
+def handle_demoshadow_command(chat_id: int) -> None:
+    """Show last 15 shadow (blocked) positions with block reason, direction, PnL."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute("""
+                SELECT symbol, direction, alert_type, shadow_reason,
+                       entry_price, exit_price, pnl_usd, status,
+                       ts_open, ts_close
+                FROM demo_positions
+                WHERE is_shadow=1
+                ORDER BY ts_open DESC
+                LIMIT 20
+            """).fetchall()
+            reason_agg = conn.execute("""
+                SELECT
+                  CASE
+                    WHEN shadow_reason LIKE 'bear_downtrend%' THEN 'bear_downtrend'
+                    WHEN shadow_reason LIKE '%:%'
+                         THEN TRIM(SUBSTR(shadow_reason, 1, INSTR(shadow_reason, ':') - 1))
+                    ELSE COALESCE(shadow_reason, '?')
+                  END AS rp,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END) AS closed_n,
+                  SUM(CASE WHEN status='tp'   THEN 1 ELSE 0 END) AS tp_n,
+                  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) AS pnl
+                FROM demo_positions
+                WHERE is_shadow=1 AND shadow_reason IS NOT NULL AND shadow_reason != ''
+                GROUP BY rp ORDER BY pnl DESC
+            """).fetchall()
+    except Exception as exc:
+        _telegram_send(chat_id, f"❌ Ошибка БД: {exc}")
+        return
+
+    lines = ["👻 <b>Заблокированные сигналы — разбивка по причине</b>"]
+    if reason_agg:
+        lines.append("")
+        for rp, total, closed_n, tp_n, pnl in reason_agg:
+            wr = tp_n / closed_n * 100 if closed_n else 0
+            pi = "🟢" if pnl >= 0 else "🔴"
+            ps = "+" if pnl >= 0 else ""
+            status_note = f"WR {wr:.0f}%, Σ{ps}${pnl:.2f}" if closed_n else f"открыто: {total}"
+            lines.append(
+                f"  {pi} <code>{rp}</code>: {total} всего / {closed_n} закрыто — {status_note}"
+            )
+
+    lines += ["", "📋 <b>Последние 20 заблокированных</b>"]
+    import time as _time_mod
+    now_ts = int(_time_mod.time())
+    for sym, dr, at, reason, ep, ex_p, pnl, sts, ts_o, ts_c in rows:
+        icon = "📈" if dr == "LONG" else "📉"
+        age_h = (now_ts - (ts_o or now_ts)) / 3600
+        at_short = {"confluence": "Конфл", "oversold_24h": "Перепрод",
+                    "overheated_24h": "Перегрев", "streak_1h": "Серия"}.get(at, at or "?")
+        reason_short = (reason or "?")[:35]
+        if sts != "open":
+            ri = "✅" if sts == "tp" else "❌"
+            ps = "+" if (pnl or 0) >= 0 else ""
+            lines.append(
+                f"  {icon} <code>{sym}</code> [{at_short}] {ri} {ps}${(pnl or 0):.2f} "
+                f"🔒 <i>{reason_short}</i>"
+            )
+        else:
+            dur = f"⏱{age_h:.1f}ч"
+            lines.append(
+                f"  {icon} <code>{sym}</code> [{at_short}] открыто {dur} "
+                f"🔒 <i>{reason_short}</i>"
+            )
     _telegram_send(chat_id, "\n".join(lines))
 
 
@@ -2156,6 +2270,7 @@ def _poll_telegram_commands() -> None:
         "/unmute":   handle_unmute_command,
         "/demo":        handle_demo_command,
         "/demo2":       handle_demo2_command,
+        "/demoshadow":  handle_demoshadow_command,
         "/scorestats":  handle_scorestats_command,
         "/addpos":   handle_addpos_command,
         "/mypos":    handle_mypos_command,
@@ -7098,6 +7213,18 @@ def run_checks():
                         btc_pct24 = float(btc_t["priceChangePercent"])
                     except (ValueError, KeyError, TypeError):
                         btc_pct24 = None
+            # Count open confluence real positions once before the loop
+            _cf_open_count = 0
+            try:
+                with _db_lock:
+                    _cf_open_count = _get_db().execute(
+                        "SELECT COUNT(*) FROM demo_positions "
+                        "WHERE alert_type='confluence' AND status='open' AND is_shadow=0"
+                    ).fetchone()[0] or 0
+            except Exception:
+                pass
+            _cf_opened_this_cycle = 0   # tracks positions opened in this cycle
+
             for sym, b in buckets.items():
                 if not CONFLUENCE_ENABLED:
                     continue  # CONFLUENCE_ENABLED=False: confluence заблокирован
@@ -7132,6 +7259,27 @@ def run_checks():
                         above_ema200=above_ema,
                     )
                     rec_label = _rec_label(rec_line)
+
+                # ── Volume filter: skip dead/illiquid pairs early ────────────────
+                _cf_vol24 = float((tickers.get(sym) or {}).get("quoteVolume", 0)) if tickers else 0.0
+                if _cf_vol24 < MIN_VOLUME_CONFLUENCE:
+                    logger.debug(
+                        "Confluence %s skipped: low volume $%.0f < $%.0f",
+                        sym, _cf_vol24, MIN_VOLUME_CONFLUENCE,
+                    )
+                    summary["single_signals_skipped"] += 1
+                    if b["price"]:
+                        with state_lock:
+                            _atr_lv24 = state["atr_4h"].get(sym)
+                        _dsl_lv24, _dtp_lv24 = _compute_demo_sl_tp(rec_label, b["price"], _atr_lv24)
+                        if _dsl_lv24 and _dtp_lv24:
+                            _demo_open_position(
+                                sym, rec_label, b["price"], _dsl_lv24, _dtp_lv24,
+                                is_shadow=True,
+                                shadow_reason=f"low_volume: ${_cf_vol24:,.0f}",
+                                alert_type="confluence",
+                            )
+                    continue
 
                 # Bear downtrend filter for LONG signals.
                 # ОТКЛЮЧЁН: демо-позиции показали 90% win rate у теней —
@@ -7272,6 +7420,62 @@ def run_checks():
                                     continue
                             except (ValueError, KeyError, TypeError):
                                 pass
+
+                # --- SHORT score gate (symmetric with LONG) ---
+                if rec_label == "SHORT":
+                    if score < CONFLUENCE_SHORT_MIN_SCORE:
+                        logger.debug(
+                            "Confluence SHORT skipped (score %d < %d): %s",
+                            score, CONFLUENCE_SHORT_MIN_SCORE, sym,
+                        )
+                        summary["single_signals_skipped"] += 1
+                        continue
+
+                # ── RSI quality gate ──────────────────────────────────────────────
+                # LONG only when genuinely oversold (RSI ≤ CONFLUENCE_RSI_MAX_LONG=45)
+                # SHORT only when genuinely overbought (RSI ≥ CONFLUENCE_RSI_MIN_SHORT=65)
+                if b.get("rsi") is not None:
+                    _rsi_val = b["rsi"]
+                    if rec_label == "LONG" and _rsi_val > CONFLUENCE_RSI_MAX_LONG:
+                        logger.debug(
+                            "Confluence LONG skipped: RSI %.1f > %d: %s",
+                            _rsi_val, CONFLUENCE_RSI_MAX_LONG, sym,
+                        )
+                        summary["single_signals_skipped"] += 1
+                        if b["price"]:
+                            with state_lock:
+                                _atr_rsi = state["atr_4h"].get(sym)
+                            _dsl_rsi, _dtp_rsi = _compute_demo_sl_tp("LONG", b["price"], _atr_rsi)
+                            if _dsl_rsi and _dtp_rsi:
+                                _demo_open_position(
+                                    sym, "LONG", b["price"], _dsl_rsi, _dtp_rsi,
+                                    is_shadow=True,
+                                    shadow_reason=(
+                                        f"rsi_filter: rsi={_rsi_val:.0f}>{CONFLUENCE_RSI_MAX_LONG}"
+                                    ),
+                                    alert_type="confluence",
+                                )
+                        continue
+                    if rec_label == "SHORT" and _rsi_val < CONFLUENCE_RSI_MIN_SHORT:
+                        logger.debug(
+                            "Confluence SHORT skipped: RSI %.1f < %d: %s",
+                            _rsi_val, CONFLUENCE_RSI_MIN_SHORT, sym,
+                        )
+                        summary["single_signals_skipped"] += 1
+                        if b["price"]:
+                            with state_lock:
+                                _atr_rsi = state["atr_4h"].get(sym)
+                            _dsl_rsi, _dtp_rsi = _compute_demo_sl_tp("SHORT", b["price"], _atr_rsi)
+                            if _dsl_rsi and _dtp_rsi:
+                                _demo_open_position(
+                                    sym, "SHORT", b["price"], _dsl_rsi, _dtp_rsi,
+                                    is_shadow=True,
+                                    shadow_reason=(
+                                        f"rsi_filter: rsi={_rsi_val:.0f}<{CONFLUENCE_RSI_MIN_SHORT}"
+                                    ),
+                                    alert_type="confluence",
+                                )
+                        continue
 
                 # ── Trend pump/dump filter ───────────────────────────────────────
                 # SHORT+памп: блокировать (PUMP_FILTER_SHORT_ENABLED=True)
@@ -7494,6 +7698,31 @@ def run_checks():
                                 state[key][s] = now_ts
                     continue
 
+                # ── Confluence position cap (last gate before real signal) ──────
+                _cf_total_now = _cf_open_count + _cf_opened_this_cycle
+                if _cf_total_now >= MAX_OPEN_CONFLUENCE_POSITIONS:
+                    logger.info(
+                        "Confluence %s %s cap-blocked (%d/%d open)",
+                        sym, rec_label, _cf_total_now, MAX_OPEN_CONFLUENCE_POSITIONS,
+                    )
+                    summary["confluence_cap_blocked"] = (
+                        summary.get("confluence_cap_blocked", 0) + 1
+                    )
+                    if b["price"]:
+                        with state_lock:
+                            _atr_cap = state["atr_4h"].get(sym)
+                        _dsl_cap, _dtp_cap = _compute_demo_sl_tp(rec_label, b["price"], _atr_cap)
+                        if _dsl_cap and _dtp_cap:
+                            _demo_open_position(
+                                sym, rec_label, b["price"], _dsl_cap, _dtp_cap,
+                                is_shadow=True,
+                                shadow_reason=(
+                                    f"confluence_cap: {_cf_total_now}/{MAX_OPEN_CONFLUENCE_POSITIONS}"
+                                ),
+                                alert_type="confluence",
+                            )
+                    continue
+
                 header = [f"<b>🚨 КОНФЛЮЭНЦИЯ СИГНАЛОВ: <code>{sym}</code></b>"]
                 if b["price"] is not None:
                     header.append(f"Цена: <b>${b['price']:,.6g}</b>")
@@ -7561,6 +7790,7 @@ def run_checks():
                             alert_type="confluence",
                             score=score,
                         )
+                        _cf_opened_this_cycle += 1   # track against cap
 
                 # Mark cooldowns only for signals that actually contributed to a sent alert
                 with state_lock:
@@ -8309,7 +8539,8 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Время цикла:</b> {elapsed}с\n\n"
         f"<b>За последний цикл:</b>\n"
         f"  🚨 Отправлено конфлюэнция-алертов: <b>{summary.get('confluence_alerts', 0)}</b>\n"
-        f"  💤 Подавлено одиночных сигналов: {summary.get('single_signals_skipped', 0)}\n\n"
+        f"  💤 Подавлено одиночных сигналов: {summary.get('single_signals_skipped', 0)}\n"
+        f"  🔒 Заблокировано лимитом позиций: {summary.get('confluence_cap_blocked', 0)}\n\n"
         f"<b>Обнаружено сигналов (до фильтра):</b>\n"
         f"  🆕 Новые листинги: {summary.get('new_listings', 0)}\n"
         f"  📈 Пробои 24ч максимума: {summary.get('high_breaks', 0)}\n"
@@ -8325,7 +8556,7 @@ def handle_status_command(chat_id: int) -> None:
         f"  🌋 Объём+CRSI: <b>{summary.get('vol_surge_alerts', 0)}</b>"
         f"{error_line}\n\n"
         f"<b>Правила:</b>\n"
-        f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах на одной монете\n"
+        f"  Алерт только при ≥ {CONFLUENCE_MIN_SIGNALS} сигналах, RSI LONG≤{CONFLUENCE_RSI_MAX_LONG}/SHORT≥{CONFLUENCE_RSI_MIN_SHORT}, vol≥${MIN_VOLUME_CONFLUENCE/1e3:.0f}k\n"
         f"  Мин. объём: ${MIN_VOLUME_USDT:,.0f}\n"
         f"  Всплеск объёма: ≥ {VOLUME_SPIKE_MULTIPLIER}× средн. (5м)\n"
         f"  RSI перекупленность: ≥ {RSI_OVERBOUGHT}  |  кулдаун {RSI_ALERT_COOLDOWN // 3600}ч\n"
@@ -8577,6 +8808,48 @@ def handle_stats_command(chat_id: int) -> None:
 
     if chunk:
         _flush(chunk, first_msg)
+
+    # ── Shadow-reason summary ─────────────────────────────────────────────────
+    try:
+        with _db_lock:
+            _sr_rows = _get_db().execute("""
+                SELECT
+                  CASE
+                    WHEN shadow_reason LIKE 'bear_downtrend%' THEN 'bear_downtrend'
+                    WHEN shadow_reason LIKE '%:%'
+                         THEN TRIM(SUBSTR(shadow_reason, 1, INSTR(shadow_reason, ':') - 1))
+                    ELSE COALESCE(shadow_reason, '?')
+                  END AS rp,
+                  COUNT(*) AS n,
+                  SUM(CASE WHEN status='tp'    THEN 1 ELSE 0 END) AS tp_n,
+                  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) AS pnl
+                FROM demo_positions
+                WHERE is_shadow=1
+                  AND shadow_reason IS NOT NULL AND shadow_reason != ''
+                  AND status != 'open'
+                GROUP BY rp
+                ORDER BY pnl DESC
+            """).fetchall()
+        _sr_total_n   = sum(r[1] for r in _sr_rows)
+        _sr_total_tp  = sum(r[2] for r in _sr_rows)
+        _sr_total_pnl = sum(r[3] for r in _sr_rows)
+        if _sr_rows:
+            _sr_wr = _sr_total_tp / _sr_total_n * 100 if _sr_total_n else 0
+            _sr_ps = "+" if _sr_total_pnl >= 0 else ""
+            _sr_lines = [
+                "🔒 <b>Заблокированные сигналы (закрытые)</b>",
+                f"  Всего: <b>{_sr_total_n}</b>  │  WR: <b>{_sr_wr:.0f}%</b>  │  PnL: <b>{_sr_ps}${_sr_total_pnl:.2f}</b>",
+            ]
+            for rp, n, tp_n, pnl in _sr_rows:
+                wr_r = tp_n / n * 100 if n else 0
+                pnl_icon = "🟢" if pnl >= 0 else "🔴"
+                ps = "+" if pnl >= 0 else ""
+                _sr_lines.append(
+                    f"  {pnl_icon} <code>{rp}</code>: {n} сд., WR {wr_r:.0f}%, Σ <b>{ps}${pnl:.2f}</b>"
+                )
+            _telegram_send(chat_id, "\n".join(_sr_lines))
+    except Exception as _sr_exc:
+        logger.warning("stats shadow-reason query failed: %s", _sr_exc)
 
     # ── 🧲 Liquidity block — always a SEPARATE message ───────────────────────
     try:
