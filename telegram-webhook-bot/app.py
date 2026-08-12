@@ -1231,35 +1231,50 @@ def _demo_open_position(
     a real position as TOP for the /demo three-way comparison.
     When SHADOW_ONLY_MODE=True, shadow positions are sent to Telegram."""
     is_top = (not is_shadow) and score is not None and score >= TOP_SIGNAL_SCORE
+    _pid = os.getpid()
+    _ts_recv = int(time.time())
     try:
         with _db_lock:
             conn = _get_db()
             # Skip if the same symbol+direction is already open (real or shadow separately)
             existing = conn.execute(
-                "SELECT COUNT(*) FROM demo_positions "
+                "SELECT id, alert_type, ts_open FROM demo_positions "
                 "WHERE symbol=? AND direction=? AND status='open' AND is_shadow=?",
                 (symbol, direction, 1 if is_shadow else 0),
-            ).fetchone()[0]
+            ).fetchone()
             if existing:
-                logger.debug(
-                    "Demo: skipping duplicate %s %s (already open)", symbol, direction
+                logger.warning(
+                    "Demo DUPLICATE BLOCKED: %s %s/%s — already open id=%d type=%s "
+                    "opened=%d pid=%d ts_recv=%d",
+                    symbol, direction, alert_type or "?",
+                    existing[0], existing[1] or "?", existing[2] or 0,
+                    _pid, _ts_recv,
                 )
                 return
-            conn.execute(
-                "INSERT INTO demo_positions "
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
                 " size_usd, status, is_shadow, shadow_reason, alert_type, is_top) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
-                (int(time.time()), symbol, direction, entry_price,
+                (_ts_recv, symbol, direction, entry_price,
                  sl_price, tp_price, size_usd,
                  1 if is_shadow else 0, shadow_reason, alert_type,
                  1 if is_top else 0),
             )
             conn.commit()
+            if cur.rowcount == 0:
+                # INSERT was silently blocked by UNIQUE constraint (shouldn't reach here
+                # since we checked above, but belt-and-suspenders)
+                logger.warning(
+                    "Demo UNIQUE constraint blocked INSERT: %s %s/%s pid=%d ts=%d",
+                    symbol, direction, alert_type or "?", _pid, _ts_recv,
+                )
+                return
         logger.info(
-            "Demo %s: %s %s entry=%.6g sl=%.6g tp=%.6g",
+            "Demo %s: %s %s/%s entry=%.6g sl=%.6g tp=%.6g pid=%d ts=%d",
             "shadow" if is_shadow else "pos",
-            symbol, direction, entry_price, sl_price, tp_price,
+            symbol, direction, alert_type or "?",
+            entry_price, sl_price, tp_price, _pid, _ts_recv,
         )
         if SHADOW_ONLY_MODE and is_shadow and notify_body:
             send_telegram(f"👻 ТЕНЕВОЙ\n{notify_body}")
@@ -3390,6 +3405,12 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
             "ON demo_positions(status, is_shadow)"
         )
+        # Unique constraint: only one open position per (symbol, direction, is_shadow).
+        # Belt-and-suspenders against the in-memory duplicate check above.
+        _db_conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_demo_open_one_per_coin "
+            "ON demo_positions(symbol, direction, is_shadow) WHERE status='open'"
+        )
         # Migrate: is_top flag for existing installs
         try:
             _db_conn.execute(
@@ -4176,8 +4197,11 @@ def send_alert_with_log(
                 "Suppressed %s/%s — already has an open real position", symbol, alert_type
             )
             return (False, None)
-    except Exception:
-        pass  # DB unavailable — let the signal through
+    except Exception as _chk_exc:
+        logger.warning(
+            "open-position check failed for %s/%s — allowing signal through: %s",
+            symbol, alert_type, _chk_exc,
+        )
     # Only directional signals — drop NEUTRAL/WATCH so the channel stays
     # actionable. New-listing alerts use a separate sender and are unaffected.
     if recommendation not in ("LONG", "SHORT"):
