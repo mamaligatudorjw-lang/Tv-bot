@@ -1926,23 +1926,6 @@ def handle_demo_command(chat_id: int) -> None:
                 f"Нереал. <b>{us}${t_unreal:.2f}</b>"
             )
 
-    # --- Разбивка по причине блокировки ---
-    if sc_reason_stats:
-        lines += ["", "  🔒 <b>По причине блокировки</b> (только закрытые):"]
-        for rp, r_open, r_closed, r_tp, r_sl, r_pnl, r_avg in sc_reason_stats:
-            if r_closed == 0:
-                continue
-            wr_r = r_tp / r_closed * 100 if r_closed else 0
-            pnl_icon = "🟢" if r_pnl >= 0 else "🔴"
-            ps = "+" if r_pnl >= 0 else ""
-            as_ = "+" if r_avg >= 0 else ""
-            lines.append(
-                f"  {pnl_icon} <code>{rp}</code>: "
-                f"{r_closed} сд., WR {wr_r:.0f}% "
-                f"│ Σ <b>{ps}${r_pnl:.2f}</b> "
-                f"│ avg <b>{as_}${r_avg:.2f}</b>"
-            )
-
     # ── 🧲 Умный вход по ликвидности ────────────────────────────────────────
     if liq_row:
         lp, lf, mkt, exp, miss, open_n, ct, ctp, csl, cpnl, tnf = liq_row
@@ -2006,7 +1989,37 @@ def handle_demo_command(chat_id: int) -> None:
                     f"{pi}<b>{s}${pnl:.2f}</b>  [{tag}]  ⏱{dur_h:.0f}ч"
                 )
 
-    _telegram_send(chat_id, "\n".join(lines))
+    # ── Основное сообщение (main stats + shadow summary + liquidity) ─────────
+    _main_chunk = ""
+    for _ln in lines:
+        _candidate = _main_chunk + ("\n" if _main_chunk else "") + _ln
+        if len(_candidate) > 3800 and _main_chunk:
+            _telegram_send(chat_id, _main_chunk)
+            _main_chunk = _ln
+        else:
+            _main_chunk = _candidate
+    if _main_chunk:
+        _telegram_send(chat_id, _main_chunk)
+
+    # ── Блок «По причине блокировки» — всегда отдельным сообщением ──────────
+    if sc_reason_stats:
+        _sr_lines = ["🔒 <b>По причине блокировки</b> (теневые позиции):"]
+        for rp, r_open, r_closed, r_tp, r_sl, r_pnl, r_avg in sc_reason_stats:
+            rp_safe = html.escape(str(rp))
+            if r_closed == 0:
+                _sr_lines.append(f"  ⏳ <code>{rp_safe}</code>: открыто {r_open}")
+                continue
+            wr_r = r_tp / r_closed * 100
+            pnl_icon = "🟢" if r_pnl >= 0 else "🔴"
+            ps = "+" if r_pnl >= 0 else ""
+            as_ = "+" if r_avg >= 0 else ""
+            _sr_lines.append(
+                f"  {pnl_icon} <code>{rp_safe}</code>: "
+                f"{r_closed} сд., WR {wr_r:.0f}% "
+                f"│ Σ <b>{ps}${r_pnl:.2f}</b> "
+                f"│ avg <b>{as_}${r_avg:.2f}</b>"
+            )
+        _telegram_send(chat_id, "\n".join(_sr_lines))
 
 
 def handle_demoshadow_command(chat_id: int) -> None:
