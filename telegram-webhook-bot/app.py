@@ -8162,7 +8162,12 @@ class PositionMonitor(threading.Thread):
         # Атомарная проверка + обновление: защита от двойного уведомления при
         # перезапуске бота. Если старый поток успел закрыть позицию до рестарта,
         # новый восстановленный поток увидит status != 'open' и выйдет без уведомления.
+        #
+        # ВАЖНО: уведомление отправляется ТОЛЬКО после успешной записи в БД.
+        # Если запись упала (например, lock занят при рестарте), уведомление не идёт —
+        # это предотвращает дубли вида "старый поток не записал, но уведомил".
         already_closed = False
+        db_written = False
         try:
             with _db_lock:
                 conn = _get_db()
@@ -8189,10 +8194,15 @@ class PositionMonitor(threading.Thread):
                         ),
                     )
                     conn.commit()
+                    db_written = True  # запись прошла — только теперь шлём уведомление
         except Exception as exc:
-            logger.warning("PositionMonitor DB update failed: %s", exc)
+            logger.warning(
+                "PositionMonitor %d %s: DB update failed (%s) — "
+                "notification suppressed to prevent duplicate",
+                self.position_id, self.symbol, exc,
+            )
 
-        if already_closed:
+        if already_closed or not db_written:
             with _monitors_lock:
                 _active_monitors.pop(self.position_id, None)
             return
