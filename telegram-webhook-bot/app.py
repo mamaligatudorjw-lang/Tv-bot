@@ -188,6 +188,9 @@ CONFLUENCE_RSI_MAX_LONG    = 45   # LONG only when RSI ≤ this (perversely over
 CONFLUENCE_RSI_MIN_SHORT   = 65   # SHORT only when RSI ≥ this (overbought confirmed)
 MIN_VOLUME_CONFLUENCE = 500_000   # 24h USDT volume floor for confluence entries
 MAX_OPEN_CONFLUENCE_POSITIONS = 15  # cap on simultaneous real confluence demo positions
+# Positions opened BEFORE this timestamp (task-53 deploy, 2026-08-12 07:26:31 UTC) are
+# legacy bets that run to their own SL/TP; they must not count against the new 15-slot cap.
+CONFLUENCE_CAP_CUTOFF_TS = 1_786_519_591
 # ---------------------------------------------------------------------------
 # Signal enable flags — включить/выключить каждый тип сигналов
 # ---------------------------------------------------------------------------
@@ -7422,6 +7425,8 @@ def run_checks():
                     _cf_open_count = _get_db().execute(
                         "SELECT COUNT(*) FROM demo_positions "
                         "WHERE alert_type='confluence' AND status='open' AND is_shadow=0"
+                        " AND ts_open >= ?",
+                        (CONFLUENCE_CAP_CUTOFF_TS,),
                     ).fetchone()[0] or 0
             except Exception:
                 pass
