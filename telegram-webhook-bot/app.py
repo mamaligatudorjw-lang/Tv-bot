@@ -168,6 +168,7 @@ state = {
     "last_liq_reversal_alerted": {},   # symbol -> ts (liq reversal confirmation shadow cooldown)
     "last_bb_squeeze_alerted": {},     # symbol -> ts (Bollinger squeeze shadow cooldown)
     "last_ema_cross_alerted": {},      # symbol -> ts (EMA crossover shadow cooldown)
+    "shadow_notif_today": {},          # {notif_key: {"date": "YYYY-MM-DD", "count": int}}
     "last_lsr_shift_alerted": {},      # symbol -> ts (whale LSR flip cooldown)
     "lsr_prev": {},                    # symbol -> float (previous LSR value for shift detection)
     "prior_day_pct": {},               # symbol -> float: yesterday's close-to-close % change
@@ -1387,8 +1388,14 @@ def _demo_open_position(
             symbol, direction, alert_type or "?",
             entry_price, sl_price, tp_price, _pid, _ts_recv,
         )
-        if SHADOW_ONLY_MODE and is_shadow and notify_body:
-            send_telegram(f"👻 ТЕНЕВОЙ\n{notify_body}")
+        if is_shadow and notify_body:
+            _notif_key = (
+                "confluence_cap"
+                if (shadow_reason or "").startswith("confluence_cap")
+                else (alert_type or "unknown")
+            )
+            if _shadow_notif_allowed(_notif_key):
+                send_telegram(f"🔬 SHADOW — не реальная позиция\n{notify_body}")
     except Exception as exc:
         logger.warning("_demo_open_position failed for %s: %s", symbol, exc)
 
@@ -1546,6 +1553,12 @@ def _liquidity_reversal_shadow(symbol: str, direction: str, price: float,
             is_shadow=True,
             alert_type="liq_reversal",
             score=65,
+            notify_body=(
+                f"💧 Liq Reversal <b>{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}</b>"
+                f" <code>{symbol}</code>\n"
+                f"Цена: <b>${price:,.6g}</b>  |  Зона: ${zone_price:,.6g}\n"
+                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+            ),
         )
 
         with state_lock:
@@ -2961,6 +2974,29 @@ def _count_up_in_window(closes: list[float], n: int = 6) -> int:
     return sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
 
 
+def _shadow_notif_allowed(notif_key: str) -> bool:
+    """Return True (and increment today's counter) when a shadow Telegram
+    notification is within the daily limit for *notif_key*.
+
+    Keys and limits are configured in SHADOW_NOTIF_LIMITS. Returns False
+    immediately when the key has no entry (limit=0) or the daily cap is full.
+    Thread-safe via state_lock.
+    """
+    limit = SHADOW_NOTIF_LIMITS.get(notif_key, 0)
+    if limit == 0:
+        return False
+    today = time.strftime("%Y-%m-%d")
+    with state_lock:
+        entry = state["shadow_notif_today"].get(notif_key)
+        if entry is None or entry["date"] != today:
+            entry = {"date": today, "count": 0}
+            state["shadow_notif_today"][notif_key] = entry
+        if entry["count"] >= limit:
+            return False
+        entry["count"] += 1
+        return True
+
+
 def _trend_warning_line(symbol: str, recommendation: str) -> str:
     """Return a warning string if the signal direction conflicts with the
     multi-day daily trend, or '' if no conflict detected.
@@ -4251,6 +4287,21 @@ EMA_CROSS_ATR_SL_MULT   = 1.0    # SL = 1.0 × 4h-ATR
 EMA_CROSS_ATR_TP_MULT   = 2.0    # TP = 2.0 × SL dist  (R:R 2:1)
 EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 
+# --- Shadow signal Telegram notification daily limits ---
+# Each key maps an alert_type (or "confluence_cap") to the max notifications per day.
+# 0 = don't send.  Designed to sum to ~20 signals/day in realistic steady-state.
+SHADOW_NOTIF_LIMITS: dict[str, int] = {
+    "bb_squeeze":      4,   # 8h cooldown/symbol; burst on first deploy — hard cap
+    "ema_cross":       6,   # 4h + gap filter → rare; allow up to 6
+    "pump_24h_fade":   4,   # ~5/day natural rate
+    "vwap_reversion":  5,   # ~1/day → allow all
+    "liq_reversal":    5,   # rarely fires → allow all
+    "confluence_cap":  4,   # cap-blocked confluence (прошли всё, не хватило слота)
+    "confluence":      2,   # liq_veto / pump_filter vetoed confluence
+    "overheated_24h":  2,   # liq_veto / ai_veto for overheated
+    "oversold_24h":    2,   # liq_veto for oversold
+}
+
 # --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
 LSR_SHIFT_THRESHOLD  = 0.38    # min |lsr_new - lsr_prev| to count as a flip
 LSR_BULL_MIN         = 1.30    # after shift, LSR must be ≥ this (whales in long)
@@ -5324,6 +5375,12 @@ def check_vwap_reversion(
             is_shadow=True,
             alert_type="vwap_reversion",
             score=60,
+            notify_body=(
+                f"🔄 VWAP Reversion <b>{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}</b>"
+                f" <code>{symbol}</code>\n"
+                f"Цена: <b>${price:,.6g}</b>  |  Откл от VWAP: {dist_pct:.1f}%\n"
+                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+            ),
         )
 
         with state_lock:
@@ -5440,6 +5497,12 @@ def check_bollinger_squeeze(
             is_shadow=True,
             alert_type="bb_squeeze",
             score=62,
+            notify_body=(
+                f"📊 BB Squeeze <b>{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}</b>"
+                f" <code>{symbol}</code>\n"
+                f"Цена: <b>${b_close:,.6g}</b>  |  Squeeze: {width[squeeze_idx]:.2f}%\n"
+                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+            ),
         )
 
         with state_lock:
@@ -5536,6 +5599,12 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
             is_shadow=True,
             alert_type="ema_cross",
             score=63,
+            notify_body=(
+                f"📈 EMA Cross 4h <b>{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}</b>"
+                f" <code>{symbol}</code>\n"
+                f"Цена: <b>${price:,.6g}</b>  |  Gap: {gap_pct:.2f}%\n"
+                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+            ),
         )
 
         with state_lock:
@@ -7056,6 +7125,11 @@ def check_pump_24h_fade(
                 shadow_reason=("pump_fade_shadow_mode" if is_shadow else None),
                 alert_type="pump_24h_fade",
                 score=score,
+                notify_body=(
+                    f"📉 Pump Fade <b>SHORT 📉</b> <code>{symbol}</code>\n"
+                    f"Цена: <b>${price:,.6g}</b>  |  +{pct24:.1f}% за 24ч  |  RSI {rsi:.0f}\n"
+                    f"🟢 TP: <b>${_dtp_pf:,.6g}</b>  │  🔴 SL: <b>${_dsl_pf:,.6g}</b>"
+                ) if is_shadow else None,
             )
 
     return sent
@@ -8610,6 +8684,13 @@ def run_checks():
                                     f"confluence_cap: {_cf_total_now}/{MAX_OPEN_CONFLUENCE_POSITIONS}"
                                 ),
                                 alert_type="confluence",
+                                notify_body=(
+                                    f"🚫 Confluence <b>{'LONG 📈' if rec_label == 'LONG' else 'SHORT 📉'}</b>"
+                                    f" <code>{sym}</code> (слот занят)\n"
+                                    f"Цена: <b>${b['price']:,.6g}</b>  |  Сила: {score}/100"
+                                    f"  |  Открыто: {_cf_total_now}/{MAX_OPEN_CONFLUENCE_POSITIONS}\n"
+                                    f"🟢 TP: <b>${_dtp_cap:,.6g}</b>  │  🔴 SL: <b>${_dsl_cap:,.6g}</b>"
+                                ),
                             )
                     continue
 
