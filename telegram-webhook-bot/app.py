@@ -192,6 +192,36 @@ MAX_OPEN_CONFLUENCE_POSITIONS = 15  # cap on simultaneous real confluence demo p
 # legacy bets that run to their own SL/TP; they must not count against the new 15-slot cap.
 CONFLUENCE_CAP_CUTOFF_TS = 1_786_519_591
 # ---------------------------------------------------------------------------
+# Non-crypto symbol filter — Gate.io Futures lists synthetic equity/commodity
+# contracts alongside crypto. Block them from ALL signal types by prefix.
+# Extend this set if new non-crypto pairs appear.
+NON_CRYPTO_PREFIXES: frozenset[str] = frozenset({
+    # Precious metals / commodities
+    "XAG", "XAU", "SLVON",
+    # US equity derivatives
+    "AAPL", "AAPLX", "GOOGL", "GOOGLX", "AMZN", "MSFT",
+    "NVDA", "TSLA", "META", "NFLX", "BABA",
+    # EU / Asia equity derivatives
+    "ASML", "TENCENT", "TENCENTHKD", "XIAOMI", "XIAOMIHKD",
+    # Indices
+    "SPX", "NDX",
+})
+
+
+def _is_crypto_pair(symbol: str) -> bool:
+    """Return True only for genuine crypto USDT pairs.
+
+    Gate.io Futures includes synthetic stock/commodity/index contracts
+    (XAGUSDT, AAPLXUSDT, SPXUSDT, …).  Those are excluded from all signal
+    types by checking whether the symbol starts with a known non-crypto prefix.
+    """
+    for prefix in NON_CRYPTO_PREFIXES:
+        if symbol.startswith(prefix):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Signal enable flags — включить/выключить каждый тип сигналов
 # ---------------------------------------------------------------------------
 CONFLUENCE_ENABLED              = True   # конфлюенс (LONG + SHORT)
@@ -7134,9 +7164,9 @@ def run_checks():
     }
 
     try:
-        # 1. Fetch all USDT pairs
+        # 1. Fetch all USDT pairs (crypto-only — strip synthetic equity/commodity)
         try:
-            current_pairs = set(get_all_usdt_pairs())
+            current_pairs = {s for s in get_all_usdt_pairs() if _is_crypto_pair(s)}
         except Exception as e:
             logger.error("Failed to fetch pairs: %s", e)
             summary["errors"].append(f"Pairs fetch: {e}")
