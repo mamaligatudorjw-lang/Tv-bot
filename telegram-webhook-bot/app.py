@@ -239,6 +239,7 @@ LISTING_PEAK_ENABLED            = False  # пик листинга SHORT
 STREAK_1H_ENABLED               = True   # серия свечей (1h streak)
 WHALE_LSR_ENABLED               = False  # сдвиг позиций китов
 COINGECKO_CHECK_INTERVAL_MIN = 30  # CoinGecko "upcoming listing" monitor cadence
+COINGECKO_NEW_COIN_ALERTS_ENABLED = False  # «МОНЕТА ДО BINANCE» alerts — off until useful
 COINGECKO_MAX_ALERTS_PER_CYCLE = 20  # safety cap if CoinGecko returns an anomalous diff
 COINGECKO_LIST_URL = "https://api.coingecko.com/api/v3/coins/list"
 WEEKLY_HIGH_COOLDOWN = 3600
@@ -5089,6 +5090,9 @@ def check_coingecko_new_coins() -> None:
     """Every 30 min: fetch CoinGecko coin list and alert on coins NEWLY appearing
     on CoinGecko that are NOT yet listed on Binance Spot USDT. First run populates
     the baseline without alerting. A safety cap prevents alert floods on anomalies."""
+    if not COINGECKO_NEW_COIN_ALERTS_ENABLED:
+        logger.debug("CoinGecko new-coin alerts disabled (COINGECKO_NEW_COIN_ALERTS_ENABLED=False)")
+        return
     logger.info("CoinGecko: checking for upcoming listings...")
     try:
         resp = requests.get(COINGECKO_LIST_URL, timeout=20)
