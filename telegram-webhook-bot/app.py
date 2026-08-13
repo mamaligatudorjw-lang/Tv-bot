@@ -447,10 +447,11 @@ BEAR_DOWNTREND_FILTER_ENABLED = True    # включён; логика 3-4д=б�
 #   LONG  + дамп: неправильно блокировать (тренд продолжения, 57% TP у теней)
 PUMP_FILTER_SHORT_ENABLED = False       # ВЫКЛ: теневые данные показали, что памп → SHORT прибылен
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
-UPTREND_FLIP_MIN_CANDLES  = 0           # ВЫКЛ: теневые данные показали, что uptrend_flip блокирует прибыльные SHORT-ы
+UPTREND_FLIP_MIN_CANDLES  = 4           # X-of-N gate: заблокировать SHORT если ≥ этого числа
+UPTREND_FLIP_N_WINDOW     = 6           # из N последних 4h-свечей были бычьими (4of6 выбрано по бэктесту Aug 10-13)
 SHADOW_ONLY_MODE          = True        # True = отправлять теневые сигналы в Telegram, реальные — молчать
 SHADOW_MODE_EXEMPT_TYPES  = {"oversold_24h", "streak_1h", "confluence"}  # эти типы приходят как реальные сигналы (без 👻)
-UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа (4h ≈ 16ч при N=4)
+UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа
 
 # --- Display leverage for ROI calculation in Telegram messages ---
 # All P&L / SL / TP percentages shown to the user are multiplied by this
@@ -2943,6 +2944,21 @@ def _count_consecutive_trend_days(closes: list[float], direction: str) -> int:
         else:
             break
     return count
+
+
+def _count_up_in_window(closes: list[float], n: int = 6) -> int:
+    """Count how many of the last N 4h-candles closed higher than the previous one.
+
+    Uses the most-recent (n+1) candles to form n consecutive pairs and counts
+    bullish pairs. Ignores the current (incomplete) candle — caller should pass
+    only completed closes (all but the last element of the raw list).
+
+    Returns 0 if there is insufficient data.
+    """
+    if not closes or len(closes) < n + 1:
+        return 0
+    recent = closes[-(n + 1):]          # n+1 candles → n pairs
+    return sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
 
 
 def _trend_warning_line(symbol: str, recommendation: str) -> str:
@@ -8466,26 +8482,29 @@ def run_checks():
                             )
                     continue
 
-                # ── Uptrend flip: block SHORT, send LONG if N+ 4h-candle uptrend ──
-                # When UPTREND_FLIP_MIN_CANDLES > 0 and signal is SHORT but the coin
-                # has been rising for ≥ N consecutive 4h closes → shadow the SHORT
-                # and emit a LONG "trend continuation" signal instead.
-                # Using 4h candles (not daily) catches uptrends within hours, not days.
+                # ── Uptrend flip: block SHORT if ≥ X of last N 4h-candles are bullish ──
+                # Uses X-of-N rule (not consecutive) to catch "pulsing" uptrends where
+                # the coin rises with occasional pullback candles.  Threshold chosen by
+                # back-test on Aug 10-13 data (63 SL, 13 TP):
+                #   4of6 → blocks 27% SL, keeps 92% TP, precision 94% ← deployed
+                #   5of6 → blocks 10% SL only (too conservative)
+                #   consec≥3 → blocks 13% SL (original disabled logic, too strict)
                 _uptrend_candles_cf = 0
                 if UPTREND_FLIP_MIN_CANDLES > 0 and rec_label == "SHORT":
                     try:
-                        _4h_flip = _gateio_klines(sym, UPTREND_FLIP_INTERVAL, 20)
+                        _4h_flip = _gateio_klines(sym, UPTREND_FLIP_INTERVAL,
+                                                   UPTREND_FLIP_N_WINDOW + 2)
                         if _4h_flip:
-                            _4h_closes_flip = [float(k[4]) for k in _4h_flip]
-                            _uptrend_candles_cf = _count_consecutive_trend_days(
-                                _4h_closes_flip, "up"
+                            _4h_closes_flip = [float(k[4]) for k in _4h_flip[:-1]]  # drop live
+                            _uptrend_candles_cf = _count_up_in_window(
+                                _4h_closes_flip, UPTREND_FLIP_N_WINDOW
                             )
                     except Exception:
                         pass
                 if UPTREND_FLIP_MIN_CANDLES > 0 and _uptrend_candles_cf >= UPTREND_FLIP_MIN_CANDLES:
                     logger.info(
-                        "Confluence SHORT %s flipped to LONG — %d x %s uptrend",
-                        sym, _uptrend_candles_cf, UPTREND_FLIP_INTERVAL,
+                        "Confluence SHORT %s blocked — %d/%d %s candles bullish",
+                        sym, _uptrend_candles_cf, UPTREND_FLIP_N_WINDOW, UPTREND_FLIP_INTERVAL,
                     )
                     summary["confluence_ema_blocked"] = (
                         summary.get("confluence_ema_blocked", 0) + 1
@@ -8502,7 +8521,7 @@ def run_checks():
                                 sym, "SHORT", b["price"], _dsl_flip, _dtp_flip,
                                 is_shadow=True,
                                 shadow_reason=(
-                                    f"uptrend_flip: {_uptrend_candles_cf}x{UPTREND_FLIP_INTERVAL}"
+                                    f"uptrend_flip: {_uptrend_candles_cf}of{UPTREND_FLIP_N_WINDOW}x{UPTREND_FLIP_INTERVAL}"
                                 ),
                                 alert_type="confluence",
                             )
