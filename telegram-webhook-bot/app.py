@@ -164,6 +164,8 @@ state = {
     "last_pump_alerted": {},           # symbol -> ts (24h +30% pump cooldown)
     "last_vol_surge_alerted": {},      # symbol -> ts (300% vol + CRSI extreme cooldown)
     "last_streak_1h_alerted": {},      # symbol -> ts (intraday 6h+ streak LONG/SHORT cooldown)
+    "last_vwap_rev_alerted": {},       # symbol -> ts (VWAP reversion shadow cooldown)
+    "last_liq_reversal_alerted": {},   # symbol -> ts (liq reversal confirmation shadow cooldown)
     "last_lsr_shift_alerted": {},      # symbol -> ts (whale LSR flip cooldown)
     "lsr_prev": {},                    # symbol -> float (previous LSR value for shift detection)
     "prior_day_pct": {},               # symbol -> float: yesterday's close-to-close % change
@@ -317,6 +319,13 @@ OVERHEATED_24H_PCT = 15.0
 OVERSOLD_24H_PCT = -10.0
 OVERHEATED_COOLDOWN = 14400        # 4h
 OVERSOLD_COOLDOWN = 7200           # 2h
+
+# Liquidity reversal confirmation shadow
+# Shadow-only for ~3 weeks to compare vs plain liquidity (no confirmation).
+# Confirmation: last 15m candle must be in reversal direction + elevated volume.
+LIQUIDITY_REVERSAL_SHADOW      = True   # False = fully disable shadow; True = active
+LIQUIDITY_REVERSAL_VOL_MULT    = 1.5    # reversal candle vol must be ≥1.5× 10-bar avg
+LIQUIDITY_REVERSAL_ZONE_PCT    = 0.5    # zone must have been touched within 0.5% of low/high
 
 # Top-gainers list threshold (used by /top30 — pure +X% mover, no alert).
 # The pump_24h *alert* itself was removed in favor of volume_surge_{short,long}.
@@ -1428,6 +1437,102 @@ def _liquidity_entry_trigger(symbol: str, direction: str, price: float,
 
     except Exception as exc:
         logger.warning("_liquidity_entry_trigger %s: %s", symbol, exc)
+
+
+def _liquidity_reversal_shadow(symbol: str, direction: str, price: float,
+                                original_sl: float | None) -> None:
+    """Shadow: same liquidity-zone trigger but only enters after reversal confirmation.
+
+    After finding the qualifying zone (same logic as _liquidity_entry_trigger), checks:
+      LONG: last completed 15m candle is bullish (close > open) AND the candle's low
+            touched within LIQUIDITY_REVERSAL_ZONE_PCT of the zone price AND volume
+            ≥ LIQUIDITY_REVERSAL_VOL_MULT × 10-bar average.
+      SHORT: mirror — last candle bearish, high touched zone, volume elevated.
+
+    Opens a shadow demo_position (alert_type='liq_reversal', is_shadow=True) instead of
+    a liquidity_order, so it shows up in /demo shadow stats alongside other signals.
+    """
+    if not LIQUIDITY_REVERSAL_SHADOW:
+        return
+    try:
+        from liquidity import find_liquidity_zones, liquidity_entry_decision
+        candles = _gateio_klines(symbol, "15m", 100)
+        if len(candles) < 12:
+            return
+
+        zones    = find_liquidity_zones(candles)
+        decision = liquidity_entry_decision(direction, price, zones)
+        if not decision or decision.get("entry_type") == "skip":
+            return
+
+        zone_price = decision["zone_price"]
+
+        # --- Reversal confirmation on last COMPLETED 15m candle ---
+        completed = candles[:-1]  # drop current live candle
+        if len(completed) < 10:
+            return
+        last_c     = completed[-1]
+        last_open  = float(last_c[1])
+        last_high  = float(last_c[2])
+        last_low   = float(last_c[3])
+        last_close = float(last_c[4])
+        last_vol   = float(last_c[5])
+        avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
+
+        if direction == "LONG":
+            # Require bullish reversal candle that touched the zone
+            if last_close <= last_open:
+                logger.debug("LiqReversal %s LONG: last candle not bullish, skip", symbol)
+                return
+            touch_pct = abs(last_low - zone_price) / zone_price * 100.0
+            if touch_pct > LIQUIDITY_REVERSAL_ZONE_PCT:
+                logger.debug(
+                    "LiqReversal %s LONG: low %.6g not close enough to zone %.6g (%.2f%%)",
+                    symbol, last_low, zone_price, touch_pct,
+                )
+                return
+        else:  # SHORT
+            if last_close >= last_open:
+                logger.debug("LiqReversal %s SHORT: last candle not bearish, skip", symbol)
+                return
+            touch_pct = abs(last_high - zone_price) / zone_price * 100.0
+            if touch_pct > LIQUIDITY_REVERSAL_ZONE_PCT:
+                logger.debug(
+                    "LiqReversal %s SHORT: high %.6g not close enough to zone %.6g (%.2f%%)",
+                    symbol, last_high, zone_price, touch_pct,
+                )
+                return
+
+        if avg_vol_10 > 0 and last_vol < avg_vol_10 * LIQUIDITY_REVERSAL_VOL_MULT:
+            logger.debug(
+                "LiqReversal %s %s: vol %.0f < %.1f× avg %.0f, skip",
+                symbol, direction, last_vol, LIQUIDITY_REVERSAL_VOL_MULT, avg_vol_10,
+            )
+            return
+
+        # All checks passed — open shadow demo position
+        sl_price = decision["sl_price"]
+        tp_price = decision["tp_price"]
+        now_ts   = int(time.time())
+
+        _demo_open_position(
+            symbol, direction, price, sl_price, tp_price,
+            is_shadow=True,
+            alert_type="liq_reversal",
+            score=65,
+        )
+
+        with state_lock:
+            state["last_liq_reversal_alerted"][symbol] = float(now_ts)
+
+        logger.info(
+            "LiqReversal shadow %s %s: zone=%.6g sl=%.6g tp=%.6g vol_ratio=%.2f touch=%.2f%%",
+            symbol, direction, zone_price, sl_price, tp_price,
+            last_vol / avg_vol_10 if avg_vol_10 > 0 else 0, touch_pct,
+        )
+
+    except Exception as exc:
+        logger.warning("_liquidity_reversal_shadow %s: %s", symbol, exc)
 
 
 def check_liquidity_orders() -> None:
@@ -4070,6 +4175,17 @@ STREAK_1H_LONG_MAX_GAIN = 15.0  # если монета уже выросла >1
 STREAK_1H_SHORT_MAX_LOSS= 15.0  # если монета уже упала  >15% за стрик — перепродана, пропустить SHORT
 STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_close на >0.5% — разворот, пропустить ЛОНГ
 
+# --- VWAP Reversion shadow (mean-reversion complement to Серия 1ч) ---
+# Opposite direction from streak_1h: upstreak → SHORT to VWAP, downstreak → LONG to VWAP.
+# Shadow-only for ~3 weeks; set False to go live after validation.
+VWAP_REVERSION_SHADOW_ONLY  = True
+VWAP_REVERSION_MIN_DIST_PCT = 1.0   # price must be ≥1% away from VWAP ("extended")
+VWAP_REVERSION_MAX_DIST_PCT = 8.0   # >8% = likely breakout, skip
+VWAP_REVERSION_VOL_MULT     = 1.3   # reversal candle volume must be ≥1.3× 10-bar avg
+VWAP_REVERSION_ATR_SL_MULT  = 0.8   # SL = 0.8 × 1h-ATR (tighter than streak's 4h-based)
+VWAP_REVERSION_ATR_TP_MULT  = 1.6   # TP dist = 1.6 × SL dist  ≈ R:R 2:1
+VWAP_REVERSION_COOLDOWN     = 28800  # 8h per symbol (same as streak_1h)
+
 # --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
 LSR_SHIFT_THRESHOLD  = 0.38    # min |lsr_new - lsr_prev| to count as a flip
 LSR_BULL_MIN         = 1.30    # after shift, LSR must be ≥ this (whales in long)
@@ -4685,6 +4801,42 @@ def _fetch_1h_closes(symbol: str, limit: int = 14) -> list[float] | None:
         return None
 
 
+def _fetch_1h_ohlcv(symbol: str, limit: int = 25) -> list | None:
+    """Return the last limit-1 completed 1h candles (oldest→newest), Gate.io format.
+    Drops the current (potentially incomplete) candle."""
+    try:
+        candles = _gateio_klines(symbol, "1h", limit)
+        if not candles or len(candles) < 8:
+            return None
+        return candles[:-1]
+    except Exception:
+        return None
+
+
+def _calc_vwap_atr1h(candles: list) -> tuple[float | None, float | None]:
+    """Compute daily VWAP and average 1h-ATR from completed 1h candles.
+    Gate.io candle format: [ts, open, high, low, close, vol, ...]
+    Returns (vwap, atr_1h) or (None, None) on any error."""
+    try:
+        if len(candles) < 2:
+            return None, None
+        tp_vol   = 0.0
+        vol_total = 0.0
+        trs: list[float] = []
+        for i, c in enumerate(candles):
+            h, l, cl, vol = float(c[2]), float(c[3]), float(c[4]), float(c[5])
+            tp_vol    += (h + l + cl) / 3.0 * vol
+            vol_total += vol
+            if i > 0:
+                prev_c = float(candles[i - 1][4])
+                trs.append(max(h - l, abs(h - prev_c), abs(l - prev_c)))
+        vwap = tp_vol / vol_total if vol_total > 0 else None
+        atr  = sum(trs) / len(trs) if trs else None
+        return vwap, atr
+    except Exception:
+        return None, None
+
+
 def _fetch_gate_lsr_raw(symbol: str) -> float | None:
     """Return the raw top_lsr_size from Gate.io /contract_stats (1h, 1 row).
     Returns None on any error or if the contract isn't listed."""
@@ -4933,6 +5085,143 @@ def check_intraday_streak(
                         alert_type="streak_1h",
                         score=score,
                     )
+
+    return sent
+
+
+def check_vwap_reversion(
+    tickers: dict[str, dict],
+    rsi_map: dict[str, float],
+) -> int:
+    """Shadow: mean-reversion entry when a 1h streak leaves price extended from VWAP.
+
+    Direction is OPPOSITE to streak_1h (mean-reversion, not momentum):
+      upstreak  (≥6 consecutive green 1h candles) → price above VWAP → SHORT toward VWAP
+      downstreak (≥6 consecutive red  1h candles) → price below VWAP → LONG  toward VWAP
+
+    Volume confirmation: last completed 1h candle must point in the reversal direction
+    with volume ≥ VWAP_REVERSION_VOL_MULT × 10-bar average.
+
+    TP/SL use 1h-ATR (≈ ¼ of the 4h-ATR used by streak_1h), targeting a 1–4h hold.
+    TP is set at the VWAP level (natural mean-reversion target) or R:R 2:1, whichever
+    is closer to entry — so the position exits before the streak's original momentum
+    could resume.
+
+    Always opens as is_shadow=True for the first ~3 weeks (VWAP_REVERSION_SHADOW_ONLY).
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    for symbol, t in tickers.items():
+        try:
+            pct24 = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+        if abs(pct24) < STREAK_1H_PRE_FILTER:  # reuse streak pre-filter to save API calls
+            continue
+
+        with state_lock:
+            last = state["last_vwap_rev_alerted"].get(symbol, 0)
+        if now - last < VWAP_REVERSION_COOLDOWN:
+            continue
+
+        # Fetch full 1h OHLCV (need high/low/vol for VWAP; limit 25 = 24 completed candles)
+        candles = _fetch_1h_ohlcv(symbol, limit=25)
+        if not candles or len(candles) < STREAK_1H_MIN + 2:
+            continue
+
+        closes = [float(c[4]) for c in candles]
+        streak_up   = _count_consecutive_trend_days(closes, "up")
+        streak_down = _count_consecutive_trend_days(closes, "down")
+
+        if streak_up < STREAK_1H_MIN and streak_down < STREAK_1H_MIN:
+            continue
+
+        # VWAP and 1h ATR from completed candles
+        vwap, atr_1h = _calc_vwap_atr1h(candles)
+        if not vwap or not atr_1h or atr_1h <= 0:
+            continue
+
+        # Mean-reversion direction: opposite of trend
+        if streak_up >= STREAK_1H_MIN:
+            if price <= vwap:
+                continue  # price already at/below VWAP — no setup
+            dist_pct  = (price - vwap) / vwap * 100.0
+            direction = "SHORT"
+        else:
+            if price >= vwap:
+                continue  # price already at/above VWAP — no setup
+            dist_pct  = (vwap - price) / vwap * 100.0
+            direction = "LONG"
+
+        # Extension gate: too close = noise, too far = breakout not reversion
+        if dist_pct < VWAP_REVERSION_MIN_DIST_PCT or dist_pct > VWAP_REVERSION_MAX_DIST_PCT:
+            continue
+
+        # Volume confirmation: last completed candle must be in the reversal direction
+        last_c     = candles[-1]
+        last_open  = float(last_c[1])
+        last_close = float(last_c[4])
+        last_vol   = float(last_c[5])
+        avg_vol_10 = sum(float(c[5]) for c in candles[-10:]) / 10.0
+
+        if direction == "SHORT" and last_close >= last_open:
+            continue  # need bearish reversal candle (close < open)
+        if direction == "LONG"  and last_close <= last_open:
+            continue  # need bullish reversal candle (close > open)
+
+        if avg_vol_10 > 0 and last_vol < avg_vol_10 * VWAP_REVERSION_VOL_MULT:
+            continue  # volume not confirming the reversal
+
+        # RSI sanity: don't short into extreme oversold, don't long into extreme overbought
+        rsi = rsi_map.get(symbol)
+        if direction == "SHORT" and rsi is not None and rsi < 35:
+            continue
+        if direction == "LONG"  and rsi is not None and rsi > 65:
+            continue
+
+        # TP/SL: use 1h ATR for a tight, 1–4h realistic hold
+        sl_dist  = VWAP_REVERSION_ATR_SL_MULT * atr_1h
+        tp_dist  = VWAP_REVERSION_ATR_TP_MULT * sl_dist   # R:R ≈ 2:1
+
+        if direction == "SHORT":
+            sl_price = price + sl_dist
+            # TP targets VWAP; never go further than full tp_dist
+            tp_price = max(vwap, price - tp_dist)
+        else:
+            sl_price = price - sl_dist
+            tp_price = min(vwap, price + tp_dist)
+
+        if sl_price <= 0 or tp_price <= 0:
+            continue
+        # Geometry sanity
+        if direction == "LONG"  and not (sl_price < price < tp_price):
+            continue
+        if direction == "SHORT" and not (tp_price < price < sl_price):
+            continue
+
+        _demo_open_position(
+            symbol, direction, price, sl_price, tp_price,
+            is_shadow=True,
+            alert_type="vwap_reversion",
+            score=60,
+        )
+
+        with state_lock:
+            state["last_vwap_rev_alerted"][symbol] = now
+
+        logger.info(
+            "VWAP reversion shadow %s %s: dist=%.1f%% vwap=%.6g atr1h=%.6g sl=%.6g tp=%.6g",
+            symbol, direction, dist_pct, vwap, atr_1h, sl_price, tp_price,
+        )
+        sent += 1
 
     return sent
 
@@ -5856,6 +6145,12 @@ def check_overheated_oversold(
                         # ── Умный вход по ликвидности (параллельная стратегия) ──
                         threading.Thread(
                             target=_liquidity_entry_trigger,
+                            args=(symbol, "LONG", price, _dsl_os),
+                            daemon=True,
+                        ).start()
+                        # ── Shadow: лимитный вход только после подтверждения разворота ──
+                        threading.Thread(
+                            target=_liquidity_reversal_shadow,
                             args=(symbol, "LONG", price, _dsl_os),
                             daemon=True,
                         ).start()
@@ -7163,6 +7458,8 @@ def run_checks():
         "momentum_long_alerts": 0,     # TEST: momentum fade SHORT (pamped +10% → reversal)
         "new_listing_short_alerts": 0, # TEST: new listing pump→dump SHORT
         "streak_1h_alerts": 0,         # intraday 6h+ streak LONG/SHORT
+        "vwap_rev_alerts": 0,          # VWAP reversion shadow (mean-reversion complement)
+        "liq_reversal_alerts": 0,      # liquidity reversal confirmation shadow
         "whale_lsr_shift_alerts": 0,   # whale LSR flip alerts
         "errors": [],
     }
@@ -7291,6 +7588,15 @@ def run_checks():
 
                 # 6i. Intraday hourly streak — 6+ consecutive green/red 1h candles
                 summary["streak_1h_alerts"] = check_intraday_streak(tickers, rsi_map) if STREAK_1H_ENABLED else 0
+
+                # 6i-shadow. VWAP reversion — mean-reversion counterpart to streak_1h
+                # (shadow-only, controlled by VWAP_REVERSION_SHADOW_ONLY)
+                if STREAK_1H_ENABLED:
+                    try:
+                        summary["vwap_rev_alerts"] = check_vwap_reversion(tickers, rsi_map)
+                    except Exception as _e:
+                        logger.error("check_vwap_reversion failed: %s", _e)
+                        summary["errors"].append(f"vwap_rev: {_e}")
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
                 summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs) if WHALE_LSR_ENABLED else 0
@@ -11016,14 +11322,34 @@ def _restore_cooldowns_from_db() -> None:
                 "GROUP BY symbol",
                 (int(time.time()) - STREAK_1H_COOLDOWN,),
             ).fetchall()
+            # vwap_reversion shadow cooldown restore
+            vr_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='vwap_reversion' AND is_shadow=1 "
+                "  AND ts_open > ? "
+                "GROUP BY symbol",
+                (int(time.time()) - VWAP_REVERSION_COOLDOWN,),
+            ).fetchall()
+            # liq_reversal shadow cooldown restore
+            lr_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='liq_reversal' AND is_shadow=1 "
+                "  AND ts_open > ? "
+                "GROUP BY symbol",
+                (int(time.time()) - OVERSOLD_COOLDOWN,),
+            ).fetchall()
         with state_lock:
             for sym, ts in os_rows:
                 state["last_oversold_alerted"][sym] = ts
             for sym, ts in sk_rows:
                 state["last_streak_1h_alerted"][sym] = ts
+            for sym, ts in vr_rows:
+                state["last_vwap_rev_alerted"][sym] = ts
+            for sym, ts in lr_rows:
+                state["last_liq_reversal_alerted"][sym] = ts
         logger.info(
-            "Cooldowns restored from DB: %d oversold, %d streak_1h symbols",
-            len(os_rows), len(sk_rows),
+            "Cooldowns restored from DB: %d oversold, %d streak_1h, %d vwap_rev, %d liq_rev symbols",
+            len(os_rows), len(sk_rows), len(vr_rows), len(lr_rows),
         )
     except Exception as exc:
         logger.warning("_restore_cooldowns_from_db failed: %s", exc)
