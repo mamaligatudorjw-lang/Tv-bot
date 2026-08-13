@@ -344,6 +344,10 @@ PUMP_FADE_MAX_PCT       = 200.0    # игнорировать крайние в�
 PUMP_FADE_COOLDOWN      = 86400    # 24ч кулдаун на символ
 PUMP_FADE_MIN_VOL       = 500_000  # мин. объём $500k 24ч (отфильтровать мусор)
 PUMP_FADE_MIN_SCORE     = 55       # мин. score для отправки алерта
+# SL cap: pump-fade enters already-volatile coins, so ATR is naturally wider than
+# confluence. 12% is a first approximation — wider than confluence (8%), but still
+# prevents runaway losses like AVAAIUSDT −14.47%.  Review after 20+ closed trades.
+PUMP_FADE_SL_MAX_PCT    = 12.0     # temporary; revise when distribution becomes clear
 
 # EMA-200 (4h) trend filter
 EMA200_PERIOD = 200
@@ -1286,7 +1290,12 @@ def _compute_demo_sl_tp(
     # Fixed fallback (no ATR available)
     if direction == "LONG":
         return price * (1 - HIT_RATE_SL_PCT / 100), price * (1 + HIT_RATE_TP_PCT / 100)
-    return price * (1 + SHORT_HOLD_SL_PCT / 100), price * (1 - SHORT_HOLD_TP_PCT / 100)
+    # SHORT fallback: also respect max_sl_pct cap so wrappers like _compute_pump_fade_sl_tp
+    # stay effective even when ATR data isn't available yet.
+    sl_dist_fb = SHORT_HOLD_SL_PCT / 100 * price
+    if max_sl_pct and max_sl_pct > 0:
+        sl_dist_fb = min(sl_dist_fb, max_sl_pct / 100 * price)
+    return price + sl_dist_fb, price - sl_dist_fb * SHORT_ATR_TP_MULT_RR
 
 
 def _compute_confluence_sl_tp(
@@ -1299,6 +1308,20 @@ def _compute_confluence_sl_tp(
     """
     cap = CONFLUENCE_ATR_SL_MAX_PCT if CONFLUENCE_ATR_SL_MAX_PCT > 0 else None
     return _compute_demo_sl_tp(direction, price, atr, max_sl_pct=cap)
+
+
+def _compute_pump_fade_sl_tp(
+    price: float, atr: float | None
+) -> tuple[float | None, float | None]:
+    """_compute_demo_sl_tp for pump_24h_fade SHORT entries with its own SL cap.
+
+    12% cap (vs 8% for confluence) — pump-fade targets already-volatile coins where
+    ATR is naturally wider.  Also applies to the no-ATR fallback (normally 15%).
+    Temporary value: review when 20+ closed pump_fade trades are available.
+    Controlled by PUMP_FADE_SL_MAX_PCT.
+    """
+    cap = PUMP_FADE_SL_MAX_PCT if PUMP_FADE_SL_MAX_PCT > 0 else None
+    return _compute_demo_sl_tp("SHORT", price, atr, max_sl_pct=cap)
 
 
 def _demo_open_position(
@@ -6983,7 +7006,7 @@ def check_pump_24h_fade(
                 logger.debug(
                     "pump_24h_fade %s skipped: score=%d < %d", symbol, score, PUMP_FADE_MIN_SCORE
                 )
-                _dsl_pf, _dtp_pf = _compute_demo_sl_tp("SHORT", price, atr)
+                _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(price, atr)
                 if _dsl_pf and _dtp_pf:
                     _demo_open_position(
                         symbol, "SHORT", price, _dsl_pf, _dtp_pf,
@@ -7009,7 +7032,7 @@ def check_pump_24h_fade(
             with state_lock:
                 state["last_pump_alerted"][symbol] = now
 
-        _dsl_pf, _dtp_pf = _compute_demo_sl_tp("SHORT", price, atr)
+        _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(price, atr)
         if _dsl_pf and _dtp_pf:
             _demo_open_position(
                 symbol, "SHORT", price, _dsl_pf, _dtp_pf,
