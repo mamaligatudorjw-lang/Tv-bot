@@ -4291,15 +4291,15 @@ EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 # Each key maps an alert_type (or "confluence_cap") to the max notifications per day.
 # 0 = don't send.  Designed to sum to ~20 signals/day in realistic steady-state.
 SHADOW_NOTIF_LIMITS: dict[str, int] = {
-    "bb_squeeze":      4,   # 8h cooldown/symbol; burst on first deploy — hard cap
-    "ema_cross":       6,   # 4h + gap filter → rare; allow up to 6
-    "pump_24h_fade":   4,   # ~5/day natural rate
-    "vwap_reversion":  5,   # ~1/day → allow all
-    "liq_reversal":    5,   # rarely fires → allow all
-    "confluence_cap":  4,   # cap-blocked confluence (прошли всё, не хватило слота)
-    "confluence":      2,   # liq_veto / pump_filter vetoed confluence
-    "overheated_24h":  2,   # liq_veto / ai_veto for overheated
-    "oversold_24h":    2,   # liq_veto for oversold
+    "bb_squeeze":      10,  # 8h cooldown/symbol; burst on first deploy — hard cap
+    "ema_cross":       10,  # 4h + gap filter → rare; allow up to 10
+    "pump_24h_fade":   8,   # ~5/day natural rate
+    "vwap_reversion":  8,   # ~1/day → allow all
+    "liq_reversal":    8,   # rarely fires → allow all
+    "confluence_cap":  8,   # cap-blocked confluence (прошли всё, не хватило слота)
+    "confluence":      4,   # liq_veto / pump_filter vetoed confluence
+    "overheated_24h":  4,   # liq_veto / ai_veto for overheated
+    "oversold_24h":    4,   # liq_veto for oversold
 }
 
 # --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
