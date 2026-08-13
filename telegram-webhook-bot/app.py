@@ -166,6 +166,8 @@ state = {
     "last_streak_1h_alerted": {},      # symbol -> ts (intraday 6h+ streak LONG/SHORT cooldown)
     "last_vwap_rev_alerted": {},       # symbol -> ts (VWAP reversion shadow cooldown)
     "last_liq_reversal_alerted": {},   # symbol -> ts (liq reversal confirmation shadow cooldown)
+    "last_bb_squeeze_alerted": {},     # symbol -> ts (Bollinger squeeze shadow cooldown)
+    "last_ema_cross_alerted": {},      # symbol -> ts (EMA crossover shadow cooldown)
     "last_lsr_shift_alerted": {},      # symbol -> ts (whale LSR flip cooldown)
     "lsr_prev": {},                    # symbol -> float (previous LSR value for shift detection)
     "prior_day_pct": {},               # symbol -> float: yesterday's close-to-close % change
@@ -4186,6 +4188,30 @@ VWAP_REVERSION_ATR_SL_MULT  = 0.8   # SL = 0.8 × 1h-ATR (tighter than streak's 
 VWAP_REVERSION_ATR_TP_MULT  = 1.6   # TP dist = 1.6 × SL dist  ≈ R:R 2:1
 VWAP_REVERSION_COOLDOWN     = 28800  # 8h per symbol (same as streak_1h)
 
+# --- Bollinger Squeeze shadow (volatility squeeze → breakout) ---
+# Backtest (10 pairs × 1000 1h candles): WR=37.5% (LONG 40.3%, SHORT 35.0%), ΣPnL=+7%.
+# Break-even at R:R 2:1 = 33.3%. Shadow-only for ~3 weeks.
+BB_SQUEEZE_SHADOW_ONLY  = True    # set False to go live after validation
+BB_SQUEEZE_PERIOD       = 20      # Bollinger Band length (standard)
+BB_SQUEEZE_MULT         = 2.0     # BB standard deviation multiplier
+BB_SQUEEZE_PCT10_WIN    = 100     # lookback window for bottom-10% squeeze percentile
+BB_SQUEEZE_VOL_MULT     = 1.3     # breakout candle volume must be ≥1.3× 10-bar avg
+BB_SQUEEZE_ATR_SL_MULT  = 1.0    # SL = 1.0 × 1h-ATR
+BB_SQUEEZE_ATR_TP_MULT  = 2.0    # TP dist = 2.0 × SL dist  (R:R 2:1)
+BB_SQUEEZE_COOLDOWN     = 28800   # 8h per symbol
+
+# --- EMA Crossover shadow (9/21, 4h timeframe, gap threshold) ---
+# 1h attempted but EMA(9/21) gaps max at 0.22% on 1h — threshold 0.3-0.5% unreachable.
+# Switched to 4h: gap p75=0.117%, threshold 0.15% covers best-performing tier.
+# Backtest (10 pairs × 500 4h candles, thresh≥0.15%): WR=36.8%, ΣPnL=+11.4%, avg=+0.30%.
+EMA_CROSS_SHADOW_ONLY   = True    # set False to go live after validation
+EMA_CROSS_FAST          = 9       # fast EMA period
+EMA_CROSS_SLOW          = 21      # slow EMA period
+EMA_CROSS_GAP_PCT       = 0.15    # min |EMA9-EMA21|/price at crossover (4h-realistic %)
+EMA_CROSS_ATR_SL_MULT   = 1.0    # SL = 1.0 × 4h-ATR
+EMA_CROSS_ATR_TP_MULT   = 2.0    # TP = 2.0 × SL dist  (R:R 2:1)
+EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
+
 # --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
 LSR_SHIFT_THRESHOLD  = 0.38    # min |lsr_new - lsr_prev| to count as a flip
 LSR_BULL_MIN         = 1.30    # after shift, LSR must be ≥ this (whales in long)
@@ -4837,6 +4863,53 @@ def _calc_vwap_atr1h(candles: list) -> tuple[float | None, float | None]:
         return None, None
 
 
+def _fetch_4h_ohlcv(symbol: str, limit: int = 60) -> list | None:
+    """Return the last limit-1 completed 4h candles (oldest→newest), Gate.io format."""
+    try:
+        candles = _gateio_klines(symbol, "4h", limit)
+        if not candles or len(candles) < 10:
+            return None
+        return candles[:-1]  # drop current incomplete candle
+    except Exception:
+        return None
+
+
+def _calc_bollinger(
+    closes: list[float],
+    period: int = 20,
+    mult: float = 2.0,
+) -> tuple[list, list, list]:
+    """Compute Bollinger Bands.  Returns (upper, lower, width_pct) lists — None where
+    insufficient history.  width_pct = (upper-lower)/middle × 100."""
+    n = len(closes)
+    upper: list = [None] * n
+    lower: list = [None] * n
+    width: list = [None] * n
+    for i in range(period - 1, n):
+        window = closes[i - period + 1 : i + 1]
+        sma = sum(window) / period
+        variance = sum((x - sma) ** 2 for x in window) / period
+        std = variance ** 0.5
+        u = sma + mult * std
+        l = sma - mult * std
+        upper[i] = u
+        lower[i] = l
+        width[i]  = (u - l) / sma * 100.0 if sma else None
+    return upper, lower, width
+
+
+def _calc_ema_arr(prices: list[float], period: int) -> list:
+    """Exponential moving average — returns list of float|None, same length as prices."""
+    k = 2.0 / (period + 1)
+    result: list = [None] * len(prices)
+    for i in range(period - 1, len(prices)):
+        if result[i - 1] is None:
+            result[i] = sum(prices[i - period + 1 : i + 1]) / period
+        else:
+            result[i] = prices[i] * k + result[i - 1] * (1 - k)
+    return result
+
+
 def _fetch_gate_lsr_raw(symbol: str) -> float | None:
     """Return the raw top_lsr_size from Gate.io /contract_stats (1h, 1 row).
     Returns None on any error or if the contract isn't listed."""
@@ -5220,6 +5293,218 @@ def check_vwap_reversion(
         logger.info(
             "VWAP reversion shadow %s %s: dist=%.1f%% vwap=%.6g atr1h=%.6g sl=%.6g tp=%.6g",
             symbol, direction, dist_pct, vwap, atr_1h, sl_price, tp_price,
+        )
+        sent += 1
+
+    return sent
+
+
+def check_bollinger_squeeze(
+    tickers: dict[str, dict],
+    rsi_map: dict[str, float],
+) -> int:
+    """Shadow: detect Bollinger Band squeeze → breakout entry on 1h candles.
+
+    Squeeze: current BB width (as % of middle) is in the bottom 10% of the last
+    BB_SQUEEZE_PCT10_WIN widths.  Entry: the next candle CLOSES outside the bands
+    with volume ≥ BB_SQUEEZE_VOL_MULT × 10-bar avg.
+
+    LONG  = close above upper band after squeeze (bullish breakout)
+    SHORT = close below lower band after squeeze (bearish breakdown)
+
+    Backtest (10 pairs × 1000 1h candles): WR=37.5% vs 33.3% break-even at R:R 2:1.
+    LONG WR=40.3%, SHORT WR=35.0%.  Shadow-only for ~3 weeks.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    for symbol, t in tickers.items():
+        try:
+            pct24 = float(t["priceChangePercent"])
+            price = float(t["lastPrice"])
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        with state_lock:
+            last = state["last_bb_squeeze_alerted"].get(symbol, 0)
+        if now - last < BB_SQUEEZE_COOLDOWN:
+            continue
+
+        candles = _fetch_1h_ohlcv(symbol, limit=BB_SQUEEZE_PCT10_WIN + 3)
+        if not candles or len(candles) < BB_SQUEEZE_PERIOD + 10:
+            continue
+
+        closes  = [float(c[4]) for c in candles]
+        volumes = [float(c[5]) for c in candles]
+        upper, lower, width = _calc_bollinger(closes, BB_SQUEEZE_PERIOD, BB_SQUEEZE_MULT)
+        _, atr_1h = _calc_vwap_atr1h(candles)
+
+        if atr_1h is None or atr_1h <= 0:
+            continue
+
+        # Squeeze check on the SECOND-TO-LAST completed candle (i = n-2):
+        # width[i] is the squeeze bar; width[i+1] is the breakout bar.
+        n = len(closes)
+        squeeze_idx = n - 2   # the squeeze candle
+        break_idx   = n - 1   # the breakout candle (most recent completed)
+
+        if width[squeeze_idx] is None or upper[squeeze_idx] is None:
+            continue
+
+        # Bottom-10% of last PCT10_WIN widths ending at squeeze_idx
+        window_start = max(0, squeeze_idx - BB_SQUEEZE_PCT10_WIN + 1)
+        recent_widths = [w for w in width[window_start:squeeze_idx] if w is not None]
+        if len(recent_widths) < 30:
+            continue
+        p10 = sorted(recent_widths)[int(len(recent_widths) * 0.10)]
+        if width[squeeze_idx] > p10:
+            continue  # not in squeeze
+
+        # Breakout candle check
+        b_close = closes[break_idx]
+        b_vol   = volumes[break_idx]
+        avg_vol = sum(volumes[max(0, break_idx - 10) : break_idx]) / min(10, break_idx)
+
+        if b_close > upper[squeeze_idx] and b_vol >= avg_vol * BB_SQUEEZE_VOL_MULT:
+            direction = "LONG"
+            sl_price  = b_close - BB_SQUEEZE_ATR_SL_MULT * atr_1h
+            tp_price  = b_close + BB_SQUEEZE_ATR_TP_MULT * BB_SQUEEZE_ATR_SL_MULT * atr_1h
+        elif b_close < lower[squeeze_idx] and b_vol >= avg_vol * BB_SQUEEZE_VOL_MULT:
+            direction = "SHORT"
+            sl_price  = b_close + BB_SQUEEZE_ATR_SL_MULT * atr_1h
+            tp_price  = b_close - BB_SQUEEZE_ATR_TP_MULT * BB_SQUEEZE_ATR_SL_MULT * atr_1h
+        else:
+            continue
+
+        if sl_price <= 0 or tp_price <= 0:
+            continue
+        if direction == "LONG"  and not (sl_price < b_close < tp_price):
+            continue
+        if direction == "SHORT" and not (tp_price < b_close < sl_price):
+            continue
+
+        # RSI sanity: avoid obvious counter-trend entries
+        rsi = rsi_map.get(symbol)
+        if direction == "LONG"  and rsi is not None and rsi > 80:
+            continue  # overbought — squeeze already exhausted
+        if direction == "SHORT" and rsi is not None and rsi < 20:
+            continue  # oversold — bounce risk
+
+        _demo_open_position(
+            symbol, direction, b_close, sl_price, tp_price,
+            is_shadow=True,
+            alert_type="bb_squeeze",
+            score=62,
+        )
+
+        with state_lock:
+            state["last_bb_squeeze_alerted"][symbol] = now
+
+        logger.info(
+            "BB squeeze shadow %s %s: price=%.6g squeeze_width=%.2f%% sl=%.6g tp=%.6g",
+            symbol, direction, b_close, width[squeeze_idx], sl_price, tp_price,
+        )
+        sent += 1
+
+    return sent
+
+
+def check_ema_crossover(tickers: dict[str, dict]) -> int:
+    """Shadow: EMA(9) × EMA(21) crossover on 4h with minimum gap threshold.
+
+    LONG  = EMA9 crosses above EMA21  (golden cross)
+    SHORT = EMA9 crosses below EMA21  (death cross)
+
+    Gap threshold EMA_CROSS_GAP_PCT filters weak/noisy crossovers.
+    1h tested but max gap at crossover = 0.22%, making 0.3-0.5% targets unreachable.
+    4h: p75 gap = 0.117%, threshold 0.15% keeps the best-performing tier.
+    Backtest (10 pairs × 500 4h candles, gap≥0.15%): WR=36.8%, ΣPnL=+11.4%.
+
+    Opens is_shadow=True positions (alert_type='ema_cross') for tracking.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+
+    for symbol, t in tickers.items():
+        try:
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+
+        with state_lock:
+            last = state["last_ema_cross_alerted"].get(symbol, 0)
+        if now - last < EMA_CROSS_COOLDOWN:
+            continue
+
+        candles = _fetch_4h_ohlcv(symbol, limit=EMA_CROSS_SLOW + 10)
+        if not candles or len(candles) < EMA_CROSS_SLOW + 3:
+            continue
+
+        closes = [float(c[4]) for c in candles]
+        e_fast = _calc_ema_arr(closes, EMA_CROSS_FAST)
+        e_slow = _calc_ema_arr(closes, EMA_CROSS_SLOW)
+        _, atr_4h = _calc_vwap_atr1h(candles)  # works for any timeframe
+
+        if atr_4h is None or atr_4h <= 0:
+            continue
+
+        n = len(closes)
+        i = n - 1  # most recent completed 4h candle
+
+        if any(x is None for x in [e_fast[i], e_fast[i-1], e_slow[i], e_slow[i-1]]):
+            continue
+
+        price   = closes[i]
+        gap_pct = abs(e_fast[i] - e_slow[i]) / price * 100.0
+
+        # Detect crossover on the last candle
+        if   e_fast[i-1] < e_slow[i-1] and e_fast[i] > e_slow[i]:
+            direction = "LONG"
+        elif e_fast[i-1] > e_slow[i-1] and e_fast[i] < e_slow[i]:
+            direction = "SHORT"
+        else:
+            continue  # no crossover
+
+        if gap_pct < EMA_CROSS_GAP_PCT:
+            continue  # too weak — likely a noisy whipsaw
+
+        sl_price = price - EMA_CROSS_ATR_SL_MULT * atr_4h if direction == "LONG" \
+                   else price + EMA_CROSS_ATR_SL_MULT * atr_4h
+        tp_price = price + EMA_CROSS_ATR_TP_MULT * EMA_CROSS_ATR_SL_MULT * atr_4h \
+                   if direction == "LONG" \
+                   else price - EMA_CROSS_ATR_TP_MULT * EMA_CROSS_ATR_SL_MULT * atr_4h
+
+        if sl_price <= 0 or tp_price <= 0:
+            continue
+        if direction == "LONG"  and not (sl_price < price < tp_price):
+            continue
+        if direction == "SHORT" and not (tp_price < price < sl_price):
+            continue
+
+        _demo_open_position(
+            symbol, direction, price, sl_price, tp_price,
+            is_shadow=True,
+            alert_type="ema_cross",
+            score=63,
+        )
+
+        with state_lock:
+            state["last_ema_cross_alerted"][symbol] = now
+
+        logger.info(
+            "EMA cross shadow %s %s: price=%.6g gap=%.3f%% sl=%.6g tp=%.6g",
+            symbol, direction, price, gap_pct, sl_price, tp_price,
         )
         sent += 1
 
@@ -7460,6 +7745,8 @@ def run_checks():
         "streak_1h_alerts": 0,         # intraday 6h+ streak LONG/SHORT
         "vwap_rev_alerts": 0,          # VWAP reversion shadow (mean-reversion complement)
         "liq_reversal_alerts": 0,      # liquidity reversal confirmation shadow
+        "bb_squeeze_alerts": 0,        # Bollinger squeeze shadow
+        "ema_cross_alerts": 0,         # EMA 9/21 crossover shadow (4h)
         "whale_lsr_shift_alerts": 0,   # whale LSR flip alerts
         "errors": [],
     }
@@ -7597,6 +7884,20 @@ def run_checks():
                     except Exception as _e:
                         logger.error("check_vwap_reversion failed: %s", _e)
                         summary["errors"].append(f"vwap_rev: {_e}")
+
+                # 6i-shadow-2. Bollinger Squeeze — squeeze → 1h breakout (shadow)
+                try:
+                    summary["bb_squeeze_alerts"] = check_bollinger_squeeze(tickers, rsi_map)
+                except Exception as _e:
+                    logger.error("check_bollinger_squeeze failed: %s", _e)
+                    summary["errors"].append(f"bb_squeeze: {_e}")
+
+                # 6i-shadow-3. EMA 9/21 crossover with gap threshold on 4h (shadow)
+                try:
+                    summary["ema_cross_alerts"] = check_ema_crossover(tickers)
+                except Exception as _e:
+                    logger.error("check_ema_crossover failed: %s", _e)
+                    summary["errors"].append(f"ema_cross: {_e}")
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
                 summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs) if WHALE_LSR_ENABLED else 0
@@ -11304,39 +11605,44 @@ def _restore_cooldowns_from_db() -> None:
     Without this, every restart clears in-memory state and the same coins
     re-signal immediately even though their positions are still open."""
     try:
+        now_ts = int(time.time())
         with _db_lock:
             conn = _get_db()
-            # oversold_24h: take ts_open of the most recent real position per symbol
             os_rows = conn.execute(
                 "SELECT symbol, MAX(ts_open) FROM demo_positions "
                 "WHERE alert_type='oversold_24h' AND is_shadow=0 "
-                "  AND ts_open > ? "
-                "GROUP BY symbol",
-                (int(time.time()) - OVERSOLD_COOLDOWN,),
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - OVERSOLD_COOLDOWN,),
             ).fetchall()
-            # streak_1h: same logic with its own cooldown
             sk_rows = conn.execute(
                 "SELECT symbol, MAX(ts_open) FROM demo_positions "
                 "WHERE alert_type='streak_1h' AND is_shadow=0 "
-                "  AND ts_open > ? "
-                "GROUP BY symbol",
-                (int(time.time()) - STREAK_1H_COOLDOWN,),
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - STREAK_1H_COOLDOWN,),
             ).fetchall()
-            # vwap_reversion shadow cooldown restore
             vr_rows = conn.execute(
                 "SELECT symbol, MAX(ts_open) FROM demo_positions "
                 "WHERE alert_type='vwap_reversion' AND is_shadow=1 "
-                "  AND ts_open > ? "
-                "GROUP BY symbol",
-                (int(time.time()) - VWAP_REVERSION_COOLDOWN,),
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - VWAP_REVERSION_COOLDOWN,),
             ).fetchall()
-            # liq_reversal shadow cooldown restore
             lr_rows = conn.execute(
                 "SELECT symbol, MAX(ts_open) FROM demo_positions "
                 "WHERE alert_type='liq_reversal' AND is_shadow=1 "
-                "  AND ts_open > ? "
-                "GROUP BY symbol",
-                (int(time.time()) - OVERSOLD_COOLDOWN,),
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - OVERSOLD_COOLDOWN,),
+            ).fetchall()
+            bbs_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='bb_squeeze' AND is_shadow=1 "
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - BB_SQUEEZE_COOLDOWN,),
+            ).fetchall()
+            emc_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='ema_cross' AND is_shadow=1 "
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - EMA_CROSS_COOLDOWN,),
             ).fetchall()
         with state_lock:
             for sym, ts in os_rows:
@@ -11347,9 +11653,15 @@ def _restore_cooldowns_from_db() -> None:
                 state["last_vwap_rev_alerted"][sym] = ts
             for sym, ts in lr_rows:
                 state["last_liq_reversal_alerted"][sym] = ts
+            for sym, ts in bbs_rows:
+                state["last_bb_squeeze_alerted"][sym] = ts
+            for sym, ts in emc_rows:
+                state["last_ema_cross_alerted"][sym] = ts
         logger.info(
-            "Cooldowns restored from DB: %d oversold, %d streak_1h, %d vwap_rev, %d liq_rev symbols",
+            "Cooldowns restored: %d oversold, %d streak_1h, %d vwap_rev, "
+            "%d liq_rev, %d bb_squeeze, %d ema_cross",
             len(os_rows), len(sk_rows), len(vr_rows), len(lr_rows),
+            len(bbs_rows), len(emc_rows),
         )
     except Exception as exc:
         logger.warning("_restore_cooldowns_from_db failed: %s", exc)
