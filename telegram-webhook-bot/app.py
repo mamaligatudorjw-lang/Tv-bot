@@ -2247,18 +2247,46 @@ def check_demo_positions() -> None:
     if not rows:
         return
 
-    # Batch: fetch lastPrice AND last completed 1m candle for each unique symbol
     symbols = list({r[1] for r in rows})
     prices: dict[str, float] = {}
     candles_1m: dict[str, tuple[float, float]] = {}   # symbol → (c_low, c_high)
-    for sym in symbols:
-        try:
-            t = _gateio_ticker(sym)
-            if t:
-                prices[sym] = float(t["lastPrice"])
-        except Exception as _exc:
-            logger.warning("check_demo_positions suppressed error: %s", _exc)
-            pass
+
+    # ── Price lookup: use the shared 10-second batch cache ───────────────────
+    # _refresh_price_cache() fetches all tickers in one API call every 10 s.
+    # Reading from it here is O(1) per symbol and avoids N sequential HTTP calls
+    # (previously the main cause of check_demo_positions taking 30+ seconds and
+    # being skipped by APScheduler on consecutive ticks).
+    with _price_cache_lock:
+        _snap = dict(_price_cache)
+        _cache_age = time.time() - _price_cache_ts
+
+    if _cache_age < 30.0:
+        for sym in symbols:
+            p = _snap.get(sym)
+            if p:
+                prices[sym] = p
+    else:
+        # Fallback: individual calls when cache is stale (e.g. after restart
+        # before the first _refresh_price_cache run).
+        for sym in symbols:
+            try:
+                t = _gateio_ticker(sym)
+                if t:
+                    prices[sym] = float(t["lastPrice"])
+            except Exception as _exc:
+                logger.warning("check_demo_positions suppressed error: %s", _exc)
+
+    # ── Wick check: 1-minute candle for positions close to a level (≤2%) ────
+    # Only fetch candles for symbols where the current price is within 2% of
+    # SL or TP — keeps API calls near-zero in normal conditions.
+    near_level_syms: set[str] = set()
+    for _rid, _rsym, _rdir, _rentry, _rsl, _rtp in rows:
+        p = prices.get(_rsym)
+        if p is None or _rsl <= 0 or _rtp <= 0:
+            continue
+        if abs(p - _rsl) / _rsl * 100 < 2.0 or abs(p - _rtp) / _rtp * 100 < 2.0:
+            near_level_syms.add(_rsym)
+    for sym in near_level_syms:
         try:
             _c = _gateio_klines(sym, "1m", 2)
             if len(_c) >= 2:
@@ -2266,7 +2294,6 @@ def check_demo_positions() -> None:
                 candles_1m[sym] = (float(_lc[3]), float(_lc[2]))   # (low, high)
         except Exception as _exc:
             logger.warning("check_demo_positions suppressed error: %s", _exc)
-            pass
 
     now_ts = int(time.time())
     for row_id, symbol, direction, entry, sl, tp in rows:
@@ -9699,7 +9726,12 @@ def run_checks():
 # (SQLite) so monitors survive a bot restart.
 # ---------------------------------------------------------------------------
 
-MONITOR_POLL_INTERVAL = 45          # seconds between price polls
+MONITOR_POLL_INTERVAL = 10          # seconds between price polls (was 45; reduced 2026-08-14
+                                     # after switching to shared batch price cache — each poll
+                                     # is now a dict lookup, not an HTTP call)
+MONITOR_FIX_SINCE     = 1786742759  # unix ts of monitoring overhaul (2026-08-14):
+                                     # batch ticker cache + 45→10 s poll; use this to split
+                                     # shadow strategy stats before/after for 26 Aug & 3 Sep.
 MONITOR_TIMEOUT_HOURS = 4           # hours until forced timeout (SHORT scalp fallback)
 LONG_HOLD_TIMEOUT_HOURS = 48        # LONG hold window — backtest: TP hits mostly at 1d–3d
 MONITOR_SLIPPAGE_PCT  = 5.0         # re-verify if price moves >5 % in one tick
@@ -9707,19 +9739,63 @@ MONITOR_SLIPPAGE_PCT  = 5.0         # re-verify if price moves >5 % in one tick
 _active_monitors: dict[int, "PositionMonitor"] = {}
 _monitors_lock = threading.Lock()
 
-# In-memory price cache — updated every check cycle from the tickers snapshot.
-# Used by api_positions() so it never makes individual Binance calls per position.
+# In-memory price cache — refreshed every 10 s by _refresh_price_cache() via APScheduler
+# (one GET /tickers call covers all symbols).  PositionMonitor threads and
+# check_demo_positions use this cache for O(1) lookups instead of per-symbol HTTP calls.
 _price_cache: dict[str, float] = {}
 _price_cache_lock = threading.Lock()
 _price_cache_ts: float = 0.0   # unix timestamp of last update
+_PRICE_CACHE_MAX_AGE = 20.0    # seconds; fall back to live fetch if older
+
+
+def _refresh_price_cache() -> None:
+    """Fetch ALL Gate.io Futures tickers in one HTTP call and update the shared price cache.
+
+    Called by APScheduler every 10 s.  A single request replaces N individual per-symbol
+    calls from PositionMonitor threads and check_demo_positions, eliminating the main
+    source of rate-limit pressure and monitoring lag.
+    """
+    try:
+        resp = _gateio_get("/tickers", timeout=10)
+        all_tickers = resp.json()
+        new_prices: dict[str, float] = {}
+        for t in all_tickers:
+            contract = t.get("contract", "")   # Gate.io format: "ONE_USDT"
+            last_str = t.get("last", "")
+            if not contract or not last_str:
+                continue
+            try:
+                sym = contract.replace("_", "")  # ONE_USDT → ONEUSDT
+                new_prices[sym] = float(last_str)
+            except (ValueError, TypeError):
+                pass
+        if new_prices:
+            with _price_cache_lock:
+                _price_cache.clear()
+                _price_cache.update(new_prices)
+                _price_cache_ts = time.time()
+            logger.debug("_refresh_price_cache: %d prices updated", len(new_prices))
+    except Exception as exc:
+        logger.warning("_refresh_price_cache failed: %s", exc)
 
 
 def _get_current_price(symbol: str) -> float | None:
-    """Fetch the latest price from Gate.io Futures.
+    """Return the latest futures price for symbol.
 
-    Falls back to stripping a trailing 'B' before 'USDT' for symbols that were
-    originally opened on Binance (e.g. KORUBUSDT → KORU_USDT on Gate.io).
+    Fast path: shared price cache refreshed every 10 s by _refresh_price_cache().
+    Slow path (cache stale or symbol missing): individual Gate.io API call.
+
+    Falls back to stripping a trailing 'B' before 'USDT' for symbols originally
+    opened on Binance (e.g. KORUBUSDT → KORU_USDT on Gate.io).
     """
+    # Fast path — O(1) dict lookup if cache is fresh
+    with _price_cache_lock:
+        cached = _price_cache.get(symbol)
+        age = time.time() - _price_cache_ts
+    if cached and age < _PRICE_CACHE_MAX_AGE:
+        return cached
+
+    # Slow path — individual API call (cache cold after restart, or symbol absent)
     def _try(sym: str) -> float | None:
         try:
             resp = _gateio_get("/tickers", params={"contract": _to_gate(sym)}, timeout=6)
@@ -12753,7 +12829,11 @@ scheduler.add_job(
     backup_alerts_db, "interval", hours=1, id="alerts_db_backup",
 )
 scheduler.add_job(
-    check_demo_positions, "interval", seconds=120, id="demo_check",
+    check_demo_positions, "interval", seconds=30, id="demo_check",
+)
+scheduler.add_job(
+    _refresh_price_cache, "interval", seconds=10, id="price_cache_refresh",
+    next_run_time=__import__("datetime").datetime.utcnow(),
 )
 scheduler.add_job(
     check_liquidity_orders, "interval", seconds=60, id="liquidity_check",
