@@ -3391,26 +3391,13 @@ def _count_up_in_window(closes: list[float], n: int = 6) -> int:
 
 
 def _shadow_notif_allowed(notif_key: str) -> bool:
-    """Return True (and increment today's counter) when a shadow Telegram
-    notification is within the daily limit for *notif_key*.
+    """Always returns True — daily cap removed (was reset on every restart anyway).
 
-    Keys and limits are configured in SHADOW_NOTIF_LIMITS. Returns False
-    immediately when the key has no entry (limit=0) or the daily cap is full.
-    Thread-safe via state_lock.
+    The notif_key argument is kept for API compatibility but no longer checked
+    against any limit. All shadow Telegram notifications are sent unconditionally,
+    subject only to the global silenced flag and per-symbol cooldowns.
     """
-    limit = SHADOW_NOTIF_LIMITS.get(notif_key, 0)
-    if limit == 0:
-        return False
-    today = time.strftime("%Y-%m-%d")
-    with state_lock:
-        entry = state["shadow_notif_today"].get(notif_key)
-        if entry is None or entry["date"] != today:
-            entry = {"date": today, "count": 0}
-            state["shadow_notif_today"][notif_key] = entry
-        if entry["count"] >= limit:
-            return False
-        entry["count"] += 1
-        return True
+    return True
 
 
 def _trend_warning_line(symbol: str, recommendation: str) -> str:
@@ -4813,20 +4800,12 @@ EMA_CROSS_ATR_SL_MULT   = 1.0    # SL = 1.0 × 4h-ATR
 EMA_CROSS_ATR_TP_MULT   = 2.0    # TP = 2.0 × SL dist  (R:R 2:1)
 EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 
-# --- Shadow signal Telegram notification daily limits ---
-# Each key maps an alert_type (or "confluence_cap") to the max notifications per day.
-# 0 = don't send.  Designed to sum to ~20 signals/day in realistic steady-state.
-SHADOW_NOTIF_LIMITS: dict[str, int] = {
-    "bb_squeeze":      10,  # 8h cooldown/symbol; burst on first deploy — hard cap
-    "ema_cross":       10,  # 4h + gap filter → rare; allow up to 10
-    "pump_24h_fade":   8,   # ~5/day natural rate
-    "vwap_reversion":  8,   # ~1/day → allow all
-    "liq_reversal":    8,   # rarely fires → allow all
-    "confluence_cap":  8,   # cap-blocked confluence (прошли всё, не хватило слота)
-    "confluence":      4,   # liq_veto / pump_filter vetoed confluence
-    "overheated_24h":  4,   # liq_veto / ai_veto for overheated
-    "oversold_24h":    4,   # liq_veto for oversold
-}
+# Shadow signal Telegram notifications — no daily cap.
+# The previous SHADOW_NOTIF_LIMITS dict was removed because the counters lived in
+# memory and reset on every bot restart, making the cap ineffective in practice.
+# All shadow signals now send a Telegram notification unconditionally (subject only
+# to the global silenced flag and per-symbol cooldowns already on each signal type).
+SHADOW_NOTIF_LIMITS: dict[str, int] = {}  # kept for reference; no longer enforced
 
 # --- Whale LSR shift (top traders' L/S ratio flips between cycles) ---
 LSR_SHIFT_THRESHOLD  = 0.38    # min |lsr_new - lsr_prev| to count as a flip
