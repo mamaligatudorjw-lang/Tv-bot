@@ -4770,12 +4770,13 @@ STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_clo
 # Filters out "one-spike pamps/dumps" from the 24h magnitude signals.
 # A coin that spiked +100% in one candle looks identical to one that climbed
 # steadily for 12 hours in the 24h % stat — but the risk profile is very different.
-# Require ≥ OVERHEATED_STREAK_MIN_UP of the last OVERHEATED_STREAK_WINDOW completed
-# hourly candles to have closed in the signal direction.  Threshold set upfront
+# Require ≥ OVERHEATED_DURATION_MIN_UP of the last OVERHEATED_DURATION_WINDOW completed
+# hourly candles to have closed in the signal direction.  Uses _count_up_in_window
+# (X-of-Y, gaps allowed) — NOT a consecutive streak.  Threshold set upfront
 # (not tuned on backtest) per the EMA-lesson: avoid fitting to a handful of examples.
-OVERHEATED_STREAK_WINDOW   = 12   # look at last 12 completed 1h candles
-OVERHEATED_STREAK_MIN_UP   = 8    # min up-closes required for LONG (overheated)
-OVERHEATED_STREAK_MIN_DOWN = 8    # min down-closes required for LONG bounce (oversold)
+OVERHEATED_DURATION_WINDOW   = 12   # look at last 12 completed 1h candles
+OVERHEATED_DURATION_MIN_UP   = 8    # min up-closes required for LONG (overheated)
+OVERHEATED_DURATION_MIN_DOWN = 8    # min down-closes required for LONG bounce (oversold)
 
 # --- VWAP Reversion shadow (mean-reversion complement to Серия 1ч) ---
 # Opposite direction from streak_1h: upstreak → SHORT to VWAP, downstreak → LONG to VWAP.
@@ -6969,17 +6970,17 @@ def check_overheated_oversold(
                 continue
 
             # Duration filter: require sustained hourly uptrend, not a single-candle spike.
-            # Fetch OVERHEATED_STREAK_WINDOW+2 bars (drop the last still-forming candle).
-            _oh_1h_raw    = _fetch_1h_closes(symbol, limit=OVERHEATED_STREAK_WINDOW + 2)
+            # Uses _count_up_in_window (X-of-Y, gaps allowed — NOT consecutive streak).
+            _oh_1h_raw    = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
             _oh_up_count  = 0
-            if _oh_1h_raw and len(_oh_1h_raw) >= OVERHEATED_STREAK_WINDOW + 1:
+            if _oh_1h_raw and len(_oh_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
                 _oh_up_count = _count_up_in_window(
-                    _oh_1h_raw[:-1], OVERHEATED_STREAK_WINDOW
+                    _oh_1h_raw[:-1], OVERHEATED_DURATION_WINDOW
                 )
-                if _oh_up_count < OVERHEATED_STREAK_MIN_UP:
+                if _oh_up_count < OVERHEATED_DURATION_MIN_UP:
                     logger.debug(
                         "Overheated LONG suppressed by duration filter: %s up=%d/%d",
-                        symbol, _oh_up_count, OVERHEATED_STREAK_WINDOW,
+                        symbol, _oh_up_count, OVERHEATED_DURATION_WINDOW,
                     )
                     continue
 
@@ -7015,7 +7016,7 @@ def check_overheated_oversold(
                     f"<code>{symbol}</code>\n"
                     f"📈 24ч: <b>+{pct24:.1f}%</b> (порог <b>+{oh_threshold:.1f}%</b>)\n"
                     f"🔥 RSI: <b>{rsi:.1f}</b>\n"
-                    f"⏱ Устойчивость: <b>{_oh_up_count}</b> из {OVERHEATED_STREAK_WINDOW} часовых свечей закрылись вверх\n"
+                    f"⏱ Устойчивость: <b>{_oh_up_count}</b> из {OVERHEATED_DURATION_WINDOW} часовых свечей закрылись вверх\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
@@ -7100,20 +7101,21 @@ def check_overheated_oversold(
                 last = state["last_oversold_alerted"].get(symbol, 0)
             if now - last >= OVERSOLD_COOLDOWN:
                 # Duration filter: confirm sustained selling pressure (not a one-spike dump).
-                # Mirrors the overheated_24h filter: require ≥ OVERHEATED_STREAK_MIN_DOWN
-                # of the last OVERHEATED_STREAK_WINDOW hourly candles closed DOWN.
-                _os_1h_raw     = _fetch_1h_closes(symbol, limit=OVERHEATED_STREAK_WINDOW + 2)
+                # Mirrors the overheated_24h filter: require ≥ OVERHEATED_DURATION_MIN_DOWN
+                # of the last OVERHEATED_DURATION_WINDOW hourly candles closed DOWN.
+                # X-of-Y count (gaps allowed — NOT consecutive streak).
+                _os_1h_raw     = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
                 _os_down_count = 0
-                if _os_1h_raw and len(_os_1h_raw) >= OVERHEATED_STREAK_WINDOW + 1:
+                if _os_1h_raw and len(_os_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
                     _os_1h_window  = _os_1h_raw[:-1]   # drop still-forming candle
                     _os_down_count = sum(
                         1 for i in range(1, len(_os_1h_window))
                         if _os_1h_window[i] < _os_1h_window[i - 1]
                     )
-                    if _os_down_count < OVERHEATED_STREAK_MIN_DOWN:
+                    if _os_down_count < OVERHEATED_DURATION_MIN_DOWN:
                         logger.debug(
                             "Oversold LONG suppressed by duration filter: %s down=%d/%d",
-                            symbol, _os_down_count, OVERHEATED_STREAK_WINDOW,
+                            symbol, _os_down_count, OVERHEATED_DURATION_WINDOW,
                         )
                         continue
 
@@ -7187,7 +7189,7 @@ def check_overheated_oversold(
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
                     f"🟢 RSI: <b>{rsi:.1f}</b> — зона перепроданности\n"
-                    f"⏱ Давление: <b>{_os_down_count}</b> из {OVERHEATED_STREAK_WINDOW} часовых свечей закрылись вниз\n"
+                    f"⏱ Давление: <b>{_os_down_count}</b> из {OVERHEATED_DURATION_WINDOW} часовых свечей закрылись вниз\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
