@@ -1599,6 +1599,8 @@ def _liquidity_reversal_shadow(symbol: str, direction: str, price: float,
 # cooldown per watchlist entry so a prolonged reversal doesn't spam
 _watchlist_last_trigger: dict[int, int] = {}   # watchlist_id → last_triggered_ts
 _watchlist_lock = threading.Lock()
+_ew_last_trigger: dict[int, int] = {}          # entry_watch_id → last_confirmed_ts
+_ew_lock = threading.Lock()
 
 
 def check_watchlist() -> None:
@@ -1733,6 +1735,223 @@ def check_watchlist() -> None:
                 )
         except Exception as sym_exc:
             logger.warning("check_watchlist %s wl_id=%d: %s", symbol, wl_id, sym_exc)
+
+
+def check_entry_watch() -> None:
+    """Every 300 s: check entry_watch rows for optimal entry confirmation.
+
+    Three mutually-exclusive outcomes per active row (checked in priority order):
+      - sl_hit:     price touched SL → cancel, no further watching.
+      - pullback:   price pulled back to or past entry level, candle closed in
+                    signal direction, volume elevated → confirm with better price.
+      - immediate:  price already running in signal direction (first check only,
+                    no pullback) → confirm original entry price immediately.
+    All outcomes are logged to entry_watch_log for future win-rate analysis.
+    """
+    now = int(time.time())
+    try:
+        with _db_lock:
+            conn = _get_db()
+            expired = conn.execute(
+                "UPDATE entry_watch SET status='expired' "
+                "WHERE status='active' AND expires_ts <= ?",
+                (now,)
+            ).rowcount
+            if expired:
+                conn.commit()
+                logger.info("EntryWatch: auto-expired %d entries", expired)
+            rows = conn.execute(
+                "SELECT id, source_alert_id, symbol, direction, alert_type, "
+                "entry_price, sl_price, first_check_done "
+                "FROM entry_watch WHERE status='active' AND expires_ts > ?",
+                (now,)
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("check_entry_watch DB fetch: %s", exc)
+        return
+
+    for ew_id, alert_id, symbol, direction, alert_type, entry_price, sl_price, first_done in rows:
+        try:
+            with _ew_lock:
+                last_trig = _ew_last_trigger.get(ew_id, 0)
+            if now - last_trig < 4 * 3600:
+                continue
+
+            candles = _gateio_klines(symbol, "15m", 15)
+            if len(candles) < 12:
+                continue
+
+            completed  = candles[:-1]       # drop still-forming candle
+            last_c     = completed[-1]
+            last_open  = float(last_c[1])
+            last_high  = float(last_c[2])
+            last_low   = float(last_c[3])
+            last_close = float(last_c[4])
+            last_vol   = float(last_c[5])
+            avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
+
+            dir_emoji = "📈" if direction == "LONG" else "📉"
+
+            # ── Priority 1: SL hit ─────────────────────────────────────────
+            sl_hit = (
+                (direction == "LONG"  and last_low  <= sl_price) or
+                (direction == "SHORT" and last_high >= sl_price)
+            )
+            if sl_hit:
+                with _db_lock:
+                    _c = _get_db()
+                    _c.execute(
+                        "UPDATE entry_watch SET status='cancelled_sl' WHERE id=?",
+                        (ew_id,)
+                    )
+                    _c.execute(
+                        "INSERT INTO entry_watch_log "
+                        "(entry_watch_id, source_alert_id, symbol, checked_ts, "
+                        " trigger_price, outcome, confirmed_price, "
+                        " cond_direction, cond_volume, cond_no_pullback) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (ew_id, alert_id, symbol, now, last_close,
+                         "sl_hit", None, 0, 0, 0),
+                    )
+                    _c.commit()
+                send_telegram(
+                    f"🚫 <b>Точка входа отменена</b> — цена достигла SL {dir_emoji}\n"
+                    f"<code>{symbol}</code> {direction} · {alert_type}\n"
+                    f"🛑 SL: <b>${sl_price:,.6g}</b>  │  Цена: <b>${last_close:,.6g}</b>"
+                )
+                logger.info(
+                    "EntryWatch SL-cancelled: %s %s ew_id=%d sl=%.6g price=%.6g",
+                    symbol, direction, ew_id, sl_price, last_close,
+                )
+                continue
+
+            # ── Priority 2: pullback confirm ───────────────────────────────
+            # Candle low (LONG) or high (SHORT) touched or exceeded entry_price,
+            # meaning a pullback brought price back to entry zone or better.
+            # Then the candle closed in the signal direction with elevated volume
+            # → signal confirmed with an improved entry price.
+            if direction == "LONG":
+                cond_touch   = last_low  <= entry_price
+                better_price = last_low
+            else:
+                cond_touch   = last_high >= entry_price
+                better_price = last_high
+
+            cond_candle = (
+                (direction == "LONG"  and last_close > last_open) or
+                (direction == "SHORT" and last_close < last_open)
+            )
+            cond_volume = avg_vol_10 > 0 and last_vol >= avg_vol_10 * LIQUIDITY_REVERSAL_VOL_MULT
+
+            # Always log any partial hit for analysis
+            any_hit = cond_touch or cond_candle or cond_volume
+            if any_hit:
+                try:
+                    with _db_lock:
+                        _c = _get_db()
+                        _c.execute(
+                            "INSERT INTO entry_watch_log "
+                            "(entry_watch_id, source_alert_id, symbol, checked_ts, "
+                            " trigger_price, outcome, confirmed_price, "
+                            " cond_direction, cond_volume, cond_no_pullback) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (ew_id, alert_id, symbol, now, last_close,
+                             "partial", None,
+                             1 if cond_candle else 0,
+                             1 if cond_volume else 0,
+                             0),
+                        )
+                        _c.commit()
+                except Exception as log_exc:
+                    logger.warning("entry_watch_log partial %s: %s", symbol, log_exc)
+
+            if cond_touch and cond_candle and cond_volume:
+                with _db_lock:
+                    _c = _get_db()
+                    _c.execute(
+                        "UPDATE entry_watch SET status='confirmed_pullback' WHERE id=?",
+                        (ew_id,)
+                    )
+                    _c.execute(
+                        "INSERT INTO entry_watch_log "
+                        "(entry_watch_id, source_alert_id, symbol, checked_ts, "
+                        " trigger_price, outcome, confirmed_price, "
+                        " cond_direction, cond_volume, cond_no_pullback) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (ew_id, alert_id, symbol, now, last_close,
+                         "pullback", better_price, 1, 1, 0),
+                    )
+                    _c.commit()
+                with _ew_lock:
+                    _ew_last_trigger[ew_id] = now
+                improvement = abs(better_price - entry_price) / entry_price * 100
+                send_telegram(
+                    f"🎯 <b>Лучшая точка входа найдена</b> {dir_emoji}\n"
+                    f"<code>{symbol}</code> · {alert_type}\n"
+                    f"📍 Улучшенная цена: <b>${better_price:,.6g}</b> "
+                    f"({'−' if direction == 'LONG' else '+'}{improvement:.2f}% к исходной)\n"
+                    f"📌 Исходная цена: ${entry_price:,.6g}\n"
+                    f"✅ Свеча закрылась в направлении сигнала\n"
+                    f"✅ Объём: ×{last_vol / avg_vol_10:.1f} от среднего"
+                )
+                logger.info(
+                    "EntryWatch pullback confirmed: %s %s ew_id=%d "
+                    "entry=%.6g better=%.6g vol_ratio=%.1f",
+                    symbol, direction, ew_id, entry_price, better_price,
+                    last_vol / avg_vol_10 if avg_vol_10 > 0 else 0,
+                )
+                continue
+
+            # ── Priority 3: immediate confirm (first check only) ───────────
+            # Price is already running in signal direction with no pullback yet.
+            # Notify to enter at the original price — don't wait indefinitely.
+            if not first_done:
+                cond_running = (
+                    (direction == "LONG"  and last_close > entry_price) or
+                    (direction == "SHORT" and last_close < entry_price)
+                )
+                if cond_running:
+                    with _db_lock:
+                        _c = _get_db()
+                        _c.execute(
+                            "UPDATE entry_watch SET status='confirmed_immediate' WHERE id=?",
+                            (ew_id,)
+                        )
+                        _c.execute(
+                            "INSERT INTO entry_watch_log "
+                            "(entry_watch_id, source_alert_id, symbol, checked_ts, "
+                            " trigger_price, outcome, confirmed_price, "
+                            " cond_direction, cond_volume, cond_no_pullback) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (ew_id, alert_id, symbol, now, last_close,
+                             "immediate", entry_price, 1, 0, 1),
+                        )
+                        _c.commit()
+                    with _ew_lock:
+                        _ew_last_trigger[ew_id] = now
+                    send_telegram(
+                        f"🎯 <b>Цена уже идёт по сигналу</b> {dir_emoji}\n"
+                        f"<code>{symbol}</code> · {alert_type}\n"
+                        f"💲 Входи по исходной цене: <b>${entry_price:,.6g}</b>\n"
+                        f"📊 Текущая: ${last_close:,.6g}"
+                    )
+                    logger.info(
+                        "EntryWatch immediate confirmed: %s %s ew_id=%d "
+                        "entry=%.6g current=%.6g",
+                        symbol, direction, ew_id, entry_price, last_close,
+                    )
+                else:
+                    # Price hasn't moved yet — mark first check done, keep watching
+                    with _db_lock:
+                        _c = _get_db()
+                        _c.execute(
+                            "UPDATE entry_watch SET first_check_done=1 WHERE id=?",
+                            (ew_id,)
+                        )
+                        _c.commit()
+
+        except Exception as sym_exc:
+            logger.warning("check_entry_watch %s ew_id=%d: %s", symbol, ew_id, sym_exc)
 
 
 def check_liquidity_orders() -> None:
@@ -3943,6 +4162,53 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_wl_triggers_wl "
             "ON watchlist_triggers(watchlist_id)"
         )
+        # ── Entry confirmation watch ─────────────────────────────────────
+        # One row per real LONG/SHORT signal the user asked to watch for an
+        # optimal entry point (via inline button on the signal message).
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS entry_watch (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_alert_id  INTEGER NOT NULL,
+                symbol           TEXT    NOT NULL,
+                direction        TEXT    NOT NULL,
+                alert_type       TEXT    NOT NULL,
+                entry_price      REAL    NOT NULL,
+                sl_price         REAL    NOT NULL,
+                added_ts         INTEGER NOT NULL,
+                expires_ts       INTEGER NOT NULL,
+                first_check_done INTEGER NOT NULL DEFAULT 0,
+                status           TEXT    NOT NULL DEFAULT 'active'
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ew_active "
+            "ON entry_watch(status, expires_ts)"
+        )
+        # One active watch per alert — prevents double-tapping the button.
+        _db_conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_ew_alert "
+            "ON entry_watch(source_alert_id) WHERE status='active'"
+        )
+        # Outcome log for future win-rate analysis.
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS entry_watch_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_watch_id   INTEGER NOT NULL,
+                source_alert_id  INTEGER NOT NULL,
+                symbol           TEXT    NOT NULL,
+                checked_ts       INTEGER NOT NULL,
+                trigger_price    REAL    NOT NULL,
+                outcome          TEXT    NOT NULL,
+                confirmed_price  REAL,
+                cond_direction   INTEGER NOT NULL DEFAULT 0,
+                cond_volume      INTEGER NOT NULL DEFAULT 0,
+                cond_no_pullback INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ewl_ew "
+            "ON entry_watch_log(entry_watch_id)"
+        )
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -4560,24 +4826,43 @@ def _coin_trend_label(symbol: str) -> str:
     return f"\n📊 Тренд монеты (вчера): {arrow} {sign}{pct:.1f}%"
 
 
-def _build_alert_buttons(alert_id: int, symbol: str, alert_type: str) -> dict:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "↑ сработал", "callback_data": f"fb:{alert_id}:1"},
-                {"text": "↓ не сработал", "callback_data": f"fb:{alert_id}:-1"},
-            ],
-            [
-                {"text": "🤖 Спросить AI", "callback_data": f"ai_ask:{alert_id}"},
-                {"text": "📈 Лонг", "callback_data": f"ap:{symbol}:LONG"},
-                {"text": "📉 Шорт", "callback_data": f"ap:{symbol}:SHORT"},
-            ],
-            [
-                {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
-                {"text": "Скрыть тип", "callback_data": f"ht:{alert_type}"},
-            ],
-        ]
-    }
+def _build_alert_buttons(
+    alert_id: int,
+    symbol: str,
+    alert_type: str,
+    direction: str | None = None,
+    entry_price: float | None = None,
+    sl_price: float | None = None,
+) -> dict:
+    rows: list[list[dict]] = [
+        [
+            {"text": "↑ сработал", "callback_data": f"fb:{alert_id}:1"},
+            {"text": "↓ не сработал", "callback_data": f"fb:{alert_id}:-1"},
+        ],
+        [
+            {"text": "🤖 Спросить AI", "callback_data": f"ai_ask:{alert_id}"},
+            {"text": "📈 Лонг", "callback_data": f"ap:{symbol}:LONG"},
+            {"text": "📉 Шорт", "callback_data": f"ap:{symbol}:SHORT"},
+        ],
+        [
+            {"text": "Скрыть пару", "callback_data": f"hs:{symbol}"},
+            {"text": "Скрыть тип", "callback_data": f"ht:{alert_type}"},
+        ],
+    ]
+    # Entry-confirmation button — only for LONG/SHORT signals with a valid SL.
+    # Format: ew:{alert_id}:{symbol}:{direction}:{entry_price:.6g}:{sl_price:.6g}:{alert_type}
+    # All fields embedded in callback_data so the handler works across dev/deployed DB split.
+    if direction and entry_price and sl_price and entry_price > 0 and sl_price > 0:
+        _atype_cb = (alert_type or "?").replace(":", "_")
+        _ew_cb = (
+            f"ew:{alert_id}:{symbol}:{direction}"
+            f":{entry_price:.6g}:{sl_price:.6g}:{_atype_cb}"
+        )
+        if len(_ew_cb.encode()) <= 64:
+            rows.insert(0, [
+                {"text": "🎯 Подтвердить точку входа", "callback_data": _ew_cb}
+            ])
+    return {"inline_keyboard": rows}
 
 
 def _build_voted_buttons(alert_id: int, symbol: str, vote: int) -> dict:
@@ -4676,6 +4961,7 @@ def send_alert_with_log(
     pct24: float | None = None,
     factor_funding_pts: int = 0,
     factor_lsr_pts: int = 0,
+    sl_price: float | None = None,
 ) -> tuple[bool, int | None]:
     """Insert into alerts (if price valid), then send Telegram with inline
     buttons referencing the new id. Honors hide-type/hide-symbol prefs,
@@ -4786,7 +5072,24 @@ def send_alert_with_log(
         ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
         return (ok, None)
 
-    markup = _build_alert_buttons(alert_id, symbol, alert_type)
+    # Derive SL for the entry-confirmation button when not supplied by caller.
+    # Uses the same ATR-based formula as demo positions so the SL is consistent
+    # with what was shown in the signal message body.
+    if sl_price is None and price and price > 0 and recommendation in ("LONG", "SHORT"):
+        try:
+            with state_lock:
+                _ew_atr = state["atr_4h"].get(symbol)
+            _sl_derived, _ = _compute_demo_sl_tp(recommendation, price, _ew_atr)
+            sl_price = _sl_derived
+        except Exception:
+            pass
+
+    markup = _build_alert_buttons(
+        alert_id, symbol, alert_type,
+        direction=recommendation,
+        entry_price=price,
+        sl_price=sl_price,
+    )
     # Regime label: append market context to every outgoing alert.
     _regime_send, _regime_label = get_regime_label(alert_type, recommendation)
     if not _regime_send:
@@ -5055,6 +5358,62 @@ def handle_callback_query(cb: dict) -> None:
                         )
             except Exception as w_exc:
                 logger.error("watch callback failed: %s", w_exc)
+                if chat_id:
+                    _telegram_send(chat_id, "❌ Ошибка базы данных")
+        elif kind == "ew":
+            # Format: ew:{alert_id}:{symbol}:{direction}:{entry_price}:{sl_price}:{alert_type}
+            # All fields embedded in callback_data so this handler works regardless
+            # of which bot instance (dev/deployed) processes it.
+            parts_ew = rest.split(":", 5)
+            if len(parts_ew) != 6:
+                _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
+                return
+            _ew_aid_str, _ew_sym, _ew_dir, _ew_entry_str, _ew_sl_str, _ew_atype = parts_ew
+            try:
+                _ew_aid   = int(_ew_aid_str)
+                _ew_entry = float(_ew_entry_str)
+                _ew_sl    = float(_ew_sl_str)
+            except ValueError:
+                _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
+                return
+            _telegram_answer_callback(cb_id, "🎯 Слежу за точкой входа 48ч")
+            now_ew = int(time.time())
+            try:
+                with _db_lock:
+                    db = _get_db()
+                    # INSERT OR IGNORE + rowcount — unique index ux_ew_alert prevents
+                    # double-tapping the button on the same alert at the DB level.
+                    _ins_ew = db.execute(
+                        "INSERT OR IGNORE INTO entry_watch "
+                        "(source_alert_id, symbol, direction, alert_type, "
+                        " entry_price, sl_price, added_ts, expires_ts) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (_ew_aid, _ew_sym, _ew_dir, _ew_atype or "unknown",
+                         _ew_entry, _ew_sl, now_ew, now_ew + 48 * 3600),
+                    )
+                    db.commit()
+                    _ew_inserted = _ins_ew.rowcount > 0
+                if _ew_inserted:
+                    logger.info(
+                        "EntryWatch added: %s %s alert_id=%d", _ew_sym, _ew_dir, _ew_aid
+                    )
+                    if chat_id:
+                        _telegram_send(
+                            chat_id,
+                            f"🎯 <b>Наблюдение за точкой входа добавлено</b>\n"
+                            f"<code>{_ew_sym}</code> {_ew_dir} ({_ew_atype or '?'})\n"
+                            f"📍 Цена входа: <b>${_ew_entry:,.6g}</b>\n"
+                            f"🛑 SL: <b>${_ew_sl:,.6g}</b>\n"
+                            f"Жду оптимальный момент — авто-удаление через 48ч",
+                        )
+                else:
+                    if chat_id:
+                        _telegram_send(
+                            chat_id,
+                            f"🎯 <code>{_ew_sym}</code> {_ew_dir} уже в наблюдении за входом",
+                        )
+            except Exception as ew_exc:
+                logger.error("ew callback failed: %s", ew_exc)
                 if chat_id:
                     _telegram_send(chat_id, "❌ Ошибка базы данных")
         elif kind == "noop":
@@ -12002,6 +12361,9 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_watchlist, "interval", seconds=300, id="watchlist_check",
+)
+scheduler.add_job(
+    check_entry_watch, "interval", seconds=300, id="entry_watch_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
