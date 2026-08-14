@@ -1407,12 +1407,23 @@ def _demo_open_position(
                     # Max observed length ≈ 54 bytes; Telegram limit is 64 bytes.
                     _atype_cb = (alert_type or "?").replace(":", "_")  # colon is delimiter
                     _watch_cb  = f"watch:{_new_demo_id}:{symbol}:{direction}:{entry_price:.8g}:{_atype_cb}"
-                    _watch_markup = {
-                        "inline_keyboard": [[
-                            {"text": "🔔 Уведомить о развороте",
-                             "callback_data": _watch_cb}
-                        ]]
-                    }
+                    # Entry-confirmation button: negative demo_id as source_alert_id
+                    # (convention: negative = demo position, positive = real alert).
+                    _ew_src = -_new_demo_id
+                    _ew_shadow_cb = (
+                        f"ew:{_ew_src}:{symbol}:{direction}"
+                        f":{entry_price:.6g}:{sl_price:.6g}:{_atype_cb}"
+                    )
+                    _shadow_rows: list[list[dict]] = [
+                        [{"text": "🔔 Уведомить о развороте",
+                          "callback_data": _watch_cb}],
+                    ]
+                    if len(_ew_shadow_cb.encode()) <= 64:
+                        _shadow_rows.append([
+                            {"text": "🎯 Подтвердить точку входа",
+                             "callback_data": _ew_shadow_cb}
+                        ])
+                    _watch_markup = {"inline_keyboard": _shadow_rows}
                     _telegram_send(
                         TELEGRAM_CHAT_ID,
                         f"🔬 SHADOW — не реальная позиция\n{notify_body}",
