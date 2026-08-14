@@ -10197,10 +10197,10 @@ def handle_scorestats_command(chat_id: int) -> None:
             def _os_wr_block(label: str, ts_cond: str, ts_val: int) -> list[str]:
                 rows = conn2.execute(f"""
                     SELECT COUNT(*) AS cnt,
-                           ROUND(100.0 * SUM(CASE WHEN dp.pnl_pct > 0 THEN 1 ELSE 0 END)
+                           ROUND(100.0 * SUM(CASE WHEN dp.pnl_usd > 0 THEN 1 ELSE 0 END)
                                  / NULLIF(COUNT(*), 0), 1) AS wr,
-                           ROUND(AVG(dp.pnl_pct), 2) AS avg_pnl,
-                           ROUND(SUM(dp.pnl_pct), 2) AS total_pnl
+                           ROUND(AVG(dp.pnl_usd), 2) AS avg_pnl,
+                           ROUND(SUM(dp.pnl_usd), 2) AS total_pnl
                     FROM demo_positions dp
                     WHERE dp.alert_type = 'oversold_24h'
                       AND dp.is_shadow  = 0
@@ -10215,7 +10215,7 @@ def handle_scorestats_command(chat_id: int) -> None:
                 total_pnl = total_pnl or 0.0
                 e = "✅" if avg_pnl > 0 else "❌"
                 s = "+" if avg_pnl >= 0 else ""
-                return [f"  {e} {label}: n={cnt}  WR={wr:.0f}%  avg={s}{avg_pnl:.2f}%  Σ={s}{total_pnl:.2f}%"]
+                return [f"  {e} {label}: n={cnt}  WR={wr:.0f}%  avg={s}{avg_pnl:.2f}$  Σ={s}{total_pnl:.2f}$"]
             os_lines  = _os_wr_block("до фильтра длительности", "<", OVERSOLD_DURATION_FILTER_TS)
             os_lines += _os_wr_block("после фильтра длительности", ">=", OVERSOLD_DURATION_FILTER_TS)
         lines.append(
