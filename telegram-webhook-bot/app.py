@@ -1373,6 +1373,7 @@ def _demo_open_position(
                  1 if is_shadow else 0, shadow_reason, alert_type,
                  1 if is_top else 0),
             )
+            _new_demo_id = cur.lastrowid  # capture before lock releases
             conn.commit()
             if cur.rowcount == 0:
                 # INSERT was silently blocked by UNIQUE constraint (shouldn't reach here
@@ -1395,7 +1396,20 @@ def _demo_open_position(
                 else (alert_type or "unknown")
             )
             if _shadow_notif_allowed(_notif_key):
-                send_telegram(f"🔬 SHADOW — не реальная позиция\n{notify_body}")
+                with state_lock:
+                    _silenced = state["silenced"]
+                if not _silenced:
+                    _watch_markup = {
+                        "inline_keyboard": [[
+                            {"text": "🔔 Уведомить о развороте",
+                             "callback_data": f"watch:{_new_demo_id}"}
+                        ]]
+                    }
+                    _telegram_send(
+                        TELEGRAM_CHAT_ID,
+                        f"🔬 SHADOW — не реальная позиция\n{notify_body}",
+                        reply_markup=_watch_markup,
+                    )
     except Exception as exc:
         logger.warning("_demo_open_position failed for %s: %s", symbol, exc)
 
@@ -1572,6 +1586,145 @@ def _liquidity_reversal_shadow(symbol: str, direction: str, price: float,
 
     except Exception as exc:
         logger.warning("_liquidity_reversal_shadow %s: %s", symbol, exc)
+
+
+# cooldown per watchlist entry so a prolonged reversal doesn't spam
+_watchlist_last_trigger: dict[int, int] = {}   # watchlist_id → last_triggered_ts
+_watchlist_lock = threading.Lock()
+
+
+def check_watchlist() -> None:
+    """Every 60 s: check active watchlist entries for reversal confirmation.
+
+    For each entry the same 3 conditions as liq_reversal are checked on the
+    last completed 15-m candle:
+      1. Candle closed in signal direction (bullish for LONG, bearish for SHORT)
+      2. Candle's low (LONG) or high (SHORT) touched entry_price ±0.5%
+      3. Volume ≥ LIQUIDITY_REVERSAL_VOL_MULT × 10-bar avg
+
+    Every partial hit is always logged to watchlist_triggers for future WR analysis.
+    A full 3/3 hit sends a Telegram notification and marks the entry 'triggered'.
+    Entries older than expires_ts are auto-expired.
+    """
+    now = int(time.time())
+    try:
+        with _db_lock:
+            conn = _get_db()
+            # Expire stale entries first
+            expired = conn.execute(
+                "UPDATE watchlist SET status='expired' "
+                "WHERE status='active' AND expires_ts <= ?",
+                (now,)
+            ).rowcount
+            if expired:
+                conn.commit()
+                logger.info("Watchlist: auto-expired %d entries", expired)
+            rows = conn.execute(
+                "SELECT id, source_demo_id, symbol, direction, alert_type, entry_price "
+                "FROM watchlist WHERE status='active' AND expires_ts > ?",
+                (now,)
+            ).fetchall()
+    except Exception as exc:
+        logger.warning("check_watchlist DB fetch: %s", exc)
+        return
+
+    for wl_id, demo_id, symbol, direction, alert_type, entry_price in rows:
+        try:
+            # Per-entry cooldown: don't re-alert within 4 h of the last trigger
+            with _watchlist_lock:
+                last_trig = _watchlist_last_trigger.get(wl_id, 0)
+            if now - last_trig < 4 * 3600:
+                continue
+
+            candles = _gateio_klines(symbol, "15m", 15)
+            if len(candles) < 12:
+                continue
+
+            completed = candles[:-1]        # drop still-forming candle
+            last_c   = completed[-1]
+            last_open  = float(last_c[1])
+            last_high  = float(last_c[2])
+            last_low   = float(last_c[3])
+            last_close = float(last_c[4])
+            last_vol   = float(last_c[5])
+            avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
+
+            # Condition 1: candle direction matches signal
+            if direction == "LONG":
+                cond_candle = last_close > last_open
+                touch_val   = last_low
+            else:
+                cond_candle = last_close < last_open
+                touch_val   = last_high
+
+            # Condition 2: candle touched entry zone within 0.5%
+            if entry_price and entry_price > 0:
+                touch_pct  = abs(touch_val - entry_price) / entry_price * 100.0
+                cond_touch = touch_pct <= 0.5
+            else:
+                cond_touch = False
+
+            # Condition 3: volume elevated
+            cond_volume = avg_vol_10 > 0 and last_vol >= avg_vol_10 * LIQUIDITY_REVERSAL_VOL_MULT
+
+            any_hit = cond_candle or cond_touch or cond_volume
+            all_hit = cond_candle and cond_touch and cond_volume
+
+            # Always log partial hits for analysis
+            if any_hit:
+                try:
+                    with _db_lock:
+                        _c = _get_db()
+                        _c.execute(
+                            "INSERT INTO watchlist_triggers "
+                            "(watchlist_id, source_demo_id, symbol, triggered_ts, "
+                            " trigger_price, cond_candle, cond_touch, cond_volume) "
+                            "VALUES (?,?,?,?,?,?,?,?)",
+                            (wl_id, demo_id, symbol, now, last_close,
+                             1 if cond_candle else 0,
+                             1 if cond_touch  else 0,
+                             1 if cond_volume else 0),
+                        )
+                        _c.commit()
+                except Exception as log_exc:
+                    logger.warning("watchlist_triggers insert %s: %s", symbol, log_exc)
+
+            if all_hit:
+                # Mark triggered and notify
+                try:
+                    with _db_lock:
+                        _c = _get_db()
+                        _c.execute(
+                            "UPDATE watchlist SET status='triggered' WHERE id=?",
+                            (wl_id,)
+                        )
+                        _c.commit()
+                except Exception as upd_exc:
+                    logger.warning("watchlist mark triggered %s: %s", symbol, upd_exc)
+
+                with _watchlist_lock:
+                    _watchlist_last_trigger[wl_id] = now
+
+                dir_emoji = "📈" if direction == "LONG" else "📉"
+                conds_lines = (
+                    f"{'✅' if cond_candle else '❌'} Свеча закрылась в направлении сигнала\n"
+                    f"{'✅' if cond_touch  else '❌'} Касание зоны входа ±0.5%\n"
+                    f"{'✅' if cond_volume else '❌'} Объём ≥1.5× среднего (10 свечей)"
+                )
+                body = (
+                    f"🔔 <b>Разворот подтверждён</b> {dir_emoji}\n"
+                    f"<code>{symbol}</code> · {alert_type}\n"
+                    f"💲 Цена: <b>${last_close:,.6g}</b>\n"
+                    f"📍 Зона входа: <b>${entry_price:,.6g}</b>\n\n"
+                    f"{conds_lines}"
+                )
+                send_telegram(body)
+                logger.info(
+                    "Watchlist triggered: %s %s wl_id=%d price=%.6g",
+                    symbol, direction, wl_id, last_close,
+                )
+        except Exception as sym_exc:
+            logger.warning("check_watchlist %s wl_id=%d: %s", symbol, wl_id, sym_exc)
 
 
 def check_liquidity_orders() -> None:
@@ -2523,6 +2676,7 @@ def _poll_telegram_commands() -> None:
         "/addpos":   handle_addpos_command,
         "/mypos":    handle_mypos_command,
         "/closepos": handle_closepos_command,
+        "/unwatch":  handle_unwatch_command,
     }
     offset: int | None = None
     logger.info("Telegram command polling started")
@@ -2618,7 +2772,7 @@ def _poll_telegram_commands() -> None:
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
                         # Commands that take args receive the full raw text;
                         # the rest are called with just chat_id (backwards-compat).
-                        takes_args = cmd in ("/trade", "/analyze", "/ai", "/addpos", "/closepos")
+                        takes_args = cmd in ("/trade", "/analyze", "/ai", "/addpos", "/closepos", "/unwatch")
                         def _run(h=handler, cid=chat_id, c=cmd, rt=raw_text, ta=takes_args):
                             try:
                                 if ta:
@@ -3738,6 +3892,43 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_userpos_status "
             "ON user_positions(status)"
         )
+        # ── Reversal watchlist ───────────────────────────────────────────────
+        # One row per shadow-signal the user asked to watch for reversal conf.
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_demo_id INTEGER NOT NULL,
+                symbol         TEXT    NOT NULL,
+                direction      TEXT    NOT NULL,
+                alert_type     TEXT    NOT NULL,
+                entry_price    REAL    NOT NULL,
+                added_ts       INTEGER NOT NULL,
+                expires_ts     INTEGER NOT NULL,
+                status         TEXT    NOT NULL DEFAULT 'active'
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watchlist_active "
+            "ON watchlist(status, expires_ts)"
+        )
+        # Every reversal-confirmation check is logged here for future WR analysis.
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlist_triggers (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                watchlist_id   INTEGER NOT NULL,
+                source_demo_id INTEGER NOT NULL,
+                symbol         TEXT    NOT NULL,
+                triggered_ts   INTEGER NOT NULL,
+                trigger_price  REAL    NOT NULL,
+                cond_candle    INTEGER NOT NULL DEFAULT 0,
+                cond_touch     INTEGER NOT NULL DEFAULT 0,
+                cond_volume    INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_wl_triggers_wl "
+            "ON watchlist_triggers(watchlist_id)"
+        )
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -4781,6 +4972,64 @@ def handle_callback_query(cb: dict) -> None:
             except Exception as _e:
                 logger.error("unmute_all callback failed: %s", _e)
                 _telegram_answer_callback(cb_id, "❌ Ошибка")
+        elif kind == "watch":
+            # "watch:{demo_pos_id}" — add shadow signal to reversal watchlist
+            try:
+                demo_id = int(rest)
+            except ValueError:
+                _telegram_answer_callback(cb_id, "❌ Некорректный ID")
+                return
+            _telegram_answer_callback(cb_id, "✅ Слежу за разворотом 48ч")
+            now_w = int(time.time())
+            try:
+                with _db_lock:
+                    db = _get_db()
+                    row = db.execute(
+                        "SELECT symbol, direction, alert_type, entry_price "
+                        "FROM demo_positions WHERE id=?",
+                        (demo_id,)
+                    ).fetchone()
+                    if not row:
+                        if chat_id:
+                            _telegram_send(chat_id, "❌ Позиция не найдена")
+                        return
+                    _w_sym, _w_dir, _w_atype, _w_entry = row
+                    existing_w = db.execute(
+                        "SELECT id FROM watchlist "
+                        "WHERE source_demo_id=? AND status='active'",
+                        (demo_id,)
+                    ).fetchone()
+                    if existing_w:
+                        if chat_id:
+                            _telegram_send(
+                                chat_id,
+                                f"🔔 <code>{_w_sym}</code> уже в активном наблюдении"
+                            )
+                        return
+                    db.execute(
+                        "INSERT INTO watchlist "
+                        "(source_demo_id, symbol, direction, alert_type, "
+                        " entry_price, added_ts, expires_ts) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (demo_id, _w_sym, _w_dir, _w_atype or "unknown",
+                         _w_entry or 0.0, now_w, now_w + 48 * 3600),
+                    )
+                    db.commit()
+                logger.info(
+                    "Watchlist added: %s %s demo_id=%d", _w_sym, _w_dir, demo_id
+                )
+                if chat_id:
+                    _telegram_send(
+                        chat_id,
+                        f"🔔 <b>Наблюдение добавлено</b>\n"
+                        f"<code>{_w_sym}</code> {_w_dir} ({_w_atype or '?'})\n"
+                        f"Жду подтверждения разворота — авто-удаление через 48ч\n"
+                        f"Отмена: <code>/unwatch {_w_sym}</code>",
+                    )
+            except Exception as w_exc:
+                logger.error("watch callback failed: %s", w_exc)
+                if chat_id:
+                    _telegram_send(chat_id, "❌ Ошибка базы данных")
         elif kind == "noop":
             _telegram_answer_callback(cb_id)
         else:
@@ -7814,6 +8063,32 @@ def handle_closepos_command(chat_id: int, text: str) -> None:
         _telegram_send(chat_id, f"✅ Позиция <code>{symbol}</code> закрыта и удалена из мониторинга.")
     else:
         _telegram_send(chat_id, f"❌ Открытой позиции по <code>{symbol}</code> не найдено.\n\nСписок: /mypos")
+
+
+def handle_unwatch_command(chat_id: int, text: str) -> None:
+    """/unwatch SYMBOL — stop watching for reversal on this symbol."""
+    parts = text.strip().split()
+    if len(parts) < 2:
+        _telegram_send(chat_id, "Формат: <code>/unwatch BTCUSDT</code>")
+        return
+    sym = parts[1].upper().strip()
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    try:
+        with _db_lock:
+            db = _get_db()
+            n = db.execute(
+                "UPDATE watchlist SET status='removed' WHERE symbol=? AND status='active'",
+                (sym,)
+            ).rowcount
+            db.commit()
+        if n:
+            _telegram_send(chat_id, f"✅ <code>{sym}</code> удалён из наблюдения ({n} запись)")
+        else:
+            _telegram_send(chat_id, f"⚠️ <code>{sym}</code> не найден в активном наблюдении")
+    except Exception as exc:
+        logger.error("handle_unwatch_command: %s", exc)
+        _telegram_send(chat_id, "❌ Ошибка базы данных")
 
 
 # NOTE: `check_24h_pumps` was removed — it was a pure "WATCH" alert (no
@@ -11697,6 +11972,9 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_liquidity_orders, "interval", seconds=60, id="liquidity_check",
+)
+scheduler.add_job(
+    check_watchlist, "interval", seconds=60, id="watchlist_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
