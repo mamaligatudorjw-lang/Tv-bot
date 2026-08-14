@@ -2934,7 +2934,10 @@ def _poll_telegram_commands() -> None:
         "/demo":        handle_demo_command,
         "/demo2":       handle_demo2_command,
         "/demoshadow":  handle_demoshadow_command,
-        "/scorestats":  handle_scorestats_command,
+        "/scorestats":     handle_scorestats_command,
+        "/retroanalysis": lambda cid: threading.Thread(
+            target=_run_retro_duration_analysis, args=(cid,), daemon=True
+        ).start(),
         "/addpos":   handle_addpos_command,
         "/mypos":    handle_mypos_command,
         "/closepos": handle_closepos_command,
@@ -11778,6 +11781,100 @@ def handle_unmute_command(chat_id: int) -> None:
 # ---------------------------------------------------------------------------
 # Flask routes
 # ---------------------------------------------------------------------------
+
+def _run_retro_duration_analysis(chat_id: int) -> None:
+    """Фоновый поток: ретроспективная проверка фильтра длительности 8/12.
+    Вызывается командой /retroanalysis. Временная функция — удалить после использования.
+    """
+    import collections as _col
+    CUTOFF = 1_786_712_108
+    SINCE  = CUTOFF - 30 * 86400
+    WINDOW = 12
+    THRESH = 8
+
+    _telegram_send(chat_id, "⏳ Начинаю ретроспективный анализ фильтра длительности...\n"
+                            "Обрабатываю overheated_24h и oversold_24h за последние 30 дней до фильтра.\n"
+                            "Займёт 3–5 минут — пришлю результат сюда.")
+    try:
+        with _db_lock:
+            conn_r = _get_db()
+            signals_oh = conn_r.execute(
+                "SELECT symbol, ts FROM alerts WHERE alert_type='overheated_24h'"
+                " AND ts>=? AND ts<? ORDER BY symbol, ts",
+                (SINCE, CUTOFF)
+            ).fetchall()
+            signals_os = conn_r.execute(
+                "SELECT symbol, ts FROM alerts WHERE alert_type='oversold_24h'"
+                " AND ts>=? AND ts<? ORDER BY symbol, ts",
+                (SINCE, CUTOFF)
+            ).fetchall()
+    except Exception as e:
+        _telegram_send(chat_id, f"❌ Ошибка чтения БД: {e}")
+        return
+
+    for atype, signals, direction in [
+        ("overheated_24h", signals_oh, "up"),
+        ("oversold_24h",   signals_os, "down"),
+    ]:
+        by_sym = _col.defaultdict(list)
+        for sym, ts in signals:
+            by_sym[sym].append(ts)
+
+        rows = []
+        errors = 0
+        sym_list = list(by_sym.items())
+        for i, (sym, tss) in enumerate(sym_list):
+            try:
+                raw = _gateio_klines(sym, "1h", WINDOW + 14)
+                if not raw or len(raw) < WINDOW + 1:
+                    errors += 1
+                    continue
+                candles = sorted([(int(c[0]), float(c[4])) for c in raw], key=lambda x: x[0])
+                for sig_ts in tss:
+                    hour_floor = (sig_ts // 3600) * 3600
+                    preceding = [c for c in candles if c[0] < hour_floor]
+                    if len(preceding) < WINDOW + 1:
+                        continue
+                    closes = [c[1] for c in preceding[-(WINDOW + 1):]]
+                    if direction == "up":
+                        count = sum(1 for j in range(1, len(closes)) if closes[j] > closes[j - 1])
+                    else:
+                        count = sum(1 for j in range(1, len(closes)) if closes[j] < closes[j - 1])
+                    rows.append(count)
+            except Exception:
+                errors += 1
+            time.sleep(0.08)
+
+        if not rows:
+            _telegram_send(chat_id, f"❌ {atype}: нет данных (API-ошибки: {errors})")
+            continue
+
+        total  = len(rows)
+        passed = sum(1 for c in rows if c >= THRESH)
+        dist   = _col.Counter(rows)
+
+        lines = [
+            f"📊 <b>Ретро-анализ: {atype}</b>",
+            f"За 30 дней до введения фильтра | Монет: {len(by_sym)} | Сигналов: {total}",
+            f"Прошли бы фильтр ≥{THRESH}/12: <b>{passed} ({100*passed/total:.1f}%)</b>",
+            f"Были бы отсеяны: <b>{total-passed} ({100*(total-passed)/total:.1f}%)</b>",
+            f"API-ошибки (пропущено): {errors}",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"{'Счётч':>6}  {'Сигн':>5}  {'%':>5}  {'нараст':>7}  Бар",
+        ]
+        cumul = 0
+        for cnt in range(12, -1, -1):
+            n = dist.get(cnt, 0)
+            cumul += n
+            bar = "▓" * min(int(n * 20 / max(total, 1)), 20)
+            mark = " ← порог" if cnt == THRESH else ""
+            lines.append(
+                f"{cnt:>5}/12  {n:>5}  {100*n/total:>4.1f}%  {100*cumul/total:>5.1f}%  {bar}{mark}"
+            )
+        _telegram_send(chat_id, "\n".join(lines))
+
+    _telegram_send(chat_id, "✅ Анализ завершён.")
+
 
 @app.route("/ping", methods=["GET"])
 def ping():
