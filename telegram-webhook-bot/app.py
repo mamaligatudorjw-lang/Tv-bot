@@ -457,6 +457,12 @@ SHORT_ATR_TP_MULT_RR = 2.0    # TP = (SL dist) × this factor
 # Applied via _compute_confluence_sl_tp() wrapper.
 CONFLUENCE_ATR_SL_MAX_PCT = 8.0    # max SL distance as % of entry; 0=no cap
 
+# oversold_24h SL cap — same 8% value as confluence.
+# Basis: WR=16.7% for SL>8% across 42 wide-stop trades (p=0.003), vs 41.1% for ≤8%.
+# Distinct wrapper preserves ability to tune independently of confluence.
+OVERSOLD_ATR_SL_MAX_PCT  = 8.0    # max SL distance as % of entry for oversold_24h LONG; 0=no cap
+OVERSOLD_SL_CAP_SINCE    = 1786741084  # unix ts when cap was introduced (2026-08-14)
+
 # In BULL market, counter-trend SHORTs require stronger conviction.
 SHORT_BULL_REGIME_MIN_SCORE = 80   # raised from type-default 75 when regime=BULL
 MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
@@ -1350,6 +1356,19 @@ def _compute_confluence_sl_tp(
     """
     cap = CONFLUENCE_ATR_SL_MAX_PCT if CONFLUENCE_ATR_SL_MAX_PCT > 0 else None
     return _compute_demo_sl_tp(direction, price, atr, max_sl_pct=cap)
+
+
+def _compute_oversold_sl_tp(
+    price: float, atr: float | None
+) -> tuple[float | None, float | None]:
+    """_compute_demo_sl_tp for oversold_24h LONG entries with 8% SL cap.
+
+    WR = 0% for SL > 8% (oversold_24h, n=5) and 16.7% across all strategies (n=42, p=0.003).
+    Introduced 2026-08-14 (OVERSOLD_SL_CAP_SINCE).  R:R is preserved — TP scales with
+    the capped SL distance, so the 2:1 ratio holds even after capping.
+    """
+    cap = OVERSOLD_ATR_SL_MAX_PCT if OVERSOLD_ATR_SL_MAX_PCT > 0 else None
+    return _compute_demo_sl_tp("LONG", price, atr, max_sl_pct=cap)
 
 
 def _compute_pump_fade_sl_tp(
@@ -4805,7 +4824,7 @@ VWAP_REVERSION_MIN_DIST_PCT = 1.0   # price must be ≥1% away from VWAP ("exten
 VWAP_REVERSION_MAX_DIST_PCT = 8.0   # >8% = likely breakout, skip
 VWAP_REVERSION_VOL_MULT     = 1.3   # reversal candle volume must be ≥1.3× 10-bar avg
 VWAP_REVERSION_ATR_SL_MULT  = 0.8   # SL = 0.8 × 1h-ATR (tighter than streak's 4h-based)
-VWAP_REVERSION_ATR_TP_MULT  = 1.6   # TP dist = 1.6 × SL dist  → R:R 1.6:1 (intentionally tighter; review when n≥20)
+VWAP_REVERSION_ATR_TP_MULT  = 2.0   # TP dist = 2.0 × SL dist  → R:R 2:1 (spec target; was 1.6 — bug fixed 2026-08-14)
 VWAP_REVERSION_COOLDOWN     = 28800  # 8h per symbol (same as streak_1h)
 
 # --- Bollinger Squeeze shadow (volatility squeeze → breakout) ---
@@ -6983,6 +7002,15 @@ def check_overheated_oversold(
         os_threshold = _vol_threshold(symbol, OVERSOLD_24H_PCT, 2.5)
         with state_lock:
             atr = state["atr_4h"].get(symbol)
+        # Cold-cache fallback: if ATR is missing (e.g. after bot restart before the
+        # hourly refresh), make a direct 4h candle fetch so the first signals after
+        # restart get ATR-based SL/TP instead of the fixed-pct fallback.
+        if atr is None:
+            _raw_atr_cb = _fetch_4h_ohlcv(symbol, limit=30)
+            if _raw_atr_cb:
+                _, _fresh_atr = _calc_vwap_atr1h(_raw_atr_cb)
+                if _fresh_atr and _fresh_atr > 0:
+                    atr = _fresh_atr
 
         if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
             if not OVERHEATED_ENABLED:
@@ -7172,7 +7200,7 @@ def check_overheated_oversold(
                             "SHADOW oversold LONG %s — цена ниже открытия текущей 1ч свечи, откуп не начался",
                             symbol,
                         )
-                        _dsl_rc, _dtp_rc = _compute_demo_sl_tp("LONG", price, atr)
+                        _dsl_rc, _dtp_rc = _compute_oversold_sl_tp(price, atr)
                         if _dsl_rc and _dtp_rc:
                             _demo_open_position(
                                 symbol, "LONG", price, _dsl_rc, _dtp_rc,
@@ -7235,7 +7263,7 @@ def check_overheated_oversold(
                     logger.info(
                         "SUPPRESSED oversold %s — ликвидации: %s", symbol, _liq_reason_os
                     )
-                    _dsl_lv2, _dtp_lv2 = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl_lv2, _dtp_lv2 = _compute_oversold_sl_tp(price, atr)
                     if _dsl_lv2 and _dtp_lv2:
                         _demo_open_position(
                             symbol, "LONG", price, _dsl_lv2, _dtp_lv2,
@@ -7255,7 +7283,7 @@ def check_overheated_oversold(
                         logger.info(
                             "SUPPRESSED oversold %s — ИИ: %s", symbol, _ai_note_os,
                         )
-                        _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
+                        _dsl, _dtp = _compute_oversold_sl_tp(price, atr)
                         if _dsl and _dtp:
                             _demo_open_position(
                                 symbol, "LONG", price, _dsl, _dtp,
@@ -7289,7 +7317,7 @@ def check_overheated_oversold(
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
                     # Track real demo position so we can measure win-rate later
-                    _dsl_os, _dtp_os = _compute_demo_sl_tp("LONG", price, atr)
+                    _dsl_os, _dtp_os = _compute_oversold_sl_tp(price, atr)
                     if _dsl_os and _dtp_os:
                         _demo_open_position(
                             symbol, "LONG", price, _dsl_os, _dtp_os,
@@ -9854,12 +9882,24 @@ class PositionMonitor(threading.Thread):
             self.entry, self.sl_price, self.tp_price,
         )
         prev_price: float | None = None
+        _none_streak = 0
+        _NONE_WARN_AFTER = 3   # warn after this many consecutive None returns (~2.25 min at 45s)
 
         while not self._stop_evt.wait(timeout=MONITOR_POLL_INTERVAL):
             try:
                 current = _get_current_price(self.symbol)
                 if current is None:
+                    _none_streak += 1
+                    if _none_streak >= _NONE_WARN_AFTER:
+                        logger.warning(
+                            "PositionMonitor %s: price fetch returned None %d times in a row "
+                            "(rate limit or API error?); SL=%.6g TP=%.6g last_known=%.6g",
+                            self.symbol, _none_streak,
+                            self.sl_price, self.tp_price,
+                            prev_price if prev_price else 0.0,
+                        )
                     continue
+                _none_streak = 0
 
                 # Anti-slippage: if price moved >5 % since last tick, re-verify
                 if prev_price is not None:
