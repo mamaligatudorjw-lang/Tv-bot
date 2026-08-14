@@ -330,6 +330,24 @@ LIQUIDITY_REVERSAL_SHADOW      = True   # False = fully disable shadow; True = a
 LIQUIDITY_REVERSAL_VOL_MULT    = 1.5    # reversal candle vol must be ≥1.5× 10-bar avg
 LIQUIDITY_REVERSAL_ZONE_PCT    = 0.5    # zone must have been touched within 0.5% of low/high
 
+# Entry-confirmation watch: candle timeframe, bar count, and TTL per signal type.
+# Fast momentum signals (bb_squeeze, ema_cross) play out in minutes — use 1m candles
+# and a short TTL so the watch self-cancels once the window is gone.
+# Everything else defaults to 15m candles and 48h TTL.
+ENTRY_WATCH_TYPE_CONFIG: dict[str, dict] = {
+    "bb_squeeze":     {"tf": "1m",  "bars": 30, "ttl_s": 1800},    # 30 min
+    "ema_cross":      {"tf": "1m",  "bars": 30, "ttl_s": 3600},    # 60 min
+    "liq_reversal":   {"tf": "15m", "bars": 15, "ttl_s": 172800},  # 48 h
+    "vwap_reversion": {"tf": "15m", "bars": 15, "ttl_s": 172800},  # 48 h
+    "confluence":     {"tf": "15m", "bars": 15, "ttl_s": 172800},  # 48 h
+}
+# Fallback for any type not listed above.
+ENTRY_WATCH_DEFAULT_CONFIG: dict = {"tf": "15m", "bars": 15, "ttl_s": 172800}
+# Map candle TF → number of bars to fetch (completed bars needed for avg + buffer).
+_ENTRY_WATCH_TF_BARS: dict[str, int] = {
+    "1m": 32, "3m": 22, "5m": 17, "15m": 17, "1h": 14,
+}
+
 # Top-gainers list threshold (used by /top30 — pure +X% mover, no alert).
 # The pump_24h *alert* itself was removed in favor of volume_surge_{short,long}.
 PUMP_24H_PCT = 30.0
@@ -1749,7 +1767,7 @@ def check_watchlist() -> None:
 
 
 def check_entry_watch() -> None:
-    """Every 300 s: check entry_watch rows for optimal entry confirmation.
+    """Every 60 s: check entry_watch rows for optimal entry confirmation.
 
     Three mutually-exclusive outcomes per active row (checked in priority order):
       - sl_hit:     price touched SL → cancel, no further watching.
@@ -1773,7 +1791,7 @@ def check_entry_watch() -> None:
                 logger.info("EntryWatch: auto-expired %d entries", expired)
             rows = conn.execute(
                 "SELECT id, source_alert_id, symbol, direction, alert_type, "
-                "entry_price, sl_price, first_check_done "
+                "entry_price, sl_price, candle_tf, first_check_done "
                 "FROM entry_watch WHERE status='active' AND expires_ts > ?",
                 (now,)
             ).fetchall()
@@ -1781,14 +1799,15 @@ def check_entry_watch() -> None:
         logger.warning("check_entry_watch DB fetch: %s", exc)
         return
 
-    for ew_id, alert_id, symbol, direction, alert_type, entry_price, sl_price, first_done in rows:
+    for ew_id, alert_id, symbol, direction, alert_type, entry_price, sl_price, candle_tf, first_done in rows:
         try:
             with _ew_lock:
                 last_trig = _ew_last_trigger.get(ew_id, 0)
             if now - last_trig < 4 * 3600:
                 continue
 
-            candles = _gateio_klines(symbol, "15m", 15)
+            _tf_bars = _ENTRY_WATCH_TF_BARS.get(candle_tf, 17)
+            candles = _gateio_klines(symbol, candle_tf, _tf_bars)
             if len(candles) < 12:
                 continue
 
@@ -4185,6 +4204,7 @@ def _get_db() -> sqlite3.Connection:
                 alert_type       TEXT    NOT NULL,
                 entry_price      REAL    NOT NULL,
                 sl_price         REAL    NOT NULL,
+                candle_tf        TEXT    NOT NULL DEFAULT '15m',
                 added_ts         INTEGER NOT NULL,
                 expires_ts       INTEGER NOT NULL,
                 first_check_done INTEGER NOT NULL DEFAULT 0,
@@ -4200,6 +4220,13 @@ def _get_db() -> sqlite3.Connection:
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_ew_alert "
             "ON entry_watch(source_alert_id) WHERE status='active'"
         )
+        # Migration: add candle_tf column for existing DBs created before this field.
+        try:
+            _db_conn.execute(
+                "ALTER TABLE entry_watch ADD COLUMN candle_tf TEXT NOT NULL DEFAULT '15m'"
+            )
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # Outcome log for future win-rate analysis.
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS entry_watch_log (
@@ -5387,7 +5414,12 @@ def handle_callback_query(cb: dict) -> None:
             except ValueError:
                 _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
                 return
-            _telegram_answer_callback(cb_id, "🎯 Слежу за точкой входа 48ч")
+            _ew_cfg   = ENTRY_WATCH_TYPE_CONFIG.get(_ew_atype or "", ENTRY_WATCH_DEFAULT_CONFIG)
+            _ew_ttl   = _ew_cfg["ttl_s"]
+            _ew_tf    = _ew_cfg["tf"]
+            _ttl_lbl  = (f"{_ew_ttl // 60}мин" if _ew_ttl < 7200
+                         else f"{_ew_ttl // 3600}ч")
+            _telegram_answer_callback(cb_id, f"🎯 Слежу за точкой входа {_ttl_lbl}")
             now_ew = int(time.time())
             try:
                 with _db_lock:
@@ -5397,10 +5429,10 @@ def handle_callback_query(cb: dict) -> None:
                     _ins_ew = db.execute(
                         "INSERT OR IGNORE INTO entry_watch "
                         "(source_alert_id, symbol, direction, alert_type, "
-                        " entry_price, sl_price, added_ts, expires_ts) "
-                        "VALUES (?,?,?,?,?,?,?,?)",
+                        " entry_price, sl_price, candle_tf, added_ts, expires_ts) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
                         (_ew_aid, _ew_sym, _ew_dir, _ew_atype or "unknown",
-                         _ew_entry, _ew_sl, now_ew, now_ew + 48 * 3600),
+                         _ew_entry, _ew_sl, _ew_tf, now_ew, now_ew + _ew_ttl),
                     )
                     db.commit()
                     _ew_inserted = _ins_ew.rowcount > 0
@@ -12374,7 +12406,7 @@ scheduler.add_job(
     check_watchlist, "interval", seconds=300, id="watchlist_check",
 )
 scheduler.add_job(
-    check_entry_watch, "interval", seconds=300, id="entry_watch_check",
+    check_entry_watch, "interval", seconds=60, id="entry_watch_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
