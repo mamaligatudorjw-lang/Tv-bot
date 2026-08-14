@@ -196,6 +196,11 @@ MAX_OPEN_CONFLUENCE_POSITIONS = 15  # cap on simultaneous real confluence demo p
 # Positions opened BEFORE this timestamp (task-53 deploy, 2026-08-12 07:26:31 UTC) are
 # legacy bets that run to their own SL/TP; they must not count against the new 15-slot cap.
 CONFLUENCE_CAP_CUTOFF_TS = 1_786_519_591
+# Positions opened BEFORE this timestamp are pre-filter (raw magnitude only).
+# Positions opened ON OR AFTER are post-filter (≥8/12 hourly closes in trend direction).
+# Use this in WR queries to compare the two cohorts without mixing them.
+# Deployed: 2026-08-14 12:55:08 UTC
+OVERSOLD_DURATION_FILTER_TS = 1_786_712_108
 # ---------------------------------------------------------------------------
 # Non-crypto symbol filter — Gate.io Futures lists synthetic equity/commodity
 # contracts alongside crypto. Block them from ALL signal types by prefix.
@@ -10197,6 +10202,44 @@ def handle_scorestats_command(chat_id: int) -> None:
             e = "✅" if avg_pnl > 0 else "❌"
             s = "+" if avg_pnl >= 0 else ""
             lines.append(f"  {e} {bucket}–{bucket+9}: WR={wr:.0f}%  avg={s}{avg_pnl:.2f}%  (n={cnt})")
+
+    # ── oversold_24h: before/after duration-filter comparison ─────────────────
+    # OVERSOLD_DURATION_FILTER_TS marks the moment ≥8/12 hourly-close filter
+    # was added (2026-08-14 12:55 UTC).  Separate the two cohorts so WR
+    # numbers are not polluted by the pre-filter era.
+    try:
+        with _db_lock:
+            conn2 = _get_db()
+            def _os_wr_block(label: str, ts_cond: str, ts_val: int) -> list[str]:
+                rows = conn2.execute(f"""
+                    SELECT COUNT(*) AS cnt,
+                           ROUND(100.0 * SUM(CASE WHEN dp.pnl_pct > 0 THEN 1 ELSE 0 END)
+                                 / NULLIF(COUNT(*), 0), 1) AS wr,
+                           ROUND(AVG(dp.pnl_pct), 2) AS avg_pnl,
+                           ROUND(SUM(dp.pnl_pct), 2) AS total_pnl
+                    FROM demo_positions dp
+                    WHERE dp.alert_type = 'oversold_24h'
+                      AND dp.is_shadow  = 0
+                      AND dp.status    != 'open'
+                      AND dp.ts_open   {ts_cond} ?
+                """, (ts_val,)).fetchone()
+                if not rows or rows[0] == 0:
+                    return [f"  {label}: нет закрытых позиций"]
+                cnt, wr, avg_pnl, total_pnl = rows
+                wr = wr or 0.0
+                avg_pnl = avg_pnl or 0.0
+                total_pnl = total_pnl or 0.0
+                e = "✅" if avg_pnl > 0 else "❌"
+                s = "+" if avg_pnl >= 0 else ""
+                return [f"  {e} {label}: n={cnt}  WR={wr:.0f}%  avg={s}{avg_pnl:.2f}%  Σ={s}{total_pnl:.2f}%"]
+            os_lines  = _os_wr_block("до фильтра длительности", "<", OVERSOLD_DURATION_FILTER_TS)
+            os_lines += _os_wr_block("после фильтра длительности", ">=", OVERSOLD_DURATION_FILTER_TS)
+        lines.append(
+            "\n<b>📐 Перепроданность — WR до/после фильтра длительности (≥8/12 часовых свечей):</b>"
+        )
+        lines.extend(os_lines)
+    except Exception as _os_exc:
+        logger.warning("scorestats oversold comparison failed: %s", _os_exc)
 
     # Quick insight
     lines.append("\n<b>💡 Вывод:</b>")
