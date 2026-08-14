@@ -465,13 +465,15 @@ OVERSOLD_SL_CAP_SINCE    = 1786741084  # unix ts when cap was introduced (2026-0
 
 # In BULL market, counter-trend SHORTs require stronger conviction.
 SHORT_BULL_REGIME_MIN_SCORE = 80   # raised from type-default 75 when regime=BULL
-MAX_OPEN_POSITIONS = 50            # cap on simultaneous position monitors
+MAX_OPEN_POSITIONS = 500           # effectively uncapped — each monitor is now a dict
+                                    # lookup (cache-based), so 100+ threads are fine;
+                                    # kept as a circuit-breaker against runaway bugs
 # Раздельные лимиты по направлениям (2026-08-04): SHORT-ы теперь живут до
 # 7 дней (listing_peak_short — до 30), поэтому без квоты они могут занять
 # весь общий лимит и заблокировать 4ч LONG-скальпы. LONG-ам гарантирована
 # своя квота, SHORT-ам — своя; сумма квот равна MAX_OPEN_POSITIONS.
-MAX_OPEN_LONG_POSITIONS = 25       # квота для LONG (быстрые 4ч скальпы)
-MAX_OPEN_SHORT_POSITIONS = 25      # квота для долгих SHORT-ов (до 7-30 дней)
+MAX_OPEN_LONG_POSITIONS = 250      # per-direction soft cap (raised with global cap)
+MAX_OPEN_SHORT_POSITIONS = 250     # per-direction soft cap
 
 # TOP signals: score >= this → «🏆 ТОП СИГНАЛ» marker in Telegram and a
 # separate bucket in /demo (real vs shadow vs top comparison).
@@ -9746,6 +9748,11 @@ _price_cache: dict[str, float] = {}
 _price_cache_lock = threading.Lock()
 _price_cache_ts: float = 0.0   # unix timestamp of last update
 _PRICE_CACHE_MAX_AGE = 20.0    # seconds; fall back to live fetch if older
+_PRICE_CACHE_WARN_AGE = 60.0  # seconds; log WARNING if cache is this stale
+# Limits concurrent fallback HTTP calls when cache is cold (e.g. after restart
+# before the first _refresh_price_cache run, or after a cache failure streak).
+# Prevents 100+ PositionMonitor threads from simultaneously hitting Gate.io.
+_price_fallback_sem = threading.Semaphore(10)
 
 
 def _refresh_price_cache() -> None:
@@ -9795,24 +9802,42 @@ def _get_current_price(symbol: str) -> float | None:
     if cached and age < _PRICE_CACHE_MAX_AGE:
         return cached
 
-    # Slow path — individual API call (cache cold after restart, or symbol absent)
-    def _try(sym: str) -> float | None:
-        try:
-            resp = _gateio_get("/tickers", params={"contract": _to_gate(sym)}, timeout=6)
-            data = resp.json()
-            if data and float(data[0].get("last", 0)):
-                return float(data[0]["last"])
-        except Exception as exc:
-            logger.debug("_get_current_price %s failed: %s", sym, exc)
-        return None
+    # Slow path — individual API call (cache cold after restart, or symbol absent).
+    # Warn if cache is severely stale — likely means _refresh_price_cache is failing.
+    if age >= _PRICE_CACHE_WARN_AGE:
+        logger.warning(
+            "_get_current_price %s: price cache is %.0f s stale "
+            "(expected ≤%g s) — _refresh_price_cache may be skipped or failing",
+            symbol, age, _PRICE_CACHE_MAX_AGE,
+        )
 
-    price = _try(symbol)
-    if price is not None:
-        return price
-    # Binance symbols like KORUBUSDT → Gate.io KORU_USDT (drop 'B' before USDT)
-    if symbol.endswith("BUSDT") and len(symbol) > 6:
-        return _try(symbol[:-5] + "USDT")
-    return None
+    # Throttle: at most 10 concurrent fallback HTTP calls so that 100+ PositionMonitor
+    # threads don't simultaneously storm Gate.io when the cache is cold/stale.
+    with _price_fallback_sem:
+        # Re-check cache inside the semaphore — another thread may have refreshed it
+        with _price_cache_lock:
+            cached2 = _price_cache.get(symbol)
+            age2 = time.time() - _price_cache_ts
+        if cached2 and age2 < _PRICE_CACHE_MAX_AGE:
+            return cached2
+
+        def _try(sym: str) -> float | None:
+            try:
+                resp = _gateio_get("/tickers", params={"contract": _to_gate(sym)}, timeout=6)
+                data = resp.json()
+                if data and float(data[0].get("last", 0)):
+                    return float(data[0]["last"])
+            except Exception as exc:
+                logger.debug("_get_current_price %s failed: %s", sym, exc)
+            return None
+
+        price = _try(symbol)
+        if price is not None:
+            return price
+        # Binance symbols like KORUBUSDT → Gate.io KORU_USDT (drop 'B' before USDT)
+        if symbol.endswith("BUSDT") and len(symbol) > 6:
+            return _try(symbol[:-5] + "USDT")
+        return None
 
 
 def _format_elapsed(seconds: float) -> str:
