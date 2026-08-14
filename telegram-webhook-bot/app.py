@@ -215,6 +215,20 @@ NON_CRYPTO_PREFIXES: frozenset[str] = frozenset({
     "ASML", "TENCENT", "TENCENTHKD", "XIAOMI", "XIAOMIHKD",
     # Indices
     "SPX", "NDX",
+    # Korean equities / ETFs (Gate.io Futures synthetic contracts)
+    # These return HTTP 500 on candlestick endpoints and have no ATR,
+    # causing all positions to fall back to fixed-pct SL/TP.
+    "SAMSUNG",                          # Samsung Electronics
+    "LGELECTRONICS",                    # LG Electronics
+    "SKHYNIX", "SKHYU",                 # SK Hynix variants
+    "SKDD",                             # SK Group holding
+    "HANMI",                            # Hanmi Pharm
+    "KIOXIA",                           # Kioxia (Toshiba memory)
+    "KODEX",                            # KODEX ETFs (e.g. KODEX200 = KOSPI 200)
+    "ZHIPUHKD",                         # Zhipu AI HKD-denominated
+    "EVOL",                             # Evolent Health / synthetic
+    "HYUNDAI", "KIA", "POSCO",          # Other Korean industrials
+    "KEPCO", "LOTTE", "HANWHA",         # Korean conglomerates
 })
 
 
@@ -6054,7 +6068,7 @@ def check_vwap_reversion(
 
         # TP/SL: use 1h ATR for a tight, 1–4h realistic hold
         sl_dist  = VWAP_REVERSION_ATR_SL_MULT * atr_1h
-        tp_dist  = VWAP_REVERSION_ATR_TP_MULT * sl_dist   # R:R ≈ 2:1
+        tp_dist  = VWAP_REVERSION_ATR_TP_MULT * sl_dist   # R:R 1.6:1 (cap; actual TP = min(VWAP_dist, tp_dist))
 
         if direction == "SHORT":
             sl_price = price + sl_dist
@@ -12699,7 +12713,7 @@ scheduler.add_job(
     backup_alerts_db, "interval", hours=1, id="alerts_db_backup",
 )
 scheduler.add_job(
-    check_demo_positions, "interval", seconds=60, id="demo_check",
+    check_demo_positions, "interval", seconds=120, id="demo_check",
 )
 scheduler.add_job(
     check_liquidity_orders, "interval", seconds=60, id="liquidity_check",
