@@ -410,7 +410,7 @@ HIT_RATE_WIN_PCT = 1.0             # >=1% move in predicted direction = win (leg
 HIT_RATE_RETENTION_DAYS = 120
 # SL/TP for simulated P&L in hit-rate stats (matches backtest defaults)
 HIT_RATE_SL_PCT = 2.5              # stop-loss % (raised from 2.0 to reduce noise SL hits)
-HIT_RATE_TP_PCT = 4.0              # take-profit % for LONG
+HIT_RATE_TP_PCT = 5.0              # take-profit % for LONG (= 2×SL_PCT → R:R 2:1, was 4.0 = 1.6:1 mismatch)
 HIT_RATE_TP_PCT_SHORT = 6.0        # take-profit % for SHORT (wider target, asymmetric)
 
 # Timestamp when wick-based SL/TP detection was enabled in check_demo_positions.
@@ -4791,7 +4791,7 @@ VWAP_REVERSION_MIN_DIST_PCT = 1.0   # price must be ≥1% away from VWAP ("exten
 VWAP_REVERSION_MAX_DIST_PCT = 8.0   # >8% = likely breakout, skip
 VWAP_REVERSION_VOL_MULT     = 1.3   # reversal candle volume must be ≥1.3× 10-bar avg
 VWAP_REVERSION_ATR_SL_MULT  = 0.8   # SL = 0.8 × 1h-ATR (tighter than streak's 4h-based)
-VWAP_REVERSION_ATR_TP_MULT  = 1.6   # TP dist = 1.6 × SL dist  ≈ R:R 2:1
+VWAP_REVERSION_ATR_TP_MULT  = 1.6   # TP dist = 1.6 × SL dist  → R:R 1.6:1 (intentionally tighter; review when n≥20)
 VWAP_REVERSION_COOLDOWN     = 28800  # 8h per symbol (same as streak_1h)
 
 # --- Bollinger Squeeze shadow (volatility squeeze → breakout) ---
