@@ -1399,10 +1399,18 @@ def _demo_open_position(
                 with state_lock:
                     _silenced = state["silenced"]
                 if not _silenced:
+                    # Embed all needed fields directly in callback_data so the
+                    # callback handler works regardless of which bot instance
+                    # (dev or deployed) processes it — each has its own SQLite DB
+                    # and cannot reliably look up the other's row IDs.
+                    # Format: watch:{demo_id}:{symbol}:{direction}:{entry_price}:{alert_type}
+                    # Max observed length ≈ 54 bytes; Telegram limit is 64 bytes.
+                    _atype_cb = (alert_type or "?").replace(":", "_")  # colon is delimiter
+                    _watch_cb  = f"watch:{_new_demo_id}:{symbol}:{direction}:{entry_price:.8g}:{_atype_cb}"
                     _watch_markup = {
                         "inline_keyboard": [[
                             {"text": "🔔 Уведомить о развороте",
-                             "callback_data": f"watch:{_new_demo_id}"}
+                             "callback_data": _watch_cb}
                         ]]
                     }
                     _telegram_send(
@@ -4979,27 +4987,25 @@ def handle_callback_query(cb: dict) -> None:
                 logger.error("unmute_all callback failed: %s", _e)
                 _telegram_answer_callback(cb_id, "❌ Ошибка")
         elif kind == "watch":
-            # "watch:{demo_pos_id}" — add shadow signal to reversal watchlist
+            # Format: watch:{demo_id}:{symbol}:{direction}:{entry_price}:{alert_type}
+            # All fields are embedded in callback_data so this handler works
+            # regardless of which bot instance (dev/deployed) processes it.
+            parts_w = rest.split(":", 4)
+            if len(parts_w) != 5:
+                _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
+                return
+            _w_demo_id_str, _w_sym, _w_dir, _w_entry_str, _w_atype = parts_w
             try:
-                demo_id = int(rest)
+                _w_demo_id = int(_w_demo_id_str)
+                _w_entry   = float(_w_entry_str)
             except ValueError:
-                _telegram_answer_callback(cb_id, "❌ Некорректный ID")
+                _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
                 return
             _telegram_answer_callback(cb_id, "✅ Слежу за разворотом 48ч")
             now_w = int(time.time())
             try:
                 with _db_lock:
                     db = _get_db()
-                    row = db.execute(
-                        "SELECT symbol, direction, alert_type, entry_price "
-                        "FROM demo_positions WHERE id=?",
-                        (demo_id,)
-                    ).fetchone()
-                    if not row:
-                        if chat_id:
-                            _telegram_send(chat_id, "❌ Позиция не найдена")
-                        return
-                    _w_sym, _w_dir, _w_atype, _w_entry = row
                     # INSERT OR IGNORE + rowcount — DB-level duplicate guard.
                     # The partial UNIQUE INDEX ux_watchlist_active blocks concurrent
                     # double-taps at the DB level; no separate SELECT needed.
@@ -5008,14 +5014,14 @@ def handle_callback_query(cb: dict) -> None:
                         "(source_demo_id, symbol, direction, alert_type, "
                         " entry_price, added_ts, expires_ts) "
                         "VALUES (?,?,?,?,?,?,?)",
-                        (demo_id, _w_sym, _w_dir, _w_atype or "unknown",
-                         _w_entry or 0.0, now_w, now_w + 48 * 3600),
+                        (_w_demo_id, _w_sym, _w_dir, _w_atype or "unknown",
+                         _w_entry, now_w, now_w + 48 * 3600),
                     )
                     db.commit()
                     _inserted = _ins.rowcount > 0
                 if _inserted:
                     logger.info(
-                        "Watchlist added: %s %s demo_id=%d", _w_sym, _w_dir, demo_id
+                        "Watchlist added: %s %s demo_id=%d", _w_sym, _w_dir, _w_demo_id
                     )
                     if chat_id:
                         _telegram_send(
@@ -5028,7 +5034,7 @@ def handle_callback_query(cb: dict) -> None:
                 else:
                     logger.info(
                         "Watchlist duplicate blocked by DB: %s %s demo_id=%d",
-                        _w_sym, _w_dir, demo_id,
+                        _w_sym, _w_dir, _w_demo_id,
                     )
                     if chat_id:
                         # Rare path — safe to do one extra SELECT for UX detail
