@@ -2326,6 +2326,7 @@ def check_demo_positions() -> None:
             continue
 
         status = "tp" if hit_tp else "sl"
+        exit_method = "wick" if wick_close else "poll"
         pnl_usd = (
             100.0 * (exit_price - entry) / entry if direction == "LONG"
             else 100.0 * (entry - exit_price) / entry
@@ -2335,8 +2336,9 @@ def check_demo_positions() -> None:
                 conn = _get_db()
                 conn.execute(
                     "UPDATE demo_positions "
-                    "SET status=?, ts_close=?, exit_price=?, pnl_usd=?, wick_close=? WHERE id=?",
-                    (status, now_ts, exit_price, pnl_usd, wick_close, row_id),
+                    "SET status=?, ts_close=?, exit_price=?, pnl_usd=?, "
+                    "wick_close=?, exit_method=? WHERE id=?",
+                    (status, now_ts, exit_price, pnl_usd, wick_close, exit_method, row_id),
                 )
                 conn.commit()
             logger.info(
@@ -4167,6 +4169,35 @@ def _get_db() -> sqlite3.Connection:
         ).rowcount
         if _backfilled:
             logger.info("demo_positions: backfilled is_top=1 for %d existing real positions", _backfilled)
+        # Migrate: exit_method — records which code path closed the position.
+        # 'wick'   = check_demo_positions caught a 1m-candle wick crossing SL/TP
+        #            → exit booked at the SL/TP level (simulates stop-order fill).
+        # 'poll'   = check_demo_positions caught lastPrice crossing SL/TP
+        #            → exit booked at lastPrice (simulates market-order poll fill).
+        # 'manual' = closed via bot command.
+        try:
+            _db_conn.execute(
+                "ALTER TABLE demo_positions ADD COLUMN exit_method TEXT DEFAULT NULL"
+            )
+        except sqlite3.OperationalError as _mig_em:
+            if "duplicate column" not in str(_mig_em).lower():
+                raise
+        # Backfill existing closed rows from wick_close flag (already stored).
+        # All non-manual exits in demo_positions come from check_demo_positions —
+        # PositionMonitor only writes to position_monitors, not this table.
+        _db_conn.execute(
+            "UPDATE demo_positions SET exit_method='wick' "
+            "WHERE wick_close=1 AND exit_method IS NULL"
+        )
+        _db_conn.execute(
+            "UPDATE demo_positions SET exit_method='poll' "
+            "WHERE wick_close=0 AND status IN ('sl','tp') AND exit_method IS NULL"
+        )
+        _db_conn.execute(
+            "UPDATE demo_positions SET exit_method='manual' "
+            "WHERE status='manual' AND exit_method IS NULL"
+        )
+        _db_conn.commit()
         # Liquidity-entry strategy: parallel demo-only strategy
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS liquidity_orders (
