@@ -4995,15 +4995,16 @@ def handle_callback_query(cb: dict) -> None:
                         return
                     _w_sym, _w_dir, _w_atype, _w_entry = row
                     existing_w = db.execute(
-                        "SELECT id FROM watchlist "
-                        "WHERE source_demo_id=? AND status='active'",
-                        (demo_id,)
+                        "SELECT id, alert_type FROM watchlist "
+                        "WHERE symbol=? AND direction=? AND status='active'",
+                        (_w_sym, _w_dir)
                     ).fetchone()
                     if existing_w:
                         if chat_id:
                             _telegram_send(
                                 chat_id,
-                                f"🔔 <code>{_w_sym}</code> уже в активном наблюдении"
+                                f"🔔 <code>{_w_sym}</code> {_w_dir} уже в активном наблюдении"
+                                f" (сигнал: {existing_w[1] or '?'})"
                             )
                         return
                     db.execute(
@@ -11974,7 +11975,7 @@ scheduler.add_job(
     check_liquidity_orders, "interval", seconds=60, id="liquidity_check",
 )
 scheduler.add_job(
-    check_watchlist, "interval", seconds=60, id="watchlist_check",
+    check_watchlist, "interval", seconds=300, id="watchlist_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
