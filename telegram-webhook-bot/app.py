@@ -3911,6 +3911,12 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_watchlist_active "
             "ON watchlist(status, expires_ts)"
         )
+        # DB-level race guard: only one active entry per (symbol, direction).
+        # Partial index so completed/expired rows don't interfere.
+        _db_conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_watchlist_active "
+            "ON watchlist(symbol, direction) WHERE status='active'"
+        )
         # Every reversal-confirmation check is logged here for future WR analysis.
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS watchlist_triggers (
@@ -4994,21 +5000,11 @@ def handle_callback_query(cb: dict) -> None:
                             _telegram_send(chat_id, "❌ Позиция не найдена")
                         return
                     _w_sym, _w_dir, _w_atype, _w_entry = row
-                    existing_w = db.execute(
-                        "SELECT id, alert_type FROM watchlist "
-                        "WHERE symbol=? AND direction=? AND status='active'",
-                        (_w_sym, _w_dir)
-                    ).fetchone()
-                    if existing_w:
-                        if chat_id:
-                            _telegram_send(
-                                chat_id,
-                                f"🔔 <code>{_w_sym}</code> {_w_dir} уже в активном наблюдении"
-                                f" (сигнал: {existing_w[1] or '?'})"
-                            )
-                        return
-                    db.execute(
-                        "INSERT INTO watchlist "
+                    # INSERT OR IGNORE + rowcount — DB-level duplicate guard.
+                    # The partial UNIQUE INDEX ux_watchlist_active blocks concurrent
+                    # double-taps at the DB level; no separate SELECT needed.
+                    _ins = db.execute(
+                        "INSERT OR IGNORE INTO watchlist "
                         "(source_demo_id, symbol, direction, alert_type, "
                         " entry_price, added_ts, expires_ts) "
                         "VALUES (?,?,?,?,?,?,?)",
@@ -5016,17 +5012,29 @@ def handle_callback_query(cb: dict) -> None:
                          _w_entry or 0.0, now_w, now_w + 48 * 3600),
                     )
                     db.commit()
-                logger.info(
-                    "Watchlist added: %s %s demo_id=%d", _w_sym, _w_dir, demo_id
-                )
-                if chat_id:
-                    _telegram_send(
-                        chat_id,
-                        f"🔔 <b>Наблюдение добавлено</b>\n"
-                        f"<code>{_w_sym}</code> {_w_dir} ({_w_atype or '?'})\n"
-                        f"Жду подтверждения разворота — авто-удаление через 48ч\n"
-                        f"Отмена: <code>/unwatch {_w_sym}</code>",
+                    _inserted = _ins.rowcount > 0
+                if _inserted:
+                    logger.info(
+                        "Watchlist added: %s %s demo_id=%d", _w_sym, _w_dir, demo_id
                     )
+                    if chat_id:
+                        _telegram_send(
+                            chat_id,
+                            f"🔔 <b>Наблюдение добавлено</b>\n"
+                            f"<code>{_w_sym}</code> {_w_dir} ({_w_atype or '?'})\n"
+                            f"Жду подтверждения разворота — авто-удаление через 48ч\n"
+                            f"Отмена: <code>/unwatch {_w_sym}</code>",
+                        )
+                else:
+                    logger.info(
+                        "Watchlist duplicate blocked by DB: %s %s demo_id=%d",
+                        _w_sym, _w_dir, demo_id,
+                    )
+                    if chat_id:
+                        _telegram_send(
+                            chat_id,
+                            f"🔔 <code>{_w_sym}</code> {_w_dir} уже в активном наблюдении",
+                        )
             except Exception as w_exc:
                 logger.error("watch callback failed: %s", w_exc)
                 if chat_id:
