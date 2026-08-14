@@ -5031,9 +5031,21 @@ def handle_callback_query(cb: dict) -> None:
                         _w_sym, _w_dir, demo_id,
                     )
                     if chat_id:
+                        # Rare path — safe to do one extra SELECT for UX detail
+                        try:
+                            with _db_lock:
+                                _ex = _get_db().execute(
+                                    "SELECT alert_type FROM watchlist "
+                                    "WHERE symbol=? AND direction=? AND status='active'",
+                                    (_w_sym, _w_dir),
+                                ).fetchone()
+                            _ex_atype = (_ex[0] if _ex else None) or "?"
+                        except Exception:
+                            _ex_atype = "?"
                         _telegram_send(
                             chat_id,
-                            f"🔔 <code>{_w_sym}</code> {_w_dir} уже в активном наблюдении",
+                            f"🔔 <code>{_w_sym}</code> {_w_dir} уже в активном наблюдении"
+                            f" (сигнал: {_ex_atype})",
                         )
             except Exception as w_exc:
                 logger.error("watch callback failed: %s", w_exc)
