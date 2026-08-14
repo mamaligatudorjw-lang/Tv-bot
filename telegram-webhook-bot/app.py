@@ -539,7 +539,8 @@ def _telegram_send(
         body = ""
         try:
             body = resp.text[:300]
-        except Exception:
+        except Exception as _exc:
+            logger.warning("_telegram_send suppressed error: %s", _exc)
             pass
         logger.error("Telegram send failed: %s | body: %s", e, body)
         return False
@@ -1257,12 +1258,14 @@ def _ai_veto_confluence(
         elif lu.startswith("ДНИ:") or lu.startswith("ДНИ :"):
             try:
                 hold_days = max(1, min(14, int(line.split(":", 1)[-1].strip())))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as _exc:
+                logger.warning("_ai_veto_confluence suppressed error: %s", _exc)
                 pass
         elif lu.startswith("ЦЕЛЬ:") or lu.startswith("ЦЕЛЬ :"):
             try:
                 hold_target = float(line.split(":", 1)[-1].strip())
-            except (ValueError, TypeError):
+            except (ValueError, TypeError) as _exc:
+                logger.warning("_ai_veto_confluence suppressed error: %s", _exc)
                 pass
 
     if "ЗАБЛОКИРОВАТЬ" in resp_upper:
@@ -2220,14 +2223,16 @@ def check_demo_positions() -> None:
             t = _gateio_ticker(sym)
             if t:
                 prices[sym] = float(t["lastPrice"])
-        except Exception:
+        except Exception as _exc:
+            logger.warning("check_demo_positions suppressed error: %s", _exc)
             pass
         try:
             _c = _gateio_klines(sym, "1m", 2)
             if len(_c) >= 2:
                 _lc = _c[-2]   # last *completed* candle; index -1 is still forming
                 candles_1m[sym] = (float(_lc[3]), float(_lc[2]))   # (low, high)
-        except Exception:
+        except Exception as _exc:
+            logger.warning("check_demo_positions suppressed error: %s", _exc)
             pass
 
     now_ts = int(time.time())
@@ -2426,7 +2431,8 @@ def handle_demo_command(chat_id: int) -> None:
             t = _gateio_ticker(sym)
             if t:
                 open_prices[sym] = float(t["lastPrice"])
-        except Exception:
+        except Exception as _exc:
+            logger.warning("handle_demo_command suppressed error: %s", _exc)
             pass
 
     now_ts = int(time.time())
@@ -2779,7 +2785,8 @@ def handle_demo2_command(chat_id: int) -> None:
             t = _gateio_ticker(sym)
             if t:
                 prices[sym] = float(t["lastPrice"])
-        except Exception:
+        except Exception as _exc:
+            logger.warning("_fetch_price suppressed error: %s", _exc)
             pass
     with ThreadPoolExecutor(max_workers=12) as ex:
         list(ex.map(_fetch_price, syms))
@@ -2992,12 +2999,16 @@ def _poll_telegram_commands() -> None:
                         atype = p["alert_type"]; score = p["score"]
                         rsi = None
                         try: rsi = get_klines_rsi(sym)
-                        except Exception: pass
+                        except Exception as _exc:
+                            logger.warning("_handle_ai_q suppressed error: %s", _exc)
+                            pass
                         pct24 = None
                         try:
                             t = _gateio_ticker(sym)
                             if t: pct24 = float(t["priceChangePercent"])
-                        except Exception: pass
+                        except Exception as _exc:
+                            logger.warning("_handle_ai_q suppressed error: %s", _exc)
+                            pass
                         closes = _fetch_daily_closes_for_crsi(sym)
                         trend_up   = _count_consecutive_trend_days(closes, "up")   if closes else 0
                         trend_down = _count_consecutive_trend_days(closes, "down") if closes else 0
@@ -3131,6 +3142,7 @@ def _load_bot_state() -> dict:
             if isinstance(data, dict):
                 return data
     except (FileNotFoundError, json.JSONDecodeError, OSError):
+        logger.warning("_load_bot_state suppressed error: %s", _exc)
         pass
     return {}
 
@@ -3823,7 +3835,8 @@ def _near_24h_high(ticker: dict | None, threshold: float = 0.98) -> bool:
         high = float(ticker["highPrice"])
         price = float(ticker["lastPrice"])
         return high > 0 and price >= high * threshold
-    except (ValueError, KeyError):
+    except (ValueError, KeyError) as _exc:
+        logger.debug("_near_24h_high suppressed error: %s", _exc)
         return False
 
 
@@ -3954,6 +3967,7 @@ def _get_db() -> sqlite3.Connection:
             try:
                 _db_conn.execute(f"ALTER TABLE alerts ADD COLUMN {_col} {_coltype}")
             except sqlite3.OperationalError:
+                logger.warning("_get_db suppressed error: %s", _exc)
                 pass
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS hidden_items (
@@ -4318,7 +4332,8 @@ def fill_alert_followups(tickers: dict[str, dict] | None) -> None:
                     continue
                 try:
                     cur = float(t["lastPrice"])
-                except (ValueError, KeyError):
+                except (ValueError, KeyError) as _exc:
+                    logger.debug("fill_alert_followups suppressed error: %s", _exc)
                     continue
                 updates.append((
                     cur if (p3m is None and ts <= c3m)  else p3m,
@@ -5118,7 +5133,8 @@ def send_alert_with_log(
                 _ew_atr = state["atr_4h"].get(symbol)
             _sl_derived, _ = _compute_demo_sl_tp(recommendation, price, _ew_atr)
             sl_price = _sl_derived
-        except Exception:
+        except Exception as _exc:
+            logger.warning("send_alert_with_log suppressed error: %s", _exc)
             pass
 
     markup = _build_alert_buttons(
@@ -5136,7 +5152,8 @@ def send_alert_with_log(
                 conn = _get_db()
                 conn.execute("DELETE FROM alerts WHERE id=?", (alert_id,))
                 conn.commit()
-        except Exception:
+        except Exception as _exc:
+            logger.warning("send_alert_with_log suppressed error: %s", _exc)
             pass
         return (False, None)
     if _regime_label:
@@ -5158,7 +5175,8 @@ def send_alert_with_log(
                 conn = _get_db()
                 conn.execute("DELETE FROM alerts WHERE id=?", (alert_id,))
                 conn.commit()
-        except Exception:
+        except Exception as _exc:
+            logger.warning("send_alert_with_log suppressed error: %s", _exc)
             pass
         return (False, None)
     # Launch position monitor for the delivered signal
@@ -5590,7 +5608,8 @@ def _fetch_1h_closes(symbol: str, limit: int = 14) -> list[float] | None:
         if not candles or len(candles) < 8:
             return None
         return [float(k[4]) for k in candles[:-1]]   # drop last (live) candle
-    except Exception:
+    except Exception as _exc:
+        logger.warning("_fetch_1h_closes suppressed error: %s", _exc)
         return None
 
 
@@ -5602,7 +5621,8 @@ def _fetch_1h_ohlcv(symbol: str, limit: int = 25) -> list | None:
         if not candles or len(candles) < 8:
             return None
         return candles[:-1]
-    except Exception:
+    except Exception as _exc:
+        logger.warning("_fetch_1h_ohlcv suppressed error: %s", _exc)
         return None
 
 
@@ -5637,7 +5657,8 @@ def _fetch_4h_ohlcv(symbol: str, limit: int = 60) -> list | None:
         if not candles or len(candles) < 10:
             return None
         return candles[:-1]  # drop current incomplete candle
-    except Exception:
+    except Exception as _exc:
+        logger.warning("_fetch_4h_ohlcv suppressed error: %s", _exc)
         return None
 
 
@@ -5691,7 +5712,8 @@ def _fetch_gate_lsr_raw(symbol: str) -> float | None:
             return None
         lsr = float(data[0].get("top_lsr_size") or 0)
         return lsr if lsr > 0 else None
-    except Exception:
+    except Exception as _exc:
+        logger.warning("_fetch_gate_lsr_raw suppressed error: %s", _exc)
         return None
 
 
@@ -5717,7 +5739,8 @@ def check_intraday_streak(
     if btc_t:
         try:
             btc_pct24 = float(btc_t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_intraday_streak suppressed error: %s", _exc)
             pass
 
     for symbol, t in tickers.items():
@@ -5725,7 +5748,8 @@ def check_intraday_streak(
             pct24   = float(t["priceChangePercent"])
             price   = float(t["lastPrice"])
             vol24   = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_intraday_streak suppressed error: %s", _exc)
             continue
 
         if vol24 < MIN_VOLUME_USDT:
@@ -5959,7 +5983,8 @@ def check_vwap_reversion(
             pct24 = float(t["priceChangePercent"])
             price = float(t["lastPrice"])
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_vwap_reversion suppressed error: %s", _exc)
             continue
 
         if vol24 < MIN_VOLUME_USDT:
@@ -6098,7 +6123,8 @@ def check_bollinger_squeeze(
             pct24 = float(t["priceChangePercent"])
             price = float(t["lastPrice"])
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_bollinger_squeeze suppressed error: %s", _exc)
             continue
 
         if vol24 < MIN_VOLUME_USDT:
@@ -6215,7 +6241,8 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
     for symbol, t in tickers.items():
         try:
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_ema_crossover suppressed error: %s", _exc)
             continue
 
         if vol24 < MIN_VOLUME_USDT:
@@ -6417,11 +6444,13 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
     if ticker:
         try:
             price_str = f"${float(ticker['lastPrice']):,.6g}"
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("send_new_listing_alert suppressed error: %s", _exc)
             pass
         try:
             volume_str = f"${float(ticker['quoteVolume']):,.0f}"
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("send_new_listing_alert suppressed error: %s", _exc)
             pass
 
     body = (
@@ -6439,7 +6468,8 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
         if ticker:
             try:
                 price_for_log = float(ticker["lastPrice"])
-            except (ValueError, KeyError):
+            except (ValueError, KeyError) as _exc:
+                logger.debug("send_new_listing_alert suppressed error: %s", _exc)
                 pass
         log_alert(symbol, "new_listing", "SHORT", price_for_log)
     logger.info("New-listing alert sent: %s", symbol)
@@ -6601,7 +6631,8 @@ def check_24h_highs(tickers: dict[str, dict]) -> list[tuple[str, float, float, f
                     last_sent = last_alerted.get(symbol, 0)
                     if now - last_sent >= HIGH_ALERT_COOLDOWN:
                         alerts.append((symbol, current_high, last_price, volume_usdt))
-            except (ValueError, KeyError):
+            except (ValueError, KeyError) as _exc:
+                logger.debug("check_24h_highs suppressed error: %s", _exc)
                 continue
     return alerts
 
@@ -6637,7 +6668,8 @@ def check_weekly_monthly_highs(
                     if now - last_m.get(symbol, 0) >= MONTHLY_HIGH_COOLDOWN:
                         monthly.append((symbol, m_high, price, vol))
                         # cooldown marked by confluence dispatcher only on send
-            except (ValueError, KeyError):
+            except (ValueError, KeyError) as _exc:
+                logger.debug("check_weekly_monthly_highs suppressed error: %s", _exc)
                 continue
     return weekly, monthly
 
@@ -6804,7 +6836,8 @@ def check_momentum(
             try:
                 price = float(t["lastPrice"])
                 price_str = f"${price:,.6g}"
-            except (ValueError, KeyError):
+            except (ValueError, KeyError) as _exc:
+                logger.debug("check_momentum suppressed error: %s", _exc)
                 pass
 
         # B. EMA-200 trend filter for momentum shorts: if the coin is above
@@ -6902,7 +6935,8 @@ def check_overheated_oversold(
             _p = float(_t["priceChangePercent"])
             _thresh_oh = _vol_threshold(_sym, OVERHEATED_24H_PCT, 2.5)
             _thresh_os = _vol_threshold(_sym, OVERSOLD_24H_PCT, 2.5)
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_overheated_oversold suppressed error: %s", _exc)
             continue
         if _p >= _thresh_oh:
             oh_peers.append((_sym, _p))
@@ -6919,7 +6953,8 @@ def check_overheated_oversold(
         try:
             pct24 = float(t["priceChangePercent"])
             price = float(t["lastPrice"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_overheated_oversold suppressed error: %s", _exc)
             continue
 
         btc_t = tickers.get("BTCUSDT")
@@ -7292,7 +7327,8 @@ def check_breakdown_short(
     if btc_t:
         try:
             btc_pct24 = float(btc_t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_breakdown_short suppressed error: %s", _exc)
             pass
 
     for symbol, t in tickers.items():
@@ -7303,7 +7339,8 @@ def check_breakdown_short(
             pct24 = float(t["priceChangePercent"])
             price = float(t["lastPrice"])
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_breakdown_short suppressed error: %s", _exc)
             continue
 
         # Liquidity filter
@@ -7409,7 +7446,8 @@ def check_momentum_long(
     if btc_t:
         try:
             btc_pct24 = float(btc_t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_momentum_long suppressed error: %s", _exc)
             pass
 
     for symbol, t in tickers.items():
@@ -7420,7 +7458,8 @@ def check_momentum_long(
             pct24 = float(t["priceChangePercent"])
             price = float(t["lastPrice"])
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_momentum_long suppressed error: %s", _exc)
             continue
 
         # Liquidity filter
@@ -7538,7 +7577,8 @@ def check_new_listing_pumps(
     if btc_t:
         try:
             btc_pct24 = float(btc_t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_new_listing_pumps suppressed error: %s", _exc)
             pass
 
     for symbol, listing_price, listing_ts in listings:
@@ -7551,7 +7591,8 @@ def check_new_listing_pumps(
         try:
             price = float(t["lastPrice"])
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_new_listing_pumps suppressed error: %s", _exc)
             continue
 
         rsi = rsi_map.get(symbol)
@@ -7677,7 +7718,8 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
         try:
             price = float(t["lastPrice"])
             pct24 = float(t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_volume_surge_crsi suppressed error: %s", _exc)
             continue
         if not (math.isfinite(price) and math.isfinite(pct24)) or price <= 0:
             continue
@@ -7747,7 +7789,8 @@ def check_pump_24h_fade(
         if btc_t:
             try:
                 btc_pct24 = float(btc_t["priceChangePercent"])
-            except (ValueError, KeyError, TypeError):
+            except (ValueError, KeyError, TypeError) as _exc:
+                logger.debug("check_pump_24h_fade suppressed error: %s", _exc)
                 pass
 
     for symbol, t in tickers.items():
@@ -7757,7 +7800,8 @@ def check_pump_24h_fade(
             price = float(t["lastPrice"])
             pct24 = float(t["priceChangePercent"])
             vol24 = float(t.get("quoteVolume", 0))
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_pump_24h_fade suppressed error: %s", _exc)
             continue
         if not (math.isfinite(price) and math.isfinite(pct24)) or price <= 0:
             continue
@@ -7897,7 +7941,8 @@ def check_listing_dump_long(
     if btc_t:
         try:
             btc_pct24 = float(btc_t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_listing_dump_long suppressed error: %s", _exc)
             pass
 
     for symbol, listing_price, listing_ts in listings:
@@ -7908,7 +7953,8 @@ def check_listing_dump_long(
             price  = float(t["lastPrice"])
             vol24  = float(t["quoteVolume"])
             pct24  = float(t["priceChangePercent"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_listing_dump_long suppressed error: %s", _exc)
             continue
         if price <= 0 or not math.isfinite(price):
             continue
@@ -8026,7 +8072,8 @@ def check_listing_peak_short(
     if btc_t:
         try:
             btc_pct24 = float(btc_t["priceChangePercent"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.debug("check_listing_peak_short suppressed error: %s", _exc)
             pass
 
     for symbol, listing_price, listing_ts in listings:
@@ -8039,7 +8086,8 @@ def check_listing_peak_short(
             price  = float(t["lastPrice"])
             vol24  = float(t["quoteVolume"])
             pct24  = float(t["priceChangePercent"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_listing_peak_short suppressed error: %s", _exc)
             continue
         if price <= 0 or not math.isfinite(price):
             continue
@@ -8202,7 +8250,8 @@ def check_user_position_reversals() -> None:
             if not isinstance(candles, list) or len(candles) < 22:
                 continue
             candles = candles[:-1]   # drop live candle
-        except Exception:
+        except Exception as _exc:
+            logger.warning("check_user_position_reversals suppressed error: %s", _exc)
             continue
 
         closes = [float(c["c"]) for c in candles]
@@ -8634,7 +8683,8 @@ def run_checks():
                 for sym, t in tickers.items():
                     try:
                         vol = float(t["quoteVolume"])
-                    except (ValueError, KeyError):
+                    except (ValueError, KeyError) as _exc:
+                        logger.debug("run_checks suppressed error: %s", _exc)
                         continue
                     if vol >= MIN_VOLUME_USDT:
                         liquid_vol_map[sym] = vol
@@ -8825,7 +8875,8 @@ def run_checks():
                         try:
                             price = float(t["lastPrice"])
                             quote_vol = float(t["quoteVolume"])
-                        except (ValueError, KeyError):
+                        except (ValueError, KeyError) as _exc:
+                            logger.debug("_bucket suppressed error: %s", _exc)
                             pass
                     buckets[symbol] = {
                         "lines": [],
@@ -8921,7 +8972,8 @@ def run_checks():
                         " AND ts_open >= ?",
                         (CONFLUENCE_CAP_CUTOFF_TS,),
                     ).fetchone()[0] or 0
-            except Exception:
+            except Exception as _exc:
+                logger.debug("_bucket suppressed error: %s", _exc)
                 pass
             _cf_opened_this_cycle = 0   # tracks positions opened in this cycle
 
@@ -9066,7 +9118,8 @@ def run_checks():
                                     )
                                     summary["confluence_reversal_blocked"] += 1
                                     continue
-                        except (ValueError, KeyError):
+                        except (ValueError, KeyError) as _exc:
+                            logger.debug("_bucket suppressed error: %s", _exc)
                             pass
 
                 side_for_score = (
@@ -9118,7 +9171,8 @@ def run_checks():
                                     )
                                     summary["single_signals_skipped"] += 1
                                     continue
-                            except (ValueError, KeyError, TypeError):
+                            except (ValueError, KeyError, TypeError) as _exc:
+                                logger.debug("_bucket suppressed error: %s", _exc)
                                 pass
 
                 # --- SHORT score gate (symmetric with LONG) ---
@@ -9257,7 +9311,8 @@ def run_checks():
                     if _tv:
                         try:
                             _pct24_v = float(_tv["priceChangePercent"])
-                        except (ValueError, KeyError, TypeError):
+                        except (ValueError, KeyError, TypeError) as _exc:
+                            logger.debug("_bucket suppressed error: %s", _exc)
                             pass
                 _ai_allow, _ai_note, _ai_hold = True, "", ""
                 if AI_VETO_ENABLED and rec_label == "LONG":
@@ -9312,7 +9367,8 @@ def run_checks():
                             _uptrend_candles_cf = _count_up_in_window(
                                 _4h_closes_flip, UPTREND_FLIP_N_WINDOW
                             )
-                    except Exception:
+                    except Exception as _exc:
+                        logger.debug("_bucket suppressed error: %s", _exc)
                         pass
                 if UPTREND_FLIP_MIN_CANDLES > 0 and _uptrend_candles_cf >= UPTREND_FLIP_MIN_CANDLES:
                     logger.info(
@@ -9523,7 +9579,8 @@ def run_checks():
                 for sym, t in tickers.items():
                     try:
                         new_cache[sym] = float(t["lastPrice"])
-                    except (ValueError, KeyError):
+                    except (ValueError, KeyError) as _exc:
+                        logger.debug("_bucket suppressed error: %s", _exc)
                         pass
                 # Also populate Binance-style 'B'-suffix variants for active
                 # monitors (e.g. KORUBUSDT → KORU_USDT on Gate.io).
@@ -10411,7 +10468,8 @@ def handle_top30_command(chat_id: int) -> None:
             pct = float(t["priceChangePercent"])
             price = float(t["lastPrice"])
             volume = float(t["quoteVolume"])
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as _exc:
+            logger.warning("handle_top30_command suppressed error: %s", _exc)
             continue
         if not (math.isfinite(pct) and math.isfinite(price) and math.isfinite(volume)):
             continue
@@ -10659,7 +10717,8 @@ def handle_stats_command(chat_id: int) -> None:
                 if t and ep:
                     cur = float(t["lastPrice"])
                     unreal += (cur - ep) / ep * 100.0 if dr == "LONG" else (ep - cur) / ep * 100.0
-            except Exception:
+            except Exception as _exc:
+                logger.warning("_flush suppressed error: %s", _exc)
                 pass
 
         def _s(v: float) -> str: return "+" if v >= 0 else ""
@@ -10720,7 +10779,8 @@ def _parse_trade_args(text: str) -> tuple[str, str, float, float] | None:
     try:
         entry = float(entry_s.replace(",", "."))
         exit_ = float(exit_s.replace(",", "."))
-    except ValueError:
+    except ValueError as _exc:
+        logger.debug("_parse_trade_args suppressed error: %s", _exc)
         return None
     if entry <= 0 or exit_ <= 0:
         return None
@@ -11292,7 +11352,8 @@ def handle_analyze_command(chat_id: int, raw_text: str) -> None:
             price       = float(ticker["lastPrice"])
             pct24       = float(ticker["priceChangePercent"])
             volume_usdt = float(ticker["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError) as _exc:
+            logger.debug("fetch_5m suppressed error: %s", _exc)
             pass
 
     if price is None:
@@ -11655,7 +11716,8 @@ def handle_ai_command(chat_id: int, raw_text: str) -> None:
     rsi = None
     try:
         rsi = get_klines_rsi(symbol)
-    except Exception:
+    except Exception as _exc:
+        logger.warning("handle_ai_command suppressed error: %s", _exc)
         pass
     closes = _fetch_daily_closes_for_crsi(symbol)
 
@@ -11690,7 +11752,8 @@ def handle_ai_command(chat_id: int, raw_text: str) -> None:
                 ema_status = (
                     f"{'выше' if price > ema200 else 'ниже'} EMA-200 на {abs(ema_pct):.1f}%"
                 )
-    except Exception:
+    except Exception as _exc:
+        logger.warning("handle_ai_command suppressed error: %s", _exc)
         pass
 
     # Market regime
@@ -12307,7 +12370,8 @@ def api_positions():
                         p = float(t["lastPrice"])
                         if p:
                             prices[sym] = p
-                    except (ValueError, KeyError):
+                    except (ValueError, KeyError) as _exc:
+                        logger.warning("api_positions suppressed error: %s", _exc)
                         pass
             except Exception as e:
                 logger.warning("api_positions: startup live fetch failed: %s", e)
@@ -12492,10 +12556,14 @@ def api_ai_analyze():
         # Gather live data
         ticker = None
         try: ticker = _gateio_ticker(symbol)
-        except Exception: pass
+        except Exception as _exc:
+            logger.warning("api_ai_analyze suppressed error: %s", _exc)
+            pass
         rsi = None
         try: rsi = get_klines_rsi(symbol)
-        except Exception: pass
+        except Exception as _exc:
+            logger.warning("api_ai_analyze suppressed error: %s", _exc)
+            pass
         closes = _fetch_daily_closes_for_crsi(symbol)
 
         if not ticker:
@@ -12607,7 +12675,8 @@ def backup_alerts_db() -> None:
         for stale in existing[:-ALERTS_DB_BACKUP_KEEP]:
             try:
                 os.remove(os.path.join(ALERTS_DB_BACKUP_DIR, stale))
-            except OSError:
+            except OSError as _exc:
+                logger.warning("backup_alerts_db suppressed error: %s", _exc)
                 pass
         kept = min(len(existing), ALERTS_DB_BACKUP_KEEP)
         logger.info("alerts.db backup written: %s (kept %d snapshots)",
