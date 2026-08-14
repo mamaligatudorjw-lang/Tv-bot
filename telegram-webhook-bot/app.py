@@ -3141,7 +3141,7 @@ def _load_bot_state() -> dict:
             data = json.load(f)
             if isinstance(data, dict):
                 return data
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as _exc:
         logger.warning("_load_bot_state suppressed error: %s", _exc)
         pass
     return {}
@@ -3966,7 +3966,7 @@ def _get_db() -> sqlite3.Connection:
         ):
             try:
                 _db_conn.execute(f"ALTER TABLE alerts ADD COLUMN {_col} {_coltype}")
-            except sqlite3.OperationalError:
+            except sqlite3.OperationalError as _exc:
                 logger.warning("_get_db suppressed error: %s", _exc)
                 pass
         _db_conn.execute("""
