@@ -11785,16 +11785,21 @@ def handle_unmute_command(chat_id: int) -> None:
 def _run_retro_duration_analysis(chat_id: int) -> None:
     """Фоновый поток: ретроспективная проверка фильтра длительности 8/12.
     Вызывается командой /retroanalysis. Временная функция — удалить после использования.
+
+    Исправлено: limit = 30*24+14 = 734 свечей на символ, чтобы покрыть полные 30 дней.
+    Предыдущая версия брала limit=26 (последние 26 часов) — все старые сигналы молча пропускались.
     """
     import collections as _col
     CUTOFF = 1_786_712_108
     SINCE  = CUTOFF - 30 * 86400
     WINDOW = 12
     THRESH = 8
+    # 30 дней × 24ч + буфер 14 свечей чтобы покрыть любой сигнал в окне
+    KLINES_LIMIT = 30 * 24 + 14  # = 734
 
     _telegram_send(chat_id, "⏳ Начинаю ретроспективный анализ фильтра длительности...\n"
-                            "Обрабатываю overheated_24h и oversold_24h за последние 30 дней до фильтра.\n"
-                            "Займёт 3–5 минут — пришлю результат сюда.")
+                            "Загружаю 30 дней часовых свечей на каждую монету.\n"
+                            "Займёт 5–10 минут — пришлю результат сюда.")
     try:
         with _db_lock:
             conn_r = _get_db()
@@ -11808,9 +11813,47 @@ def _run_retro_duration_analysis(chat_id: int) -> None:
                 " AND ts>=? AND ts<? ORDER BY symbol, ts",
                 (SINCE, CUTOFF)
             ).fetchall()
+            # Позиции для конверсионного блока
+            pos_rows = conn_r.execute(
+                "SELECT alert_type, is_shadow, status FROM demo_positions"
+                " WHERE alert_type IN ('oversold_24h','overheated_24h')"
+                "   AND ts_open>=? AND ts_open<?",
+                (SINCE, CUTOFF)
+            ).fetchall()
+            # Позиции после CUTOFF (для прогноза)
+            now_ts = int(time.time())
+            pos_after = conn_r.execute(
+                "SELECT alert_type, is_shadow FROM demo_positions"
+                " WHERE alert_type IN ('oversold_24h','overheated_24h')"
+                "   AND ts_open>=?",
+                (CUTOFF,)
+            ).fetchall()
     except Exception as e:
         _telegram_send(chat_id, f"❌ Ошибка чтения БД: {e}")
         return
+
+    # --- Блок 0: статистика позиций (до анализа свечей) ---
+    days_since_cutoff = max((now_ts - CUTOFF) / 86400, 0.01)
+    for atype in ("oversold_24h", "overheated_24h"):
+        n_sig = sum(1 for r in (signals_os if atype == "oversold_24h" else signals_oh) for _ in [r])
+        real_pos_before  = sum(1 for r in pos_rows  if r[0] == atype and not r[1])
+        shadow_pos_before= sum(1 for r in pos_rows  if r[0] == atype and r[1])
+        real_pos_after   = sum(1 for r in pos_after if r[0] == atype and not r[1])
+        rate_day_pre     = real_pos_before / 30 if real_pos_before else 0
+
+        lines_pos = [
+            f"📋 <b>Позиции: {atype}</b> (за 30 дней до фильтра)",
+            f"Сигналов: {n_sig} | Реальных позиций: {real_pos_before} | Shadow: {shadow_pos_before}",
+            f"Конверсия сигнал→реал. позиция: {100*real_pos_before/max(n_sig,1):.1f}%",
+            f"Темп до CUTOFF: {rate_day_pre:.1f} поз/день",
+            f"",
+            f"После CUTOFF ({days_since_cutoff:.1f} дн): {real_pos_after} реал. поз",
+        ]
+        # Прогноз 21 день будет добавлен после получения pass_pct из свечного анализа
+        _telegram_send(chat_id, "\n".join(lines_pos))
+
+    # --- Блок 1+: свечной анализ ---
+    pass_pct_by_type: dict[str, float] = {}
 
     for atype, signals, direction in [
         ("overheated_24h", signals_oh, "up"),
@@ -11820,20 +11863,30 @@ def _run_retro_duration_analysis(chat_id: int) -> None:
         for sym, ts in signals:
             by_sym[sym].append(ts)
 
-        rows = []
-        errors = 0
+        rows: list[int] = []
+        skipped = 0
+        errors  = 0
         sym_list = list(by_sym.items())
-        for i, (sym, tss) in enumerate(sym_list):
+
+        _telegram_send(chat_id, f"🔄 {atype}: загружаю {len(sym_list)} монет × 734 свечи...")
+
+        for sym, tss in sym_list:
             try:
-                raw = _gateio_klines(sym, "1h", WINDOW + 14)
+                raw = _gateio_klines(sym, "1h", KLINES_LIMIT)
                 if not raw or len(raw) < WINDOW + 1:
-                    errors += 1
+                    errors += len(tss)
                     continue
-                candles = sorted([(int(c[0]), float(c[4])) for c in raw], key=lambda x: x[0])
+                # Gate.io: c[0]=ts, c[4]=close
+                candles = sorted(
+                    [(int(c[0]), float(c[4])) for c in raw],
+                    key=lambda x: x[0]
+                )
                 for sig_ts in tss:
                     hour_floor = (sig_ts // 3600) * 3600
-                    preceding = [c for c in candles if c[0] < hour_floor]
+                    preceding  = [c for c in candles if c[0] < hour_floor]
                     if len(preceding) < WINDOW + 1:
+                        # Сигнал слишком ранний для этого снимка — считаем ошибкой данных
+                        skipped += 1
                         continue
                     closes = [c[1] for c in preceding[-(WINDOW + 1):]]
                     if direction == "up":
@@ -11842,31 +11895,44 @@ def _run_retro_duration_analysis(chat_id: int) -> None:
                         count = sum(1 for j in range(1, len(closes)) if closes[j] < closes[j - 1])
                     rows.append(count)
             except Exception:
-                errors += 1
-            time.sleep(0.08)
+                errors += len(tss)
+            time.sleep(0.10)
 
         if not rows:
-            _telegram_send(chat_id, f"❌ {atype}: нет данных (API-ошибки: {errors})")
+            _telegram_send(chat_id, f"❌ {atype}: нет данных (API-ошибки: {errors}, пропущено: {skipped})")
             continue
 
         total  = len(rows)
         passed = sum(1 for c in rows if c >= THRESH)
         dist   = _col.Counter(rows)
+        pct    = 100 * passed / total
+        pass_pct_by_type[atype] = pct
+
+        # Прогноз позиций на 21 день после фильтра
+        rate_day_pre = sum(1 for r in pos_rows if r[0] == atype and not r[1]) / 30
+        proj_21 = rate_day_pre * (pct / 100) * 21
 
         lines = [
             f"📊 <b>Ретро-анализ: {atype}</b>",
-            f"За 30 дней до введения фильтра | Монет: {len(by_sym)} | Сигналов: {total}",
-            f"Прошли бы фильтр ≥{THRESH}/12: <b>{passed} ({100*passed/total:.1f}%)</b>",
+            f"Монет: {len(by_sym)} | Сигналов проанализировано: {total}"
+            + (f" | Пропущено (данных нет): {skipped}" if skipped else "")
+            + (f" | API-ошибки: {errors}" if errors else ""),
+            f"",
+            f"Прошли бы фильтр ≥{THRESH}/12: <b>{passed} ({pct:.1f}%)</b>",
             f"Были бы отсеяны: <b>{total-passed} ({100*(total-passed)/total:.1f}%)</b>",
-            f"API-ошибки (пропущено): {errors}",
+            f"",
+            f"📈 Прогноз позиций за 3 нед. после фильтра:",
+            f"  {rate_day_pre:.1f} поз/день × {pct:.0f}% пропуска × 21 дн = <b>~{proj_21:.0f} позиций</b>",
+            f"  (порог Task #70: n≥5 → {'✅ достижим' if proj_21 >= 5 else '⚠️ под вопросом'})",
+            f"",
             "━━━━━━━━━━━━━━━━━━━━",
             f"{'Счётч':>6}  {'Сигн':>5}  {'%':>5}  {'нараст':>7}  Бар",
         ]
         cumul = 0
         for cnt in range(12, -1, -1):
-            n = dist.get(cnt, 0)
+            n   = dist.get(cnt, 0)
             cumul += n
-            bar = "▓" * min(int(n * 20 / max(total, 1)), 20)
+            bar  = "▓" * min(int(n * 20 / max(total, 1)), 20)
             mark = " ← порог" if cnt == THRESH else ""
             lines.append(
                 f"{cnt:>5}/12  {n:>5}  {100*n/total:>4.1f}%  {100*cumul/total:>5.1f}%  {bar}{mark}"
