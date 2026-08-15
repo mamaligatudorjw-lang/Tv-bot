@@ -3552,17 +3552,25 @@ def _count_consecutive_trend_days(closes: list[float], direction: str) -> int:
     return count
 
 
-def _count_up_in_window(closes: list[float], n: int = 6) -> int:
-    """Count how many of the last N 4h-candles closed higher than the previous one.
+def _count_up_in_window(closes: list[float], n: int = 6, symbol: str = "") -> "int | None":
+    """Count how many of the last N hourly candles closed higher than the previous one.
 
     Uses the most-recent (n+1) candles to form n consecutive pairs and counts
-    bullish pairs. Ignores the current (incomplete) candle — caller should pass
-    only completed closes (all but the last element of the raw list).
+    bullish pairs. Caller must pass only completed closes (_fetch_1h_closes already
+    drops the live candle internally — do NOT slice again at the call site).
 
-    Returns 0 if there is insufficient data.
+    Returns None (+ logger.warning) when data is insufficient, so the caller can
+    distinguish "truly zero up-candles" from "data unavailable" and skip the filter
+    rather than silently blocking signals with a misleading 0.
     """
     if not closes or len(closes) < n + 1:
-        return 0
+        logger.warning(
+            "_count_up_in_window: insufficient data%s — got %d candles, need %d",
+            f" for {symbol}" if symbol else "",
+            len(closes) if closes else 0,
+            n + 1,
+        )
+        return None
     recent = closes[-(n + 1):]          # n+1 candles → n pairs
     return sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
 
@@ -7195,30 +7203,27 @@ def check_overheated_oversold(
             # Duration filter: require sustained hourly uptrend, not a single-candle spike.
             # Uses _count_up_in_window (X-of-Y, gaps allowed — NOT consecutive streak).
             _oh_1h_raw    = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
-            _oh_up_count  = 0
-            # Note: _fetch_1h_closes already drops the live (incomplete) candle internally.
-            # Pass the list directly — do NOT slice again or _count_up_in_window gets
-            # n elements instead of n+1 and always returns 0 (off-by-one bug).
-            if _oh_1h_raw and len(_oh_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
-                _oh_up_count = _count_up_in_window(
-                    _oh_1h_raw, OVERHEATED_DURATION_WINDOW
+            # _fetch_1h_closes already drops the live candle; do NOT slice again.
+            # None = insufficient data → skip filter (don't block signal).
+            _oh_up_count  = _count_up_in_window(
+                _oh_1h_raw or [], OVERHEATED_DURATION_WINDOW, symbol
+            )
+            if _oh_up_count is not None and _oh_up_count < OVERHEATED_DURATION_MIN_UP:
+                logger.info(
+                    "Overheated blocked by duration filter: %s up=%d/%d",
+                    symbol, _oh_up_count, OVERHEATED_DURATION_WINDOW,
                 )
-                if _oh_up_count < OVERHEATED_DURATION_MIN_UP:
-                    logger.info(
-                        "Overheated blocked by duration filter: %s up=%d/%d",
-                        symbol, _oh_up_count, OVERHEATED_DURATION_WINDOW,
+                _dsl_dur_oh, _dtp_dur_oh = _compute_demo_sl_tp("LONG", price, atr)
+                if _dsl_dur_oh and _dtp_dur_oh:
+                    _demo_open_position(
+                        symbol, "LONG", price, _dsl_dur_oh, _dtp_dur_oh,
+                        is_shadow=True,
+                        shadow_reason=(
+                            f"duration_filter: {_oh_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
+                        ),
+                        alert_type="overheated_24h",
                     )
-                    _dsl_dur_oh, _dtp_dur_oh = _compute_demo_sl_tp("LONG", price, atr)
-                    if _dsl_dur_oh and _dtp_dur_oh:
-                        _demo_open_position(
-                            symbol, "LONG", price, _dsl_dur_oh, _dtp_dur_oh,
-                            is_shadow=True,
-                            shadow_reason=(
-                                f"duration_filter: {_oh_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
-                            ),
-                            alert_type="overheated_24h",
-                        )
-                    continue
+                continue
 
             with state_lock:
                 last = state["last_overheated_alerted"].get(symbol, 0)
@@ -7245,6 +7250,10 @@ def check_overheated_oversold(
                     if _oh_others else ""
                 )
                 _oh_trend_warn = _trend_warning_line(symbol, "LONG")
+                _oh_dur_str = (
+                    f"<b>{_oh_up_count}</b> из {OVERHEATED_DURATION_WINDOW}"
+                    if _oh_up_count is not None else "<b>нет данных</b>"
+                )
                 body = (
                     f"🚀 <b>ИМПУЛЬС ВВЕРХ — продолжение роста</b>\n"
                     f"Монета в сильном восходящем импульсе\n"
@@ -7252,7 +7261,7 @@ def check_overheated_oversold(
                     f"<code>{symbol}</code>\n"
                     f"📈 24ч: <b>+{pct24:.1f}%</b> (порог <b>+{oh_threshold:.1f}%</b>)\n"
                     f"🔥 RSI: <b>{rsi:.1f}</b>\n"
-                    f"⏱ Устойчивость: <b>{_oh_up_count}</b> из {OVERHEATED_DURATION_WINDOW} часовых свечей закрылись вверх\n"
+                    f"⏱ Устойчивость: {_oh_dur_str} часовых свечей закрылись вверх\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
@@ -7362,28 +7371,27 @@ def check_overheated_oversold(
 
             # Duration filter (= overheated_24h: ≥8/12 hourly candles up)
             _oe_1h_raw   = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
-            _oe_up_count = 0
-            # _fetch_1h_closes already drops the live candle — do NOT slice again.
-            if _oe_1h_raw and len(_oe_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
-                _oe_up_count = _count_up_in_window(
-                    _oe_1h_raw, OVERHEATED_DURATION_WINDOW
+            # _fetch_1h_closes already drops the live candle; do NOT slice again.
+            # None = insufficient data → skip filter (don't block signal).
+            _oe_up_count = _count_up_in_window(
+                _oe_1h_raw or [], OVERHEATED_DURATION_WINDOW, symbol
+            )
+            if _oe_up_count is not None and _oe_up_count < OVERHEATED_DURATION_MIN_UP:
+                logger.info(
+                    "Overheated_early blocked by duration filter: %s up=%d/%d",
+                    symbol, _oe_up_count, OVERHEATED_DURATION_WINDOW,
                 )
-                if _oe_up_count < OVERHEATED_DURATION_MIN_UP:
-                    logger.info(
-                        "Overheated_early blocked by duration filter: %s up=%d/%d",
-                        symbol, _oe_up_count, OVERHEATED_DURATION_WINDOW,
+                _dsl_dur_oe, _dtp_dur_oe = _compute_demo_sl_tp("LONG", price, atr)
+                if _dsl_dur_oe and _dtp_dur_oe:
+                    _demo_open_position(
+                        symbol, "LONG", price, _dsl_dur_oe, _dtp_dur_oe,
+                        is_shadow=True,
+                        shadow_reason=(
+                            f"duration_filter: {_oe_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
+                        ),
+                        alert_type="overheated_early",
                     )
-                    _dsl_dur_oe, _dtp_dur_oe = _compute_demo_sl_tp("LONG", price, atr)
-                    if _dsl_dur_oe and _dtp_dur_oe:
-                        _demo_open_position(
-                            symbol, "LONG", price, _dsl_dur_oe, _dtp_dur_oe,
-                            is_shadow=True,
-                            shadow_reason=(
-                                f"duration_filter: {_oe_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
-                            ),
-                            alert_type="overheated_early",
-                        )
-                    continue
+                continue
 
             with state_lock:
                 last_oe = state["last_overheated_early_alerted"].get(symbol, 0)
@@ -7466,6 +7474,10 @@ def check_overheated_oversold(
 
             _oe_sl_tp = _format_sl_tp("buy", price, atr, score=_oe_score)
             _oe_trend_warn = _trend_warning_line(symbol, "LONG")
+            _oe_dur_str = (
+                f"<b>{_oe_up_count}</b> из {OVERHEATED_DURATION_WINDOW}"
+                if _oe_up_count is not None else "<b>нет данных</b>"
+            )
             _oe_body = (
                 f"🚀 <b>РАННИЙ ИМПУЛЬС ВВЕРХ</b>\n"
                 f"Монета набирает силу, RSI ещё не перекуплен\n"
@@ -7473,7 +7485,7 @@ def check_overheated_oversold(
                 f"<code>{symbol}</code>\n"
                 f"📈 24ч: <b>+{pct24:.1f}%</b> (порог <b>+{oh_threshold:.1f}%</b>)\n"
                 f"🌡 RSI: <b>{rsi:.1f}</b> (зона {OVERHEATED_EARLY_RSI_MIN:.0f}–{RSI_OVERBOUGHT:.0f})\n"
-                f"⏱ Устойчивость: <b>{_oe_up_count}</b> из {OVERHEATED_DURATION_WINDOW} часовых свечей закрылись вверх\n"
+                f"⏱ Устойчивость: {_oe_dur_str} часовых свечей закрылись вверх\n"
                 f"💰 Цена: ${price:,.6g}\n"
                 f"🎯 Сила сигнала: <b>{_oe_score}/100</b> ({_strength_label(_oe_score)})"
                 + (f"\n{_oe_sl_tp}" if _oe_sl_tp else "")
@@ -7510,29 +7522,30 @@ def check_overheated_oversold(
                 # of the last OVERHEATED_DURATION_WINDOW hourly candles closed DOWN.
                 # X-of-Y count (gaps allowed — NOT consecutive streak).
                 _os_1h_raw     = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
-                _os_down_count = 0
-                # _fetch_1h_closes already drops the live candle — do NOT slice again.
+                # _fetch_1h_closes already drops the live candle; do NOT slice again.
+                # None = insufficient data → skip filter (don't block signal).
+                _os_down_count = None
                 if _os_1h_raw and len(_os_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
                     _os_down_count = sum(
                         1 for i in range(1, len(_os_1h_raw))
                         if _os_1h_raw[i] < _os_1h_raw[i - 1]
                     )
-                    if _os_down_count < OVERHEATED_DURATION_MIN_DOWN:
-                        logger.info(
-                            "Oversold blocked by duration filter: %s down=%d/%d",
-                            symbol, _os_down_count, OVERHEATED_DURATION_WINDOW,
+                if _os_down_count is not None and _os_down_count < OVERHEATED_DURATION_MIN_DOWN:
+                    logger.info(
+                        "Oversold blocked by duration filter: %s down=%d/%d",
+                        symbol, _os_down_count, OVERHEATED_DURATION_WINDOW,
+                    )
+                    _dsl_dur_os, _dtp_dur_os = _compute_oversold_sl_tp(price, atr)
+                    if _dsl_dur_os and _dtp_dur_os:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_dur_os, _dtp_dur_os,
+                            is_shadow=True,
+                            shadow_reason=(
+                                f"duration_filter: {_os_down_count}/{OVERHEATED_DURATION_WINDOW}↓"
+                            ),
+                            alert_type="oversold_24h",
                         )
-                        _dsl_dur_os, _dtp_dur_os = _compute_oversold_sl_tp(price, atr)
-                        if _dsl_dur_os and _dtp_dur_os:
-                            _demo_open_position(
-                                symbol, "LONG", price, _dsl_dur_os, _dtp_dur_os,
-                                is_shadow=True,
-                                shadow_reason=(
-                                    f"duration_filter: {_os_down_count}/{OVERHEATED_DURATION_WINDOW}↓"
-                                ),
-                                alert_type="oversold_24h",
-                            )
-                        continue
+                    continue
 
                 # ── Подтверждение разворота: последняя завершённая 1ч свеча зелёная ──
                 # RSI ≤ 30 + падение само по себе не значит разворот — монета может
@@ -7597,6 +7610,10 @@ def check_overheated_oversold(
                         _os_down_line += " 🔥 экстремальная перепроданность"
                     elif _os_down_days >= 3:
                         _os_down_line += " ⚠️"
+                _os_dur_str = (
+                    f"<b>{_os_down_count}</b> из {OVERHEATED_DURATION_WINDOW}"
+                    if _os_down_count is not None else "<b>нет данных</b>"
+                )
                 body = (
                     f"🟢 <b>ПЕРЕПРОДАННОСТЬ — разворот вверх</b>\n"
                     f"Монета сильно упала, RSI в зоне перепроданности — отскок вероятен\n"
@@ -7604,7 +7621,7 @@ def check_overheated_oversold(
                     f"<code>{symbol}</code>\n"
                     f"📉 24ч: <b>{pct24:.1f}%</b> (порог <b>{os_threshold:.1f}%</b>)\n"
                     f"🟢 RSI: <b>{rsi:.1f}</b> — зона перепроданности\n"
-                    f"⏱ Давление: <b>{_os_down_count}</b> из {OVERHEATED_DURATION_WINDOW} часовых свечей закрылись вниз\n"
+                    f"⏱ Давление: {_os_dur_str} часовых свечей закрылись вниз\n"
                     f"💰 Цена: ${price:,.6g}\n"
                     f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
                     + (f"\n{sl_tp}" if sl_tp else "")
