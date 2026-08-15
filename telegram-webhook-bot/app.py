@@ -6346,12 +6346,6 @@ def check_bollinger_squeeze(
             is_shadow=True,
             alert_type="bb_squeeze",
             score=62,
-            notify_body=(
-                f"📊 BB Squeeze <b>{'LONG 📈' if direction == 'LONG' else 'SHORT 📉'}</b>"
-                f" <code>{symbol}</code>\n"
-                f"Цена: <b>${b_close:,.6g}</b>  |  Squeeze: {width[squeeze_idx]:.2f}%\n"
-                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
-            ),
         )
 
         with state_lock:
