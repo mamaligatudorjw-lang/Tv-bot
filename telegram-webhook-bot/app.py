@@ -512,8 +512,19 @@ PUMP_FILTER_SHORT_ENABLED = False       # ВЫКЛ: теневые данные 
 PUMP_FILTER_LONG_ENABLED  = False       # не блокировать LONG во время дампа (оставить выкл.)
 UPTREND_FLIP_MIN_CANDLES  = 4           # X-of-N gate: заблокировать SHORT если ≥ этого числа
 UPTREND_FLIP_N_WINDOW     = 6           # из N последних 4h-свечей были бычьими (4of6 выбрано по бэктесту Aug 10-13)
-SHADOW_ONLY_MODE          = True        # True = отправлять теневые сигналы в Telegram, реальные — молчать
-SHADOW_MODE_EXEMPT_TYPES  = {"oversold_24h", "streak_1h", "confluence"}  # эти типы приходят как реальные сигналы (без 👻)
+SHADOW_ONLY_MODE          = True   # True = реальные сигналы заблокированы по умолчанию.
+                                   # Применяется ТОЛЬКО к типам, не перечисленным в ALERT_TYPE_SHADOW_ONLY.
+                                   # Типы в ALERT_TYPE_SHADOW_ONLY сами управляют своим поведением.
+# Per-strategy shadow flags — приоритет выше SHADOW_ONLY_MODE.
+# False = тип идёт в реальную торговлю (bypasses SHADOW_ONLY_MODE, логируется WARNING).
+# True  = явно shadow-only (то же что умолчание, но задаётся явно для ясности).
+# Добавить тип сюда когда у стратегии есть свой флаг или нужно явно разрешить выход в бой.
+ALERT_TYPE_SHADOW_ONLY: dict[str, bool] = {
+    "oversold_24h":  False,          # всегда реальные сигналы
+    "streak_1h":     False,          # всегда реальные сигналы
+    "confluence":    False,          # всегда реальные сигналы
+    "pump_24h_fade": PUMP_FADE_SHADOW_ONLY,  # управляется флагом стратегии (менять там)
+}
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа
 
 # --- Display leverage for ROI calculation in Telegram messages ---
@@ -1694,9 +1705,9 @@ _ew_lock = threading.Lock()
 # pump_fade_confirmed: pending detection entries waiting for reversal confirmation
 _pump_fade_pending: dict[str, dict] = {}  # symbol → {ts, pct24, rsi, pump_price, peak_price, atr}
 _pfp_lock = threading.Lock()
-# Lifetime counters (reset on restart — acceptable for weekly reporting)
-_pfp_confirmed_total: int = 0   # entries that reached confirmation
-_pfp_expired_total:   int = 0   # entries that expired without confirmation
+# TTL expiries and confirmations are tracked as demo_positions rows with
+# shadow_reason='pump_fade_ttl_expired' / no special reason respectively, so
+# stats survive bot restarts and are visible via plain SQL queries.
 
 
 def check_watchlist() -> None:
@@ -5181,7 +5192,19 @@ def send_alert_with_log(
         if state["silenced"]:
             logger.info("Suppressed %s/%s (silenced): %s", symbol, alert_type, body_text[:60])
             return (False, None)
-    if SHADOW_ONLY_MODE and alert_type not in SHADOW_MODE_EXEMPT_TYPES:
+    # Per-strategy shadow flag takes priority over global SHADOW_ONLY_MODE.
+    if alert_type in ALERT_TYPE_SHADOW_ONLY:
+        if ALERT_TYPE_SHADOW_ONLY[alert_type]:
+            logger.debug("Shadow flag: suppressing %s/%s (per-strategy shadow=True)", symbol, alert_type)
+            return (False, None)
+        # Per-strategy flag says live — bypass global mode.
+        if SHADOW_ONLY_MODE:
+            logger.warning(
+                "SHADOW_ONLY_MODE active but '%s' has per-strategy live flag — "
+                "sending real signal for %s",
+                alert_type, symbol,
+            )
+    elif SHADOW_ONLY_MODE:
         logger.debug("SHADOW_ONLY_MODE: suppressing real signal %s/%s", symbol, alert_type)
         return (False, None)
     # Don't send a new signal if the same symbol already has an open real position.
@@ -7253,6 +7276,35 @@ def check_overheated_oversold(
                     body += f"\n⏳ {html.escape(_ai_hold_oh)}"
                 if _ai_note_oh:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_oh)}</i>"
+                # Score gate — applied before both shadow and live paths so the
+                # A/B comparison (overheated_24h vs overheated_early) uses the
+                # same quality bar. send_alert_with_log would apply this for the
+                # live path, but the shadow path bypasses it — gate manually here.
+                _oh_min_score = MIN_SCORE_BY_TYPE.get("overheated_24h", MIN_ALERT_SCORE)
+                if score < _oh_min_score:
+                    logger.info(
+                        "Suppressed %s/overheated_24h (score=%d < min %d)",
+                        symbol, score, _oh_min_score,
+                    )
+                    continue
+                # Shadow path: SHADOW_ONLY_MODE=True, no per-strategy live flag.
+                # Record shadow tracking position so A/B data vs overheated_early
+                # is complete — previously SHADOW_ONLY_MODE silently dropped the event.
+                if SHADOW_ONLY_MODE and "overheated_24h" not in ALERT_TYPE_SHADOW_ONLY:
+                    _dsl_oh_s, _dtp_oh_s = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl_oh_s and _dtp_oh_s:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_oh_s, _dtp_oh_s,
+                            is_shadow=True,
+                            alert_type="overheated_24h",
+                            score=score,
+                            notify_body=body,
+                        )
+                    with state_lock:
+                        state["last_overheated_alerted"][symbol] = now
+                    sent_oh += 1
+                    continue
+
                 delivered, _aid = send_alert_with_log(
                     symbol, "overheated_24h", "LONG", price, body, score,
                     rsi=rsi, pct24=pct24,
@@ -7275,8 +7327,9 @@ def check_overheated_oversold(
         elif (pct24 >= oh_threshold
               and OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
             # ── overheated_early: Ранний импульс LONG (RSI 55–70) ────────────
-            # Shadow-only parallel test vs overheated_24h. Only RSI range differs:
-            # here 55 ≤ RSI < 70 instead of ≥70. All other filters identical.
+            # Shadow-only A/B test vs overheated_24h. The ONLY difference is the
+            # RSI range (55–70 here vs ≥70 in parent). Every other filter is
+            # identical so the 3-week comparison measures RSI-range effect only.
             if not OVERHEATED_ENABLED:
                 continue
             with state_lock:
@@ -7284,7 +7337,7 @@ def check_overheated_oversold(
             if ema_oe is not None and price < ema_oe:
                 continue  # uptrend confirmation: price must be above EMA-200
 
-            # Duration filter: same as overheated_24h (≥8/12 hourly candles up)
+            # Duration filter (= overheated_24h: ≥8/12 hourly candles up)
             _oe_1h_raw   = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
             _oe_up_count = 0
             if _oe_1h_raw and len(_oe_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
@@ -7313,14 +7366,82 @@ def check_overheated_oversold(
             if now - last_oe < OVERHEATED_EARLY_COOLDOWN:
                 continue
 
+            # ── Filters identical to overheated_24h real path ───────────────
+            # is_hidden: user hides this type or symbol entirely
+            if is_hidden("overheated_early", symbol):
+                continue
+            # Silenced
+            with state_lock:
+                _oe_silenced = state["silenced"]
+            if _oe_silenced:
+                continue
+            # Open real-position dedup (mirrors send_alert_with_log check)
+            try:
+                with _db_lock:
+                    _oe_already_open = _get_db().execute(
+                        "SELECT COUNT(*) FROM demo_positions "
+                        "WHERE symbol=? AND status='open' AND is_shadow=0",
+                        (symbol,),
+                    ).fetchone()[0]
+                if _oe_already_open:
+                    continue
+            except Exception:
+                pass
+
             _oe_score = compute_signal_score(
-                "overheated_24h", "buy",  # same scoring formula as parent strategy
+                "overheated_24h", "buy",  # identical scoring formula
                 rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
             )
             _fl_delta_oe, _fl_text_oe, _, _ = _funding_lsr_score_and_text(symbol, "buy")
             _oe_score = max(0, min(100, _oe_score + _fl_delta_oe))
-            _oe_sl_tp = _format_sl_tp("buy", price, atr, score=_oe_score)
 
+            # Score gate (= overheated_24h threshold, currently 75)
+            _oe_min_score = MIN_SCORE_BY_TYPE.get("overheated_24h", MIN_ALERT_SCORE)
+            if _oe_score < _oe_min_score:
+                logger.info(
+                    "Suppressed %s/overheated_early (score=%d < min %d)",
+                    symbol, _oe_score, _oe_min_score,
+                )
+                continue
+
+            # Liq veto (= overheated_24h)
+            _vol24_oe = float((tickers.get(symbol) or {}).get("quoteVolume", 0))
+            _liq_veto_oe, _liq_reason_oe = _check_liq_veto(symbol, "buy", _vol24_oe)
+            if _liq_veto_oe:
+                logger.info(
+                    "SUPPRESSED overheated_early %s — ликвидации: %s", symbol, _liq_reason_oe,
+                )
+                _dsl_lv_oe, _dtp_lv_oe = _compute_demo_sl_tp("LONG", price, atr)
+                if _dsl_lv_oe and _dtp_lv_oe:
+                    _demo_open_position(
+                        symbol, "LONG", price, _dsl_lv_oe, _dtp_lv_oe,
+                        is_shadow=True,
+                        shadow_reason=f"liq_veto: {_liq_reason_oe}",
+                        alert_type="overheated_early",
+                    )
+                continue
+            # AI veto (= overheated_24h)
+            _ai_ok_oe, _ai_note_oe = True, ""
+            if AI_VETO_ENABLED:
+                _ai_ok_oe, _ai_note_oe, _ = _ai_veto_confluence(
+                    symbol, "LONG", rsi, pct24, None
+                )
+                if not _ai_ok_oe:
+                    logger.info(
+                        "SUPPRESSED overheated_early %s — ИИ: %s", symbol, _ai_note_oe,
+                    )
+                    _dsl_av_oe, _dtp_av_oe = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl_av_oe and _dtp_av_oe:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_av_oe, _dtp_av_oe,
+                            is_shadow=True,
+                            shadow_reason=f"ai_veto: {_ai_note_oe}",
+                            alert_type="overheated_early",
+                        )
+                    continue
+
+            _oe_sl_tp = _format_sl_tp("buy", price, atr, score=_oe_score)
+            _oe_trend_warn = _trend_warning_line(symbol, "LONG")
             _oe_body = (
                 f"🚀 <b>РАННИЙ ИМПУЛЬС ВВЕРХ</b>\n"
                 f"Монета набирает силу, RSI ещё не перекуплен\n"
@@ -7332,10 +7453,10 @@ def check_overheated_oversold(
                 f"💰 Цена: ${price:,.6g}\n"
                 f"🎯 Сила сигнала: <b>{_oe_score}/100</b> ({_strength_label(_oe_score)})"
                 + (f"\n{_oe_sl_tp}" if _oe_sl_tp else "")
+                + (f"\n{_fl_text_oe}" if _fl_text_oe else "")
+                + (f"\n{_oe_trend_warn}" if _oe_trend_warn else "")
                 + "\n⚠️ <i>[ТЕСТ: shadow — сравниваем с overheated_24h]</i>"
             )
-            if _fl_text_oe:
-                _oe_body += f"\n{_fl_text_oe}"
 
             _oe_dsl, _oe_dtp = _compute_demo_sl_tp("LONG", price, atr)
             if _oe_dsl and _oe_dtp:
@@ -8185,25 +8306,41 @@ def check_pump_fade_confirmed() -> int:
     Separate alert_type="pump_fade_confirmed" for clean WR comparison vs parent.
     Lifetime stats tracked in _pfp_confirmed_total / _pfp_expired_total.
     """
-    global _pfp_confirmed_total, _pfp_expired_total
     now = time.time()
     confirmed = 0
 
     # --- Expire stale entries ---
     with _pfp_lock:
-        expired = [s for s, e in _pump_fade_pending.items()
-                   if now - e["ts"] > PUMP_FADE_CONFIRMED_TTL]
-        for sym in expired:
-            logger.info(
-                "pump_fade_confirmed: %s expired TTL pump=%.6g peak=%.6g age=%dmin",
-                sym,
-                _pump_fade_pending[sym]["pump_price"],
-                _pump_fade_pending[sym]["peak_price"],
-                int((now - _pump_fade_pending[sym]["ts"]) / 60),
-            )
+        expired_syms = [s for s, e in _pump_fade_pending.items()
+                        if now - e["ts"] > PUMP_FADE_CONFIRMED_TTL]
+        expired_entries = {s: _pump_fade_pending[s] for s in expired_syms}
+        for sym in expired_syms:
             del _pump_fade_pending[sym]
-            _pfp_expired_total += 1
         pending_copy = dict(_pump_fade_pending)
+
+    # --- Record TTL expiries in DB (persistent across restarts, countable by SQL) ---
+    for sym, exp_e in expired_entries.items():
+        logger.info(
+            "pump_fade_confirmed: %s expired TTL pump=%.6g peak=%.6g age=%dmin",
+            sym,
+            exp_e["pump_price"],
+            exp_e["peak_price"],
+            int((now - exp_e["ts"]) / 60),
+        )
+        try:
+            pump_px = exp_e["pump_price"]
+            with _db_lock:
+                _get_db().execute(
+                    "INSERT INTO demo_positions "
+                    "(symbol, direction, entry_price, sl_price, tp_price, ts_open, "
+                    " size_usd, status, is_shadow, shadow_reason, alert_type, is_top) "
+                    "VALUES (?, 'SHORT', ?, ?, ?, ?, 0, 'ttl_expired', 1, "
+                    "        'pump_fade_ttl_expired', 'pump_fade_confirmed', 0)",
+                    (sym, pump_px, pump_px, pump_px, exp_e["ts"]),
+                )
+                _get_db().commit()
+        except Exception as _ttl_exc:
+            logger.warning("pump_fade_ttl_expired DB record failed for %s: %s", sym, _ttl_exc)
 
     # --- Check each pending coin ---
     for symbol, entry in pending_copy.items():
@@ -8255,6 +8392,30 @@ def check_pump_fade_confirmed() -> int:
             with _pfp_lock:
                 _pump_fade_pending.pop(symbol, None)
 
+            # ── Filters equal to pump_24h_fade real path ────────────────────
+            # Keeps the A/B pair (pump_24h_fade vs pump_fade_confirmed) under the
+            # same quality gates so the comparison measures only timing differences.
+            if is_hidden("pump_fade_confirmed", symbol):
+                continue
+            with state_lock:
+                _pfc_silenced = state["silenced"]
+            if _pfc_silenced:
+                continue
+            try:
+                with _db_lock:
+                    _pfc_already_open = _get_db().execute(
+                        "SELECT COUNT(*) FROM demo_positions "
+                        "WHERE symbol=? AND status='open' AND is_shadow=0",
+                        (symbol,),
+                    ).fetchone()[0]
+                if _pfc_already_open:
+                    logger.info(
+                        "pump_fade_confirmed: %s skipped — real position already open", symbol,
+                    )
+                    continue
+            except Exception:
+                pass
+
             entry_price = last_close      # enter at close of confirmation candle
             atr         = entry["atr"]
             pct24       = entry["pct24"]
@@ -8292,7 +8453,6 @@ def check_pump_fade_confirmed() -> int:
                 notify_body=_pfc_body,
             )
 
-            _pfp_confirmed_total += 1
             logger.info(
                 "pump_fade_confirmed: %s SHORT confirmed @%.6g "
                 "pump=%.6g peak=%.6g (+%.1f%%) touch=%.2f%% vol=%.1fx age=%dmin",
@@ -8310,38 +8470,57 @@ def check_pump_fade_confirmed() -> int:
 def _send_pump_fade_weekly_report() -> None:
     """Weekly Telegram summary: confirmed vs TTL-expired pump_fade_confirmed entries.
 
-    Counters reset on bot restart — noted in the message.  If the vast majority
-    of entries expire (TTL too short), the message flags it so the 4h window can
-    be extended.
+    Data is read from demo_positions (persistent across restarts).
+    Expired entries have shadow_reason='pump_fade_ttl_expired'; confirmed entries
+    have status='open'/'tp'/'sl' with alert_type='pump_fade_confirmed'.
     """
-    total = _pfp_confirmed_total + _pfp_expired_total
-    if total == 0:
-        logger.info("pump_fade weekly report: no data yet, skipping")
+    week_ago = time.time() - 7 * 24 * 3600
+    try:
+        with _db_lock:
+            row = _get_db().execute(
+                """
+                SELECT
+                  SUM(CASE WHEN shadow_reason = 'pump_fade_ttl_expired' THEN 1 ELSE 0 END),
+                  SUM(CASE WHEN (shadow_reason IS NULL OR shadow_reason != 'pump_fade_ttl_expired')
+                           THEN 1 ELSE 0 END)
+                FROM demo_positions
+                WHERE alert_type = 'pump_fade_confirmed'
+                  AND ts_open > ?
+                """,
+                (week_ago,),
+            ).fetchone()
+        expired, n_confirmed = (row[0] or 0), (row[1] or 0)
+    except Exception as exc:
+        logger.warning("pump_fade_weekly_report DB query failed: %s", exc)
         return
-    rate = _pfp_confirmed_total / total * 100
+
+    total = n_confirmed + expired
+    if total == 0:
+        logger.info("pump_fade weekly report: no data yet (7d), skipping")
+        return
+    rate = n_confirmed / total * 100
     ttl_flag = (
         "\n⚠️ Большинство истекает по TTL — рассмотреть увеличение TTL > 4ч"
-        if _pfp_expired_total > _pfp_confirmed_total * 3
+        if expired > n_confirmed * 3
         else "\n✅ TTL нормальный"
     )
     msg = (
         f"📊 <b>pump_fade_confirmed: недельный отчёт</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Подтверждено разворотом: <b>{_pfp_confirmed_total}</b>\n"
-        f"Истекло по TTL (4ч): <b>{_pfp_expired_total}</b>\n"
+        f"Подтверждено разворотом: <b>{n_confirmed}</b>\n"
+        f"Истекло по TTL (4ч): <b>{expired}</b>\n"
         f"Итого обнаружено: <b>{total}</b>\n"
         f"Доля подтверждений: <b>{rate:.1f}%</b>"
         + ttl_flag
-        + "\n<i>(счётчики сбрасываются при перезапуске бота)</i>"
     )
     try:
         _telegram_send(TELEGRAM_CHAT_ID, msg)
         logger.info(
-            "pump_fade weekly report sent: confirmed=%d expired=%d total=%d rate=%.1f%%",
-            _pfp_confirmed_total, _pfp_expired_total, total, rate,
+            "pump_fade weekly report: confirmed=%d expired=%d total=%d rate=%.1f%%",
+            n_confirmed, expired, total, rate,
         )
     except Exception as exc:
-        logger.warning("pump_fade_weekly_report failed: %s", exc)
+        logger.warning("pump_fade_weekly_report send failed: %s", exc)
 
 
 def check_listing_dump_long(
