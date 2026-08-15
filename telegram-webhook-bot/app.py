@@ -10047,12 +10047,16 @@ def run_checks():
                         if _4h_flip:
                             _4h_closes_flip = [float(k[4]) for k in _4h_flip[:-1]]  # drop live
                             _uptrend_candles_cf = _count_up_in_window(
-                                _4h_closes_flip, UPTREND_FLIP_N_WINDOW
+                                _4h_closes_flip, UPTREND_FLIP_N_WINDOW, sym
                             )
                     except Exception as _exc:
                         logger.debug("_bucket suppressed error: %s", _exc)
                         pass
-                if UPTREND_FLIP_MIN_CANDLES > 0 and _uptrend_candles_cf >= UPTREND_FLIP_MIN_CANDLES:
+                # None = insufficient candle data (warning already logged by _count_up_in_window)
+                # → skip filter, do not block the signal
+                if (UPTREND_FLIP_MIN_CANDLES > 0
+                        and _uptrend_candles_cf is not None
+                        and _uptrend_candles_cf >= UPTREND_FLIP_MIN_CANDLES):
                     logger.info(
                         "Confluence SHORT %s blocked — %d/%d %s candles bullish",
                         sym, _uptrend_candles_cf, UPTREND_FLIP_N_WINDOW, UPTREND_FLIP_INTERVAL,
