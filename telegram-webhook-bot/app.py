@@ -2320,7 +2320,7 @@ def check_demo_positions() -> None:
     # Only fetch candles for symbols where the current price is within 2% of
     # SL or TP — keeps API calls near-zero in normal conditions.
     near_level_syms: set[str] = set()
-    for _rid, _rsym, _rdir, _rentry, _rsl, _rtp in rows:
+    for _rid, _rsym, _rdir, _rentry, _rsl, _rtp, *_ in rows:
         p = prices.get(_rsym)
         if p is None or _rsl <= 0 or _rtp <= 0:
             continue
