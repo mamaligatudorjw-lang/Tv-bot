@@ -465,15 +465,19 @@ OVERSOLD_SL_CAP_SINCE    = 1786741084  # unix ts when cap was introduced (2026-0
 
 # In BULL market, counter-trend SHORTs require stronger conviction.
 SHORT_BULL_REGIME_MIN_SCORE = 80   # raised from type-default 75 when regime=BULL
-MAX_OPEN_POSITIONS = 500           # effectively uncapped — each monitor is now a dict
-                                    # lookup (cache-based), so 100+ threads are fine;
-                                    # kept as a circuit-breaker against runaway bugs
+MAX_OPEN_POSITIONS = 50            # cap on concurrent PositionMonitor THREADS.
+                                    # This controls Telegram notification volume, NOT
+                                    # position tracking — demo_positions is uncapped and
+                                    # monitored by check_demo_positions independently.
+                                    # _auto_start_monitor is only called for REAL signals
+                                    # (shadow positions never reach it), so this cap only
+                                    # limits real-signal exit notifications.
 # Раздельные лимиты по направлениям (2026-08-04): SHORT-ы теперь живут до
 # 7 дней (listing_peak_short — до 30), поэтому без квоты они могут занять
 # весь общий лимит и заблокировать 4ч LONG-скальпы. LONG-ам гарантирована
 # своя квота, SHORT-ам — своя; сумма квот равна MAX_OPEN_POSITIONS.
-MAX_OPEN_LONG_POSITIONS = 250      # per-direction soft cap (raised with global cap)
-MAX_OPEN_SHORT_POSITIONS = 250     # per-direction soft cap
+MAX_OPEN_LONG_POSITIONS = 25       # per-direction notification cap (LONG scalps)
+MAX_OPEN_SHORT_POSITIONS = 25      # per-direction notification cap (SHORT holds)
 
 # TOP signals: score >= this → «🏆 ТОП СИГНАЛ» marker in Telegram and a
 # separate bucket in /demo (real vs shadow vs top comparison).
