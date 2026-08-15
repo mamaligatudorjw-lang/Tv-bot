@@ -4941,7 +4941,7 @@ STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_clo
 # (not tuned on backtest) per the EMA-lesson: avoid fitting to a handful of examples.
 OVERHEATED_DURATION_WINDOW   = 12   # look at last 12 completed 1h candles
 OVERHEATED_DURATION_MIN_UP   = 8    # min up-closes required for LONG (overheated)
-OVERHEATED_DURATION_MIN_DOWN = 8    # min down-closes required for LONG bounce (oversold)
+OVERHEATED_DURATION_MIN_DOWN = 0    # duration filter for oversold_24h (0 = выключен; 8 = ≥8/12 1h свечей вниз)
 
 # --- VWAP Reversion shadow (mean-reversion complement to Серия 1ч) ---
 # Opposite direction from streak_1h: upstreak → SHORT to VWAP, downstreak → LONG to VWAP.
