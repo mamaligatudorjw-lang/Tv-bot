@@ -2232,18 +2232,21 @@ def check_liquidity_orders() -> None:
 
 
 def check_demo_positions() -> None:
-    """Close demo positions that reached TP or SL. Called every 60 s.
+    """Close demo positions that reached TP or SL. Called every 30 s.
 
     Exit detection (since WICK_CHECK_ENABLED_TS):
       1. lastPrice crosses SL/TP  → exit at lastPrice  (wick_close=0)
       2. last completed 1m candle low/high crosses SL/TP → exit at the level  (wick_close=1)
     Exit price is always the level (SL or TP), never the wick extreme, for honest PnL.
+    Shadow-position exits send a Telegram notification (🔬 SHADOW).
     """
+    _t0 = time.time()
     try:
         with _db_lock:
             conn = _get_db()
             rows = conn.execute(
-                "SELECT id, symbol, direction, entry_price, sl_price, tp_price "
+                "SELECT id, symbol, direction, entry_price, sl_price, tp_price, "
+                "is_shadow, COALESCE(shadow_reason,''), COALESCE(alert_type,'') "
                 "FROM demo_positions WHERE status='open'"
             ).fetchall()
     except Exception as exc:
@@ -2301,8 +2304,15 @@ def check_demo_positions() -> None:
         except Exception as _exc:
             logger.warning("check_demo_positions suppressed error: %s", _exc)
 
+    _t_prices = time.time()
+    logger.info(
+        "check_demo_positions timing: %d open positions, cache_age=%.1fs, "
+        "near_level=%d syms, wick_fetched=%d, price_phase=%.2fs",
+        len(rows), _cache_age, len(near_level_syms), len(candles_1m),
+        _t_prices - _t0,
+    )
     now_ts = int(time.time())
-    for row_id, symbol, direction, entry, sl, tp in rows:
+    for row_id, symbol, direction, entry, sl, tp, is_shadow_pos, shadow_reason_pos, alert_type_pos in rows:
         price = prices.get(symbol)
         if price is None:
             continue
@@ -2346,12 +2356,33 @@ def check_demo_positions() -> None:
                 )
                 conn.commit()
             logger.info(
-                "Demo pos %d %s %s: %s exit=%.6g pnl=$%.2f%s",
+                "Demo %s pos %d %s %s: %s exit=%.6g pnl=$%.2f%s",
+                "shadow" if is_shadow_pos else "real",
                 row_id, symbol, direction, status.upper(), exit_price, pnl_usd,
                 " (wick)" if wick_close else "",
             )
         except Exception as exc:
             logger.warning("check_demo_positions update %d: %s", row_id, exc)
+            continue
+
+        # ── Shadow exit notification ──────────────────────────────────────────
+        if is_shadow_pos:
+            try:
+                _tag     = "TP ✅" if status == "tp" else "SL ❌"
+                _ps      = "+" if pnl_usd >= 0 else ""
+                _pi      = "🟢" if pnl_usd >= 0 else "🔴"
+                _rlabel  = f"\nПричина блок.: <code>{shadow_reason_pos}</code>" if shadow_reason_pos else ""
+                _tlabel  = f" ({alert_type_pos})" if alert_type_pos else ""
+                _wlabel  = " (wick)" if wick_close else ""
+                _telegram_send(
+                    TELEGRAM_CHAT_ID,
+                    f"🔬 SHADOW{_tlabel} — <code>{symbol}</code> {direction}\n"
+                    f"{_tag}  выход: <b>{exit_price:,.6g}</b>{_wlabel}\n"
+                    f"{_pi} P&amp;L: <b>{_ps}${pnl_usd:.2f}</b>"
+                    f"{_rlabel}",
+                )
+            except Exception as _notif_exc:
+                logger.warning("shadow exit notify failed: %s", _notif_exc)
 
 
 def handle_demo_command(chat_id: int) -> None:
@@ -2733,7 +2764,10 @@ def handle_demo_command(chat_id: int) -> None:
 
     # ── Блок «По причине блокировки» — всегда отдельным сообщением ──────────
     if sc_reason_stats:
-        _sr_lines = ["🔒 <b>По причине блокировки</b> (теневые позиции, без admin-закрытий):"]
+        _sr_lines = [
+            "🔒 <b>По причине блокировки</b> (теневые позиции, без admin-закрытий):",
+            "<i>Σ &lt; 0 → фильтр экономит (заблокировал убыточное)  │  Σ &gt; 0 → фильтр упускает прибыль</i>",
+        ]
         for rp, r_open, r_closed, r_tp, r_sl, r_pnl, r_avg in sc_reason_stats:
             rp_safe = html.escape(str(rp))
             if r_closed == 0:
@@ -9475,6 +9509,16 @@ def run_checks():
                 #   4of6 → blocks 27% SL, keeps 92% TP, precision 94% ← deployed
                 #   5of6 → blocks 10% SL only (too conservative)
                 #   consec≥3 → blocks 13% SL (original disabled logic, too strict)
+                #
+                # ⚠️  DO NOT DISABLE this filter based on shadow P&L alone.
+                # Aug 9–10 shadow data appeared to show uptrend_flip as "profitable"
+                # (WR=47.9%), but 131 of 140 records were admin (manual) closures —
+                # pure artifacts.  After removing manual entries, the 9 real records
+                # show WR=11.1%, Σ=−$55, confirming the filter saves money by
+                # blocking short-into-uptrend entries.  The filter was mistakenly
+                # disabled once on that artifact data; the mistake was corrected
+                # Aug 13 with the 4-of-6 rule.  Any re-evaluation must use
+                # exit_method != 'manual' to exclude admin closures.
                 _uptrend_candles_cf = 0
                 if UPTREND_FLIP_MIN_CANDLES > 0 and rec_label == "SHORT":
                     try:
