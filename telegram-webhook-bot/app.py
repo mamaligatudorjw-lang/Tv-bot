@@ -1692,8 +1692,11 @@ _ew_last_trigger: dict[int, int] = {}          # entry_watch_id → last_confirm
 _ew_lock = threading.Lock()
 
 # pump_fade_confirmed: pending detection entries waiting for reversal confirmation
-_pump_fade_pending: dict[str, dict] = {}  # symbol → {ts, pct24, rsi, pump_price, atr}
+_pump_fade_pending: dict[str, dict] = {}  # symbol → {ts, pct24, rsi, pump_price, peak_price, atr}
 _pfp_lock = threading.Lock()
+# Lifetime counters (reset on restart — acceptable for weekly reporting)
+_pfp_confirmed_total: int = 0   # entries that reached confirmation
+_pfp_expired_total:   int = 0   # entries that expired without confirmation
 
 
 def check_watchlist() -> None:
@@ -8081,11 +8084,12 @@ def check_pump_24h_fade(
         with _pfp_lock:
             if symbol not in _pump_fade_pending:
                 _pump_fade_pending[symbol] = {
-                    "ts": now,
-                    "pct24": pct24,
-                    "rsi": rsi,
-                    "pump_price": price,
-                    "atr": atr,
+                    "ts":         now,
+                    "pct24":      pct24,
+                    "rsi":        rsi,
+                    "pump_price": price,   # price at detection — kept for statistics
+                    "peak_price": price,   # running max since detection — used for touch check
+                    "atr":        atr,
                 }
                 logger.info(
                     "pump_fade_confirmed: registered %s pct24=+%.1f%% rsi=%.1f pump_price=%.6g",
@@ -8167,12 +8171,21 @@ def check_pump_fade_confirmed() -> int:
     and checks each pending coin against 3 confirmation conditions on the last
     completed 15m candle:
       1. Bearish close (close < open)
-      2. Candle high touched pump_price within PUMP_FADE_CONFIRMED_ZONE_PCT
+      2. Candle high touched peak_price (running max since detection) within
+         PUMP_FADE_CONFIRMED_ZONE_PCT — NOT the original pump_price, which may
+         be far below the actual top when the coin keeps rising after detection.
       3. Volume ≥ PUMP_FADE_CONFIRMED_VOL_MULT × 10-bar average
+
+    peak_price is updated on every check cycle to track the running maximum
+    across all completed 15m candles since registration.  pump_price (the price
+    at detection) is kept in the entry for statistics (Δ pump_price→peak_price
+    shows how far the coin ran up before eventually reversing).
 
     TTL: PUMP_FADE_CONFIRMED_TTL (4 h). Shadow only with Telegram notification.
     Separate alert_type="pump_fade_confirmed" for clean WR comparison vs parent.
+    Lifetime stats tracked in _pfp_confirmed_total / _pfp_expired_total.
     """
+    global _pfp_confirmed_total, _pfp_expired_total
     now = time.time()
     confirmed = 0
 
@@ -8181,8 +8194,15 @@ def check_pump_fade_confirmed() -> int:
         expired = [s for s, e in _pump_fade_pending.items()
                    if now - e["ts"] > PUMP_FADE_CONFIRMED_TTL]
         for sym in expired:
-            logger.info("pump_fade_confirmed: %s expired after 4h without confirmation", sym)
+            logger.info(
+                "pump_fade_confirmed: %s expired TTL pump=%.6g peak=%.6g age=%dmin",
+                sym,
+                _pump_fade_pending[sym]["pump_price"],
+                _pump_fade_pending[sym]["peak_price"],
+                int((now - _pump_fade_pending[sym]["ts"]) / 60),
+            )
             del _pump_fade_pending[sym]
+            _pfp_expired_total += 1
         pending_copy = dict(_pump_fade_pending)
 
     # --- Check each pending coin ---
@@ -8199,11 +8219,21 @@ def check_pump_fade_confirmed() -> int:
             last_vol   = float(last_c[5])
             avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
 
-            pump_price = entry["pump_price"]
+            # Update peak_price — running max of all completed candle highs seen
+            # so far. The touch condition anchors to the actual top, not the
+            # detection price (which may be much lower if the pump continued).
+            candle_max = max(float(c[2]) for c in completed)
+            with _pfp_lock:
+                if symbol not in _pump_fade_pending:
+                    continue   # removed by another path (shouldn't happen — safety)
+                peak_price = max(_pump_fade_pending[symbol]["peak_price"], candle_max)
+                _pump_fade_pending[symbol]["peak_price"] = peak_price
+
+            pump_price = entry["pump_price"]   # kept for statistics only
 
             cond_candle = last_close < last_open   # bearish reversal candle
             cond_touch  = (
-                abs(last_high - pump_price) / pump_price * 100.0
+                abs(last_high - peak_price) / peak_price * 100.0
                 <= PUMP_FADE_CONFIRMED_ZONE_PCT
             )
             cond_volume = (
@@ -8212,26 +8242,30 @@ def check_pump_fade_confirmed() -> int:
             )
 
             logger.debug(
-                "pump_fade_confirmed check %s: candle=%s touch=%s vol=%s",
-                symbol, cond_candle, cond_touch, cond_volume,
+                "pump_fade_confirmed check %s: peak=%.6g candle=%s touch=%s vol=%s",
+                symbol, peak_price, cond_candle, cond_touch, cond_volume,
             )
 
             if not (cond_candle and cond_touch and cond_volume):
                 continue
 
-            # All 3 conditions met — open shadow position and notify
+            # All 3 conditions met — open shadow position and notify.
+            # Remove from pending FIRST (before any awaited I/O) to guarantee
+            # exactly one shadow position per detection event.
+            with _pfp_lock:
+                _pump_fade_pending.pop(symbol, None)
+
             entry_price = last_close      # enter at close of confirmation candle
             atr         = entry["atr"]
             pct24       = entry["pct24"]
             rsi         = entry["rsi"]
             age_min     = int((now - entry["ts"]) / 60)
             vol_ratio   = last_vol / avg_vol_10 if avg_vol_10 > 0 else 0
-            touch_pct   = abs(last_high - pump_price) / pump_price * 100.0
+            touch_pct   = abs(last_high - peak_price) / peak_price * 100.0
+            peak_rise   = (peak_price - pump_price) / pump_price * 100.0
 
             _dsl_pfc, _dtp_pfc = _compute_pump_fade_sl_tp(entry_price, atr)
             if not (_dsl_pfc and _dtp_pfc):
-                with _pfp_lock:
-                    _pump_fade_pending.pop(symbol, None)
                 continue
 
             _pfc_body = (
@@ -8241,10 +8275,12 @@ def check_pump_fade_confirmed() -> int:
                 f"<code>{symbol}</code>\n"
                 f"📈 24ч рост: <b>+{pct24:.1f}%</b> (обнаружен {age_min} мин назад)\n"
                 f"🧊 RSI при обнаружении: <b>{rsi:.1f}</b>\n"
-                f"📊 Свеча разворота ({PUMP_FADE_CONFIRMED_TF}): закрылась вниз, "
-                f"high ≤ {PUMP_FADE_CONFIRMED_ZONE_PCT}% от пика\n"
+                f"🏔 Пик с момента обнаружения: <b>${peak_price:,.6g}</b>"
+                + (f" (+{peak_rise:.1f}% от цены обнаружения)" if peak_rise >= 0.1 else "")
+                + f"\n📊 Свеча разворота ({PUMP_FADE_CONFIRMED_TF}): "
+                f"high ≤ {PUMP_FADE_CONFIRMED_ZONE_PCT:.1f}% от пика, закрылась вниз\n"
                 f"🔊 Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
-                f"💰 Вход: <b>${entry_price:,.6g}</b>  |  Пик: ${pump_price:,.6g}\n"
+                f"💰 Вход: <b>${entry_price:,.6g}</b>  |  Обнаружен: ${pump_price:,.6g}\n"
                 f"🟢 TP: <b>${_dtp_pfc:,.6g}</b>  │  🔴 SL: <b>${_dsl_pfc:,.6g}</b>"
                 + "\n⚠️ <i>[ТЕСТ: shadow — сравниваем с pump_24h_fade]</i>"
             )
@@ -8256,13 +8292,12 @@ def check_pump_fade_confirmed() -> int:
                 notify_body=_pfc_body,
             )
 
-            with _pfp_lock:
-                _pump_fade_pending.pop(symbol, None)
-
+            _pfp_confirmed_total += 1
             logger.info(
-                "pump_fade_confirmed: %s SHORT confirmed @%.6g pump_price=%.6g "
-                "touch=%.2f%% vol=%.1fx age=%dmin",
-                symbol, entry_price, pump_price, touch_pct, vol_ratio, age_min,
+                "pump_fade_confirmed: %s SHORT confirmed @%.6g "
+                "pump=%.6g peak=%.6g (+%.1f%%) touch=%.2f%% vol=%.1fx age=%dmin",
+                symbol, entry_price, pump_price, peak_price, peak_rise,
+                touch_pct, vol_ratio, age_min,
             )
             confirmed += 1
 
@@ -8270,6 +8305,43 @@ def check_pump_fade_confirmed() -> int:
             logger.warning("pump_fade_confirmed check %s: %s", symbol, exc)
 
     return confirmed
+
+
+def _send_pump_fade_weekly_report() -> None:
+    """Weekly Telegram summary: confirmed vs TTL-expired pump_fade_confirmed entries.
+
+    Counters reset on bot restart — noted in the message.  If the vast majority
+    of entries expire (TTL too short), the message flags it so the 4h window can
+    be extended.
+    """
+    total = _pfp_confirmed_total + _pfp_expired_total
+    if total == 0:
+        logger.info("pump_fade weekly report: no data yet, skipping")
+        return
+    rate = _pfp_confirmed_total / total * 100
+    ttl_flag = (
+        "\n⚠️ Большинство истекает по TTL — рассмотреть увеличение TTL > 4ч"
+        if _pfp_expired_total > _pfp_confirmed_total * 3
+        else "\n✅ TTL нормальный"
+    )
+    msg = (
+        f"📊 <b>pump_fade_confirmed: недельный отчёт</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Подтверждено разворотом: <b>{_pfp_confirmed_total}</b>\n"
+        f"Истекло по TTL (4ч): <b>{_pfp_expired_total}</b>\n"
+        f"Итого обнаружено: <b>{total}</b>\n"
+        f"Доля подтверждений: <b>{rate:.1f}%</b>"
+        + ttl_flag
+        + "\n<i>(счётчики сбрасываются при перезапуске бота)</i>"
+    )
+    try:
+        _telegram_send(TELEGRAM_CHAT_ID, msg)
+        logger.info(
+            "pump_fade weekly report sent: confirmed=%d expired=%d total=%d rate=%.1f%%",
+            _pfp_confirmed_total, _pfp_expired_total, total, rate,
+        )
+    except Exception as exc:
+        logger.warning("pump_fade_weekly_report failed: %s", exc)
 
 
 def check_listing_dump_long(
@@ -13190,6 +13262,9 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_pump_fade_confirmed, "interval", seconds=60, id="pump_fade_confirmed_check",
+)
+scheduler.add_job(
+    _send_pump_fade_weekly_report, "interval", days=7, id="pump_fade_weekly_report",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
