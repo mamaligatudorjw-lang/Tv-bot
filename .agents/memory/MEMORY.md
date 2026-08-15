@@ -2,3 +2,4 @@
 - [Signal filter flags](signal-filter-flags.md) — two filters disabled via feature flags after demo data showed they blocked profitable signals.
 - [Funding LSR liq veto](funding-lsr-liq.md) — three new scoring factors added; constants tunable at top of file; results tracked via factor_funding_pts/factor_lsr_pts in alerts table.
 - [Streak signal guards](streak-signal-guards.md) — streak LONG/SHORT skips when gain >15% or live price already reversed vs last close.
+- [UNIFIED_START_TS and parallel-bot history](unified-start-ts.md) — two bots ran in parallel until first clean Publish; all stats before that timestamp are tainted.

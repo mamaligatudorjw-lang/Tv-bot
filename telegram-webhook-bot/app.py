@@ -203,6 +203,21 @@ CONFLUENCE_CAP_CUTOFF_TS = 1_786_519_591
 # Deployed: 2026-08-14 12:55:08 UTC
 OVERSOLD_DURATION_FILTER_TS = 1_786_712_108
 # ---------------------------------------------------------------------------
+# Single honest start-of-history marker.  Everything BEFORE this timestamp
+# was produced by two parallel bots (dev-workflow + Reserved VM) running
+# different code versions — cooldowns broken, duplicate signals, divergent DBs.
+# Everything AFTER is a single unified process with consistent state.
+#
+# NOTE: OVERSOLD_DURATION_FILTER_TS, CONFLUENCE_CAP_CUTOFF_TS,
+#       MONITOR_FIX_SINCE, OVERSOLD_SL_CAP_SINCE — these mark deploys to the
+#       dev-workflow only.  The Reserved VM ran different code at those same
+#       moments, so the before/after split is meaningless for VM data.
+#       Use UNIFIED_START_TS as the only valid epoch for clean analysis.
+#
+# SET THIS to the Unix timestamp of the Publish immediately after it happens.
+# Until then it is 0 (= "publish not yet done").
+UNIFIED_START_TS: int = 0
+# ---------------------------------------------------------------------------
 # Non-crypto symbol filter — Gate.io Futures lists synthetic equity/commodity
 # contracts alongside crypto. Block them from ALL signal types by prefix.
 # Extend this set if new non-crypto pairs appear.
@@ -2600,6 +2615,22 @@ def handle_demo_command(chat_id: int) -> None:
         ]
 
     lines: list[str] = ["📊 <b>ДЕМО-РЕЖИМ (paper trading, $100/сделка)</b>"]
+
+    # ── History quality warning ───────────────────────────────────────────────
+    if UNIFIED_START_TS == 0:
+        lines.append(
+            "\n⚠️ <b>Данные смешанные:</b> Publish ещё не выполнен — история содержит "
+            "период двух параллельных ботов (dev + Reserved VM) с разным кодом и "
+            "разными БД. Кулдауны в этот период были нарушены. "
+            "22.7% реальных закрытых позиций (107/471) — повторные входы менее чем через 4ч."
+        )
+    else:
+        import datetime as _dt
+        _unified_date = _dt.datetime.utcfromtimestamp(UNIFIED_START_TS).strftime("%d.%m.%Y %H:%M UTC")
+        lines.append(
+            f"\n⚠️ <b>Данные до {_unified_date}</b> — период двух параллельных ботов. "
+            "Для анализа брать только позиции после этой даты."
+        )
 
     for alert_type, open_cnt, closed_cnt, tp_cnt, sl_cnt, closed_pnl, avg_pnl in type_stats:
         label = TYPE_LABELS.get(alert_type, alert_type)
@@ -10927,6 +10958,23 @@ def handle_scorestats_command(chat_id: int) -> None:
         return
 
     lines = ["📊 <b>Статистика по уровню сигнала (score)</b>", "За последние 30 дней\n"]
+
+    # ── History quality warning ───────────────────────────────────────────────
+    if UNIFIED_START_TS == 0:
+        lines.append(
+            "⚠️ <b>Внимание:</b> Publish ещё не выполнен. Статистика включает период "
+            "двух параллельных ботов с разным кодом — OVERSOLD_DURATION_FILTER_TS, "
+            "CONFLUENCE_CAP_CUTOFF_TS и другие метки относятся только к dev-воркфлоу "
+            "и не применимы к данным Reserved VM. Сравнение «до/после» по этим меткам "
+            "некорректно для текущей выборки.\n"
+        )
+    else:
+        import datetime as _dt
+        _unified_date = _dt.datetime.utcfromtimestamp(UNIFIED_START_TS).strftime("%d.%m.%Y %H:%M UTC")
+        lines.append(
+            f"⚠️ Данные до <b>{_unified_date}</b> (UNIFIED_START_TS) собраны при двух "
+            "параллельных процессах — использовать только для справки.\n"
+        )
 
     # Overall table
     lines.append("<b>Все типы сигналов:</b>")
