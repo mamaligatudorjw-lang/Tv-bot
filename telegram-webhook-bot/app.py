@@ -7196,9 +7196,12 @@ def check_overheated_oversold(
             # Uses _count_up_in_window (X-of-Y, gaps allowed — NOT consecutive streak).
             _oh_1h_raw    = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
             _oh_up_count  = 0
+            # Note: _fetch_1h_closes already drops the live (incomplete) candle internally.
+            # Pass the list directly — do NOT slice again or _count_up_in_window gets
+            # n elements instead of n+1 and always returns 0 (off-by-one bug).
             if _oh_1h_raw and len(_oh_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
                 _oh_up_count = _count_up_in_window(
-                    _oh_1h_raw[:-1], OVERHEATED_DURATION_WINDOW
+                    _oh_1h_raw, OVERHEATED_DURATION_WINDOW
                 )
                 if _oh_up_count < OVERHEATED_DURATION_MIN_UP:
                     logger.info(
@@ -7360,9 +7363,10 @@ def check_overheated_oversold(
             # Duration filter (= overheated_24h: ≥8/12 hourly candles up)
             _oe_1h_raw   = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
             _oe_up_count = 0
+            # _fetch_1h_closes already drops the live candle — do NOT slice again.
             if _oe_1h_raw and len(_oe_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
                 _oe_up_count = _count_up_in_window(
-                    _oe_1h_raw[:-1], OVERHEATED_DURATION_WINDOW
+                    _oe_1h_raw, OVERHEATED_DURATION_WINDOW
                 )
                 if _oe_up_count < OVERHEATED_DURATION_MIN_UP:
                     logger.info(
@@ -7507,11 +7511,11 @@ def check_overheated_oversold(
                 # X-of-Y count (gaps allowed — NOT consecutive streak).
                 _os_1h_raw     = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
                 _os_down_count = 0
+                # _fetch_1h_closes already drops the live candle — do NOT slice again.
                 if _os_1h_raw and len(_os_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
-                    _os_1h_window  = _os_1h_raw[:-1]   # drop still-forming candle
                     _os_down_count = sum(
-                        1 for i in range(1, len(_os_1h_window))
-                        if _os_1h_window[i] < _os_1h_window[i - 1]
+                        1 for i in range(1, len(_os_1h_raw))
+                        if _os_1h_raw[i] < _os_1h_raw[i - 1]
                     )
                     if _os_down_count < OVERHEATED_DURATION_MIN_DOWN:
                         logger.info(
