@@ -2365,24 +2365,8 @@ def check_demo_positions() -> None:
             logger.warning("check_demo_positions update %d: %s", row_id, exc)
             continue
 
-        # ── Shadow exit notification ──────────────────────────────────────────
-        if is_shadow_pos:
-            try:
-                _tag     = "TP ✅" if status == "tp" else "SL ❌"
-                _ps      = "+" if pnl_usd >= 0 else ""
-                _pi      = "🟢" if pnl_usd >= 0 else "🔴"
-                _rlabel  = f"\nПричина блок.: <code>{shadow_reason_pos}</code>" if shadow_reason_pos else ""
-                _tlabel  = f" ({alert_type_pos})" if alert_type_pos else ""
-                _wlabel  = " (wick)" if wick_close else ""
-                _telegram_send(
-                    TELEGRAM_CHAT_ID,
-                    f"🔬 SHADOW{_tlabel} — <code>{symbol}</code> {direction}\n"
-                    f"{_tag}  выход: <b>{exit_price:,.6g}</b>{_wlabel}\n"
-                    f"{_pi} P&amp;L: <b>{_ps}${pnl_usd:.2f}</b>"
-                    f"{_rlabel}",
-                )
-            except Exception as _notif_exc:
-                logger.warning("shadow exit notify failed: %s", _notif_exc)
+        # Shadow exit notifications intentionally omitted:
+        # results are reviewed via /demo and /demoshadow commands.
 
 
 def handle_demo_command(chat_id: int) -> None:
