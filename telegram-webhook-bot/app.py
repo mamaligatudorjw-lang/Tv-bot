@@ -2414,22 +2414,27 @@ def handle_demo_command(chat_id: int) -> None:
                 "COALESCE(SUM(CASE WHEN status='tp' THEN 1 ELSE 0 END),0), "
                 "COALESCE(SUM(CASE WHEN status='sl' THEN 1 ELSE 0 END),0), "
                 "COALESCE(SUM(pnl_usd),0) "
-                "FROM demo_positions WHERE status!='open' AND is_shadow=1"
+                "FROM demo_positions "
+                "WHERE status!='open' AND is_shadow=1 AND exit_method!='manual'"
+            ).fetchone()
+            sc_manual_n, sc_manual_pnl = conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(pnl_usd),0) "
+                "FROM demo_positions WHERE exit_method='manual' AND is_shadow=1"
             ).fetchone()
             # Shadow breakdown by direction (LONG / SHORT)
             sc_dir_stats = conn.execute(
                 "SELECT direction, "
                 "  SUM(CASE WHEN status='open' THEN 1 ELSE 0 END), "
-                "  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END), "
-                "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) "
+                "  SUM(CASE WHEN status!='open' AND exit_method!='manual' THEN 1 ELSE 0 END), "
+                "  COALESCE(SUM(CASE WHEN status!='open' AND exit_method!='manual' THEN pnl_usd ELSE 0 END), 0) "
                 "FROM demo_positions WHERE is_shadow=1 GROUP BY direction"
             ).fetchall()
             # Shadow breakdown by signal type
             sc_type_stats = conn.execute(
                 "SELECT alert_type, "
                 "  SUM(CASE WHEN status='open' THEN 1 ELSE 0 END), "
-                "  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END), "
-                "  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0) "
+                "  SUM(CASE WHEN status!='open' AND exit_method!='manual' THEN 1 ELSE 0 END), "
+                "  COALESCE(SUM(CASE WHEN status!='open' AND exit_method!='manual' THEN pnl_usd ELSE 0 END), 0) "
                 "FROM demo_positions WHERE is_shadow=1 GROUP BY alert_type"
             ).fetchall()
             # Shadow breakdown by block reason (grouped by prefix before ':')
@@ -2442,14 +2447,15 @@ def handle_demo_command(chat_id: int) -> None:
                     ELSE COALESCE(shadow_reason, '(нет причины)')
                   END AS reason_prefix,
                   SUM(CASE WHEN status='open'  THEN 1 ELSE 0 END)                                AS open_n,
-                  SUM(CASE WHEN status!='open' THEN 1 ELSE 0 END)                                AS closed_n,
-                  SUM(CASE WHEN status='tp'    THEN 1 ELSE 0 END)                                 AS tp_n,
-                  SUM(CASE WHEN status='sl'    THEN 1 ELSE 0 END)                                 AS sl_n,
-                  COALESCE(SUM(CASE WHEN status!='open' THEN pnl_usd ELSE 0 END), 0)             AS total_pnl,
-                  COALESCE(AVG(CASE WHEN status!='open' THEN pnl_usd END), 0)                    AS avg_pnl
+                  SUM(CASE WHEN status!='open' AND exit_method!='manual' THEN 1 ELSE 0 END)      AS closed_n,
+                  SUM(CASE WHEN status='tp'    AND exit_method!='manual' THEN 1 ELSE 0 END)       AS tp_n,
+                  SUM(CASE WHEN status='sl'    AND exit_method!='manual' THEN 1 ELSE 0 END)       AS sl_n,
+                  COALESCE(SUM(CASE WHEN status!='open' AND exit_method!='manual' THEN pnl_usd ELSE 0 END), 0)  AS total_pnl,
+                  COALESCE(AVG(CASE WHEN status!='open' AND exit_method!='manual' THEN pnl_usd END), 0)         AS avg_pnl
                 FROM demo_positions
                 WHERE is_shadow=1
                   AND shadow_reason IS NOT NULL AND shadow_reason != ''
+                  AND exit_method != 'manual'
                 GROUP BY reason_prefix
                 ORDER BY total_pnl DESC
             """).fetchall()
@@ -2727,7 +2733,7 @@ def handle_demo_command(chat_id: int) -> None:
 
     # ── Блок «По причине блокировки» — всегда отдельным сообщением ──────────
     if sc_reason_stats:
-        _sr_lines = ["🔒 <b>По причине блокировки</b> (теневые позиции):"]
+        _sr_lines = ["🔒 <b>По причине блокировки</b> (теневые позиции, без admin-закрытий):"]
         for rp, r_open, r_closed, r_tp, r_sl, r_pnl, r_avg in sc_reason_stats:
             rp_safe = html.escape(str(rp))
             if r_closed == 0:
@@ -2742,6 +2748,12 @@ def handle_demo_command(chat_id: int) -> None:
                 f"{r_closed} сд., WR {wr_r:.0f}% "
                 f"│ Σ <b>{ps}${r_pnl:.2f}</b> "
                 f"│ avg <b>{as_}${r_avg:.2f}</b>"
+            )
+        if sc_manual_n:
+            ms = "+" if sc_manual_pnl >= 0 else ""
+            _sr_lines.append(
+                f"\n  ℹ️ <i>Admin-закрытий (не TP/SL): {sc_manual_n} шт., "
+                f"Σ P&L {ms}${sc_manual_pnl:.2f} — исключены из WR и Σ выше</i>"
             )
         _telegram_send(chat_id, "\n".join(_sr_lines))
 
