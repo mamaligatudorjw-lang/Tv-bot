@@ -153,8 +153,9 @@ state = {
     "sigma_daily": {},                 # symbol -> float (std of daily % returns over ~30d)
     "last_ema200_refresh": 0,          # unix ts of last 4h-stats refresh
     "last_momentum_alerted": {},       # symbol -> {threshold: ts}
-    "last_overheated_alerted": {},     # symbol -> ts (24h +20% & RSI>=70 cooldown)
-    "last_oversold_alerted": {},       # symbol -> ts (24h -20% & RSI<=30 cooldown)
+    "last_overheated_alerted": {},        # symbol -> ts (24h +15% & RSI>=70 cooldown)
+    "last_overheated_early_alerted": {},  # symbol -> ts (overheated_early shadow cooldown)
+    "last_oversold_alerted": {},          # symbol -> ts (24h -10% & RSI<=30 cooldown)
     "last_breakdown_alerted": {},           # symbol -> ts (breakdown_short TEST cooldown)
     "last_momentum_long_alerted": {},       # symbol -> ts (momentum_long TEST cooldown)
     "sl_blocked": {},                       # unused — SL re-entry cooldown disabled
@@ -342,6 +343,11 @@ OVERSOLD_24H_PCT = -10.0
 OVERHEATED_COOLDOWN = 14400        # 4h
 OVERSOLD_COOLDOWN = 7200           # 2h
 
+# overheated_early: early momentum LONG — RSI 55–70 (before full overbought).
+# Shadow-only parallel test vs overheated_24h; only RSI range differs.
+OVERHEATED_EARLY_RSI_MIN  = 55.0   # RSI lower bound for early entry
+OVERHEATED_EARLY_COOLDOWN = OVERHEATED_COOLDOWN  # 4h, same as parent
+
 # Liquidity reversal confirmation shadow
 # Shadow-only for ~3 weeks to compare vs plain liquidity (no confirmation).
 # Confirmation: last 15m candle must be in reversal direction + elevated volume.
@@ -386,6 +392,13 @@ PUMP_FADE_MIN_SCORE     = 55       # мин. score для отправки ал�
 # confluence. 12% is a first approximation — wider than confluence (8%), but still
 # prevents runaway losses like AVAAIUSDT −14.47%.  Review after 20+ closed trades.
 PUMP_FADE_SL_MAX_PCT    = 12.0     # temporary; revise when distribution becomes clear
+
+# pump_fade_confirmed: same entry conditions as pump_24h_fade but fires only
+# after a 15m reversal candle confirms the turn. Shadow-only parallel test.
+PUMP_FADE_CONFIRMED_TTL      = 14400   # 4h TTL on pending watch entries
+PUMP_FADE_CONFIRMED_VOL_MULT = 1.5     # confirmation candle vol ≥ this × 10-bar avg
+PUMP_FADE_CONFIRMED_ZONE_PCT = 0.5     # max % distance from pump_price for touch check
+PUMP_FADE_CONFIRMED_TF       = "15m"   # candle timeframe for confirmation
 
 # EMA-200 (4h) trend filter
 EMA200_PERIOD = 200
@@ -1678,6 +1691,10 @@ _watchlist_lock = threading.Lock()
 _ew_last_trigger: dict[int, int] = {}          # entry_watch_id → last_confirmed_ts
 _ew_lock = threading.Lock()
 
+# pump_fade_confirmed: pending detection entries waiting for reversal confirmation
+_pump_fade_pending: dict[str, dict] = {}  # symbol → {ts, pct24, rsi, pump_price, atr}
+_pfp_lock = threading.Lock()
+
 
 def check_watchlist() -> None:
     """Every 60 s: check active watchlist entries for reversal confirmation.
@@ -2372,10 +2389,12 @@ def check_demo_positions() -> None:
 def handle_demo_command(chat_id: int) -> None:
     """Show paper-trading stats broken down by signal type, with TP/SL/PnL per position."""
     TYPE_LABELS: dict[str, str] = {
-        "confluence":     "🚨 Конфлюэнция",
-        "oversold_24h":   "🟢 Перепроданность",
-        "overheated_24h": "🔥 Перегрев",
-        "streak_1h":      "⚡ Серия 1ч",
+        "confluence":          "🚨 Конфлюэнция",
+        "oversold_24h":        "🟢 Перепроданность",
+        "overheated_24h":      "🔥 Перегрев",
+        "overheated_early":    "🚀 Ранний импульс",
+        "streak_1h":           "⚡ Серия 1ч",
+        "pump_fade_confirmed": "📉 Памп→Шорт (подтверждён)",
     }
 
     try:
@@ -7256,6 +7275,87 @@ def check_overheated_oversold(
                             score=score,
                         )
 
+        elif (pct24 >= oh_threshold
+              and OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
+            # ── overheated_early: Ранний импульс LONG (RSI 55–70) ────────────
+            # Shadow-only parallel test vs overheated_24h. Only RSI range differs:
+            # here 55 ≤ RSI < 70 instead of ≥70. All other filters identical.
+            if not OVERHEATED_ENABLED:
+                continue
+            with state_lock:
+                ema_oe = state["ema200_4h"].get(symbol)
+            if ema_oe is not None and price < ema_oe:
+                continue  # uptrend confirmation: price must be above EMA-200
+
+            # Duration filter: same as overheated_24h (≥8/12 hourly candles up)
+            _oe_1h_raw   = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
+            _oe_up_count = 0
+            if _oe_1h_raw and len(_oe_1h_raw) >= OVERHEATED_DURATION_WINDOW + 1:
+                _oe_up_count = _count_up_in_window(
+                    _oe_1h_raw[:-1], OVERHEATED_DURATION_WINDOW
+                )
+                if _oe_up_count < OVERHEATED_DURATION_MIN_UP:
+                    logger.info(
+                        "Overheated_early blocked by duration filter: %s up=%d/%d",
+                        symbol, _oe_up_count, OVERHEATED_DURATION_WINDOW,
+                    )
+                    _dsl_dur_oe, _dtp_dur_oe = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl_dur_oe and _dtp_dur_oe:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_dur_oe, _dtp_dur_oe,
+                            is_shadow=True,
+                            shadow_reason=(
+                                f"duration_filter: {_oe_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
+                            ),
+                            alert_type="overheated_early",
+                        )
+                    continue
+
+            with state_lock:
+                last_oe = state["last_overheated_early_alerted"].get(symbol, 0)
+            if now - last_oe < OVERHEATED_EARLY_COOLDOWN:
+                continue
+
+            _oe_score = compute_signal_score(
+                "overheated_24h", "buy",  # same scoring formula as parent strategy
+                rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
+            )
+            _fl_delta_oe, _fl_text_oe, _, _ = _funding_lsr_score_and_text(symbol, "buy")
+            _oe_score = max(0, min(100, _oe_score + _fl_delta_oe))
+            _oe_sl_tp = _format_sl_tp("buy", price, atr, score=_oe_score)
+
+            _oe_body = (
+                f"🚀 <b>РАННИЙ ИМПУЛЬС ВВЕРХ</b>\n"
+                f"Монета набирает силу, RSI ещё не перекуплен\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{symbol}</code>\n"
+                f"📈 24ч: <b>+{pct24:.1f}%</b> (порог <b>+{oh_threshold:.1f}%</b>)\n"
+                f"🌡 RSI: <b>{rsi:.1f}</b> (зона {OVERHEATED_EARLY_RSI_MIN:.0f}–{RSI_OVERBOUGHT:.0f})\n"
+                f"⏱ Устойчивость: <b>{_oe_up_count}</b> из {OVERHEATED_DURATION_WINDOW} часовых свечей закрылись вверх\n"
+                f"💰 Цена: ${price:,.6g}\n"
+                f"🎯 Сила сигнала: <b>{_oe_score}/100</b> ({_strength_label(_oe_score)})"
+                + (f"\n{_oe_sl_tp}" if _oe_sl_tp else "")
+                + "\n⚠️ <i>[ТЕСТ: shadow — сравниваем с overheated_24h]</i>"
+            )
+            if _fl_text_oe:
+                _oe_body += f"\n{_fl_text_oe}"
+
+            _oe_dsl, _oe_dtp = _compute_demo_sl_tp("LONG", price, atr)
+            if _oe_dsl and _oe_dtp:
+                _demo_open_position(
+                    symbol, "LONG", price, _oe_dsl, _oe_dtp,
+                    is_shadow=True,
+                    alert_type="overheated_early",
+                    score=_oe_score,
+                    notify_body=_oe_body,
+                )
+                with state_lock:
+                    state["last_overheated_early_alerted"][symbol] = now
+                logger.info(
+                    "overheated_early shadow: %s pct24=+%.1f%% rsi=%.1f score=%d",
+                    symbol, pct24, rsi, _oe_score,
+                )
+
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
             # LONG bounce: coin dumped hard AND RSI is deeply oversold →
             # extreme capitulation, high probability of reversal.  Enter LONG
@@ -7981,6 +8081,23 @@ def check_pump_24h_fade(
         with state_lock:
             atr = state["atr_4h"].get(symbol)
 
+        # Register for pump_fade_confirmed (confirmation-gated parallel track).
+        # Uses same cooldown gate (last_pump_alerted) so detection is 1:1 with
+        # pump_24h_fade — only the entry moment differs.
+        with _pfp_lock:
+            if symbol not in _pump_fade_pending:
+                _pump_fade_pending[symbol] = {
+                    "ts": now,
+                    "pct24": pct24,
+                    "rsi": rsi,
+                    "pump_price": price,
+                    "atr": atr,
+                }
+                logger.info(
+                    "pump_fade_confirmed: registered %s pct24=+%.1f%% rsi=%.1f pump_price=%.6g",
+                    symbol, pct24, rsi, price,
+                )
+
         score = compute_signal_score(
             "volume_surge_short", "sell",   # conceptually identical: fade overbought
             rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
@@ -8046,6 +8163,119 @@ def check_pump_24h_fade(
             )
 
     return sent
+
+
+def check_pump_fade_confirmed() -> int:
+    """Confirmation-gated SHORT on a 24h pump (parallel test vs pump_24h_fade).
+
+    Detection: same conditions as check_pump_24h_fade — a coin is registered in
+    _pump_fade_pending when it first qualifies.  This function runs every 60 s
+    and checks each pending coin against 3 confirmation conditions on the last
+    completed 15m candle:
+      1. Bearish close (close < open)
+      2. Candle high touched pump_price within PUMP_FADE_CONFIRMED_ZONE_PCT
+      3. Volume ≥ PUMP_FADE_CONFIRMED_VOL_MULT × 10-bar average
+
+    TTL: PUMP_FADE_CONFIRMED_TTL (4 h). Shadow only with Telegram notification.
+    Separate alert_type="pump_fade_confirmed" for clean WR comparison vs parent.
+    """
+    now = time.time()
+    confirmed = 0
+
+    # --- Expire stale entries ---
+    with _pfp_lock:
+        expired = [s for s, e in _pump_fade_pending.items()
+                   if now - e["ts"] > PUMP_FADE_CONFIRMED_TTL]
+        for sym in expired:
+            logger.info("pump_fade_confirmed: %s expired after 4h without confirmation", sym)
+            del _pump_fade_pending[sym]
+        pending_copy = dict(_pump_fade_pending)
+
+    # --- Check each pending coin ---
+    for symbol, entry in pending_copy.items():
+        try:
+            candles = _gateio_klines(symbol, PUMP_FADE_CONFIRMED_TF, 15)
+            if len(candles) < 12:
+                continue
+            completed = candles[:-1]          # drop the live (unfinished) candle
+            last_c     = completed[-1]
+            last_open  = float(last_c[1])
+            last_high  = float(last_c[2])
+            last_close = float(last_c[4])
+            last_vol   = float(last_c[5])
+            avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
+
+            pump_price = entry["pump_price"]
+
+            cond_candle = last_close < last_open   # bearish reversal candle
+            cond_touch  = (
+                abs(last_high - pump_price) / pump_price * 100.0
+                <= PUMP_FADE_CONFIRMED_ZONE_PCT
+            )
+            cond_volume = (
+                avg_vol_10 > 0
+                and last_vol >= avg_vol_10 * PUMP_FADE_CONFIRMED_VOL_MULT
+            )
+
+            logger.debug(
+                "pump_fade_confirmed check %s: candle=%s touch=%s vol=%s",
+                symbol, cond_candle, cond_touch, cond_volume,
+            )
+
+            if not (cond_candle and cond_touch and cond_volume):
+                continue
+
+            # All 3 conditions met — open shadow position and notify
+            entry_price = last_close      # enter at close of confirmation candle
+            atr         = entry["atr"]
+            pct24       = entry["pct24"]
+            rsi         = entry["rsi"]
+            age_min     = int((now - entry["ts"]) / 60)
+            vol_ratio   = last_vol / avg_vol_10 if avg_vol_10 > 0 else 0
+            touch_pct   = abs(last_high - pump_price) / pump_price * 100.0
+
+            _dsl_pfc, _dtp_pfc = _compute_pump_fade_sl_tp(entry_price, atr)
+            if not (_dsl_pfc and _dtp_pfc):
+                with _pfp_lock:
+                    _pump_fade_pending.pop(symbol, None)
+                continue
+
+            _pfc_body = (
+                f"📉 <b>ПАМП → ШОРТ (подтверждён)</b>\n"
+                f"Монета протестировала пик и развернулась вниз\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{symbol}</code>\n"
+                f"📈 24ч рост: <b>+{pct24:.1f}%</b> (обнаружен {age_min} мин назад)\n"
+                f"🧊 RSI при обнаружении: <b>{rsi:.1f}</b>\n"
+                f"📊 Свеча разворота ({PUMP_FADE_CONFIRMED_TF}): закрылась вниз, "
+                f"high ≤ {PUMP_FADE_CONFIRMED_ZONE_PCT}% от пика\n"
+                f"🔊 Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
+                f"💰 Вход: <b>${entry_price:,.6g}</b>  |  Пик: ${pump_price:,.6g}\n"
+                f"🟢 TP: <b>${_dtp_pfc:,.6g}</b>  │  🔴 SL: <b>${_dsl_pfc:,.6g}</b>"
+                + "\n⚠️ <i>[ТЕСТ: shadow — сравниваем с pump_24h_fade]</i>"
+            )
+
+            _demo_open_position(
+                symbol, "SHORT", entry_price, _dsl_pfc, _dtp_pfc,
+                is_shadow=True,
+                alert_type="pump_fade_confirmed",
+                notify_body=_pfc_body,
+            )
+
+            with _pfp_lock:
+                _pump_fade_pending.pop(symbol, None)
+
+            logger.info(
+                "pump_fade_confirmed: %s SHORT confirmed @%.6g pump_price=%.6g "
+                "touch=%.2f%% vol=%.1fx age=%dmin",
+                symbol, entry_price, pump_price, touch_pct, vol_ratio, age_min,
+            )
+            confirmed += 1
+
+        except Exception as exc:
+            logger.warning("pump_fade_confirmed check %s: %s", symbol, exc)
+
+    return confirmed
 
 
 def check_listing_dump_long(
@@ -12963,6 +13193,9 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_entry_watch, "interval", seconds=60, id="entry_watch_check",
+)
+scheduler.add_job(
+    check_pump_fade_confirmed, "interval", seconds=60, id="pump_fade_confirmed_check",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
 # TESTING=1). Strict truthy parsing so an accidental TESTING=0/false in prod
