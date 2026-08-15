@@ -7147,10 +7147,20 @@ def check_overheated_oversold(
                     _oh_1h_raw[:-1], OVERHEATED_DURATION_WINDOW
                 )
                 if _oh_up_count < OVERHEATED_DURATION_MIN_UP:
-                    logger.debug(
-                        "Overheated LONG suppressed by duration filter: %s up=%d/%d",
+                    logger.info(
+                        "Overheated blocked by duration filter: %s up=%d/%d",
                         symbol, _oh_up_count, OVERHEATED_DURATION_WINDOW,
                     )
+                    _dsl_dur_oh, _dtp_dur_oh = _compute_demo_sl_tp("LONG", price, atr)
+                    if _dsl_dur_oh and _dtp_dur_oh:
+                        _demo_open_position(
+                            symbol, "LONG", price, _dsl_dur_oh, _dtp_dur_oh,
+                            is_shadow=True,
+                            shadow_reason=(
+                                f"duration_filter: {_oh_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
+                            ),
+                            alert_type="overheated_24h",
+                        )
                     continue
 
             with state_lock:
@@ -7282,10 +7292,20 @@ def check_overheated_oversold(
                         if _os_1h_window[i] < _os_1h_window[i - 1]
                     )
                     if _os_down_count < OVERHEATED_DURATION_MIN_DOWN:
-                        logger.debug(
-                            "Oversold LONG suppressed by duration filter: %s down=%d/%d",
+                        logger.info(
+                            "Oversold blocked by duration filter: %s down=%d/%d",
                             symbol, _os_down_count, OVERHEATED_DURATION_WINDOW,
                         )
+                        _dsl_dur_os, _dtp_dur_os = _compute_oversold_sl_tp(price, atr)
+                        if _dsl_dur_os and _dtp_dur_os:
+                            _demo_open_position(
+                                symbol, "LONG", price, _dsl_dur_os, _dtp_dur_os,
+                                is_shadow=True,
+                                shadow_reason=(
+                                    f"duration_filter: {_os_down_count}/{OVERHEATED_DURATION_WINDOW}↓"
+                                ),
+                                alert_type="oversold_24h",
+                            )
                         continue
 
                 # ── Подтверждение разворота: последняя завершённая 1ч свеча зелёная ──
