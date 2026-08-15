@@ -1444,6 +1444,7 @@ def _demo_open_position(
     alert_type: str | None = None,
     score: int | None = None,
     notify_body: str | None = None,
+    repeat_num: int | None = None,
 ) -> None:
     """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
     a real position as TOP for the /demo three-way comparison.
@@ -1472,12 +1473,12 @@ def _demo_open_position(
             cur = conn.execute(
                 "INSERT OR IGNORE INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
-                " size_usd, status, is_shadow, shadow_reason, alert_type, is_top) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
+                " size_usd, status, is_shadow, shadow_reason, alert_type, is_top, repeat_num) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
                 (_ts_recv, symbol, direction, entry_price,
                  sl_price, tp_price, size_usd,
                  1 if is_shadow else 0, shadow_reason, alert_type,
-                 1 if is_top else 0),
+                 1 if is_top else 0, repeat_num),
             )
             _new_demo_id = cur.lastrowid  # capture before lock releases
             conn.commit()
@@ -4240,7 +4241,8 @@ def _get_db() -> sqlite3.Connection:
                 shadow_reason TEXT,
                 alert_type    TEXT,
                 is_top        INTEGER NOT NULL DEFAULT 0,
-                wick_close    INTEGER NOT NULL DEFAULT 0
+                wick_close    INTEGER NOT NULL DEFAULT 0,
+                repeat_num    INTEGER DEFAULT NULL
             )
         """)
         # Migrate: wick_close for existing installs
@@ -4305,6 +4307,14 @@ def _get_db() -> sqlite3.Connection:
             "UPDATE demo_positions SET exit_method='manual' "
             "WHERE status='manual' AND exit_method IS NULL"
         )
+        # Migrate: repeat_num — ordinal of pump_fade repeat signals (1 = first, 2 = first repeat…)
+        try:
+            _db_conn.execute(
+                "ALTER TABLE demo_positions ADD COLUMN repeat_num INTEGER DEFAULT NULL"
+            )
+        except sqlite3.OperationalError as _mig_rn:
+            if "duplicate column" not in str(_mig_rn).lower():
+                raise
         _db_conn.commit()
         # Liquidity-entry strategy: parallel demo-only strategy
         _db_conn.execute("""
@@ -8343,8 +8353,9 @@ def check_pump_24h_fade(
                     _demo_open_position(
                         symbol, "SHORT", price, _dsl_pf, _dtp_pf,
                         is_shadow=True,
-                        shadow_reason=f"low_score: {score}<{PUMP_FADE_MIN_SCORE} repeat:{_repeat_num}",
+                        shadow_reason=f"low_score: {score}<{PUMP_FADE_MIN_SCORE}",
                         alert_type="pump_24h_fade",
+                        repeat_num=_repeat_num,
                     )
                 continue
             delivered, _ = send_alert_with_log(
@@ -8364,20 +8375,14 @@ def check_pump_24h_fade(
             with state_lock:
                 state["last_pump_alerted"][symbol] = now
 
-        _pf_reason = None
-        if is_shadow:
-            _pf_reason = (
-                f"repeat:{_repeat_num} +{_gain_from_first:.1f}%_from_first"
-                if _gain_from_first is not None
-                else f"repeat:{_repeat_num}"
-            )
         _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(price, atr)
         if _dsl_pf and _dtp_pf:
             _demo_open_position(
                 symbol, "SHORT", price, _dsl_pf, _dtp_pf,
                 is_shadow=is_shadow,
-                shadow_reason=_pf_reason,
+                shadow_reason=("pump_fade_shadow_mode" if is_shadow else None),
                 alert_type="pump_24h_fade",
+                repeat_num=_repeat_num,
                 score=score,
                 notify_body=(
                     f"📉 Pump Fade <b>SHORT 📉</b> <code>{symbol}</code>\n"
