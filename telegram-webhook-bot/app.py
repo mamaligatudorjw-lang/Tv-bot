@@ -401,6 +401,8 @@ PUMP_FADE_MIN_PCT       = 30.0     # мин. 24h рост % для квалиф�
 PUMP_FADE_RSI_MIN       = 65.0     # RSI выше порога — подтверждение перегрева
 PUMP_FADE_MAX_PCT       = 200.0    # игнорировать крайние выбросы (листинговые пампы)
 PUMP_FADE_COOLDOWN      = 86400    # 24ч кулдаун на символ
+PUMP_FADE_NEW_PEAK_PCT  = 10.0     # % выше предыдущего entry_price → освобождение от кулдауна
+PUMP_FADE_REPEAT_MAX    = 5        # макс. повторов на монету в 24ч окне (кроме первого)
 PUMP_FADE_MIN_VOL       = 500_000  # мин. объём $500k 24ч (отфильтровать мусор)
 PUMP_FADE_MIN_SCORE     = 55       # мин. score для отправки алерта
 # SL cap: pump-fade enters already-volatile coins, so ATR is naturally wider than
@@ -8234,17 +8236,62 @@ def check_pump_24h_fade(
 
         with state_lock:
             last = state["last_pump_alerted"].get(symbol, 0)
-        if now - last < PUMP_FADE_COOLDOWN:
-            continue
+        cooldown_active = now - last < PUMP_FADE_COOLDOWN
+
+        # Fetch prior pump_24h_fade records in the rolling 24h window (oldest first).
+        # Used for: new-peak exemption, repeat counter, gain-from-first display.
+        _pf_prior: list = []
+        try:
+            with _db_lock:
+                _pf_prior = _get_db().execute(
+                    "SELECT entry_price FROM demo_positions "
+                    "WHERE symbol=? AND alert_type='pump_24h_fade' AND ts_open > ? "
+                    "ORDER BY ts_open ASC",
+                    (symbol, now - 86400.0),
+                ).fetchall()
+        except Exception as _pf_exc:
+            logger.debug("pump_24h_fade DB query failed for %s: %s", symbol, _pf_exc)
+
+        repeat_n  = len(_pf_prior)   # 0 = first signal this 24h window
+        _pf_exempt = False            # True when new-peak exemption applies
+
+        if cooldown_active:
+            if not _pf_prior:
+                continue  # no prior signal today — respect the 24h cooldown
+            _prev_entry = _pf_prior[-1][0]   # most recent prior entry_price
+            if not _prev_entry or _prev_entry <= 0:
+                continue
+            _gain_from_prev = (price - _prev_entry) / _prev_entry * 100.0
+            if _gain_from_prev < PUMP_FADE_NEW_PEAK_PCT:
+                continue  # not ≥10% above last entry — cooldown intact
+            if repeat_n > PUMP_FADE_REPEAT_MAX:
+                logger.debug(
+                    "pump_24h_fade %s: daily repeat cap reached (%d/%d)",
+                    symbol, repeat_n - 1, PUMP_FADE_REPEAT_MAX,
+                )
+                continue
+            _pf_exempt = True
+            logger.info(
+                "pump_24h_fade %s: new-peak exemption — +%.1f%% above prev entry (repeat %d/%d)",
+                symbol, _gain_from_prev, repeat_n, PUMP_FADE_REPEAT_MAX,
+            )
+
+        # Repeat counter and gain-from-first for notifications / shadow_reason
+        _pf_first_price = _pf_prior[0][0] if _pf_prior else None
+        _gain_from_first: "float | None" = (
+            (price - _pf_first_price) / _pf_first_price * 100.0
+            if _pf_first_price and _pf_first_price > 0 else None
+        )
+        _repeat_num = repeat_n + 1   # 1-based: first signal = 1, first repeat = 2, …
 
         with state_lock:
             atr = state["atr_4h"].get(symbol)
 
         # Register for pump_fade_confirmed (confirmation-gated parallel track).
-        # Uses same cooldown gate (last_pump_alerted) so detection is 1:1 with
-        # pump_24h_fade — only the entry moment differs.
+        # On new-peak exempt re-fires: update the pending entry so the confirmed
+        # track follows the new (higher) detection level with a fresh 4h TTL.
         with _pfp_lock:
-            if symbol not in _pump_fade_pending:
+            if symbol not in _pump_fade_pending or _pf_exempt:
                 _pump_fade_pending[symbol] = {
                     "ts":         now,
                     "pct24":      pct24,
@@ -8252,9 +8299,11 @@ def check_pump_24h_fade(
                     "pump_price": price,   # price at detection — kept for statistics
                     "peak_price": price,   # running max since detection — used for touch check
                     "atr":        atr,
+                    "repeat_n":   _repeat_num,
                 }
                 logger.info(
-                    "pump_fade_confirmed: registered %s pct24=+%.1f%% rsi=%.1f pump_price=%.6g",
+                    "pump_fade_confirmed: %s %s pct24=+%.1f%% rsi=%.1f pump_price=%.6g",
+                    "re-registered" if _pf_exempt else "registered",
                     symbol, pct24, rsi, price,
                 )
 
@@ -8265,6 +8314,13 @@ def check_pump_24h_fade(
         sl_tp = _format_sl_tp("sell", price, atr, score=score)
         is_shadow = PUMP_FADE_SHADOW_ONLY
 
+        _repeat_line = ""
+        if _repeat_num > 1 and _gain_from_first is not None:
+            _repeat_line = (
+                f"\n🔁 <b>Повтор {_repeat_num - 1}/{PUMP_FADE_REPEAT_MAX}</b>"
+                f", +{_gain_from_first:.1f}% от первого сигнала"
+            )
+
         body = (
             f"📉 <b>ПАМП → ШОРТ (fade): <code>{symbol}</code></b>\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -8273,6 +8329,7 @@ def check_pump_24h_fade(
             f"💰 Цена: <b>${price:,.6g}</b>\n"
             f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
             + (f"\n{sl_tp}" if sl_tp else "")
+            + _repeat_line
             + ("\n⚠️ <i>[ТЕСТ: shadow-режим, ещё не торгуем]</i>" if is_shadow else "")
         )
 
@@ -8286,7 +8343,7 @@ def check_pump_24h_fade(
                     _demo_open_position(
                         symbol, "SHORT", price, _dsl_pf, _dtp_pf,
                         is_shadow=True,
-                        shadow_reason=f"low_score: {score}<{PUMP_FADE_MIN_SCORE}",
+                        shadow_reason=f"low_score: {score}<{PUMP_FADE_MIN_SCORE} repeat:{_repeat_num}",
                         alert_type="pump_24h_fade",
                     )
                 continue
@@ -8307,12 +8364,19 @@ def check_pump_24h_fade(
             with state_lock:
                 state["last_pump_alerted"][symbol] = now
 
+        _pf_reason = None
+        if is_shadow:
+            _pf_reason = (
+                f"repeat:{_repeat_num} +{_gain_from_first:.1f}%_from_first"
+                if _gain_from_first is not None
+                else f"repeat:{_repeat_num}"
+            )
         _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(price, atr)
         if _dsl_pf and _dtp_pf:
             _demo_open_position(
                 symbol, "SHORT", price, _dsl_pf, _dtp_pf,
                 is_shadow=is_shadow,
-                shadow_reason=("pump_fade_shadow_mode" if is_shadow else None),
+                shadow_reason=_pf_reason,
                 alert_type="pump_24h_fade",
                 score=score,
                 notify_body=(
