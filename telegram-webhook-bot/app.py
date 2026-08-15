@@ -1418,6 +1418,45 @@ def _compute_oversold_sl_tp(
     return _compute_demo_sl_tp("LONG", price, atr, max_sl_pct=cap)
 
 
+def _format_capped_sl_tp(entry: float, sl: float, tp2: float, score: int = 0) -> str:
+    """Format SL/TP notification lines from pre-computed (already-capped) levels.
+
+    Used by oversold_24h so the notification SL/TP matches what is stored in
+    demo_positions.  _compute_oversold_sl_tp applies the 8% cap; this function
+    derives TP1 and TP3 from the same capped sl_dist so every displayed level
+    is internally consistent.
+
+    tp2  — the main close level (2:1 R:R, matches demo position).
+    TP1  — derived at 1:1 R:R from the capped sl_dist.
+    TP3  — 3:1, shown only when score ≥ 70.
+    """
+    if not (entry > 0 and 0 < sl < entry and tp2 > entry):
+        return ""
+    sl_dist = entry - sl
+    if sl_dist <= 0:
+        return ""
+    tp1 = entry + sl_dist        # 1:1 R:R (capped)
+    tp3 = entry + sl_dist * 3   # 3:1 R:R (capped)
+    show_tp3 = score >= 70
+
+    def _pct_roi(p: float) -> str:
+        raw  = abs(p - entry) / entry * 100
+        sign = "+" if p > entry else "−"
+        return f"×2:{sign}{raw*2:.0f}% / ×5:{sign}{raw*5:.0f}% / ×10:{sign}{raw*10:.0f}%"
+
+    has_tp3   = show_tp3 and tp3 > 0
+    tp1_label = "снять 40%" if has_tp3 else "снять 50%"
+    tp2_label = "снять 40%" if has_tp3 else "закрыть всё"
+    lines = [
+        f"🛡️ SL:  <code>${sl:,.6g}</code>  {_pct_roi(sl)}",
+        f"🎯 TP1: <code>${tp1:,.6g}</code>  {_pct_roi(tp1)}  · {tp1_label}",
+        f"🎯 TP2: <code>${tp2:,.6g}</code>  {_pct_roi(tp2)}  · {tp2_label}",
+    ]
+    if has_tp3:
+        lines.append(f"🎯 TP3: <code>${tp3:,.6g}</code>  {_pct_roi(tp3)}  · снять 20%")
+    return "\n".join(lines)
+
+
 def _compute_pump_fade_sl_tp(
     price: float, atr: float | None
 ) -> tuple[float | None, float | None]:
@@ -7601,7 +7640,15 @@ def check_overheated_oversold(
                     _funding_lsr_score_and_text(symbol, "buy")
                 )
                 score = max(0, min(100, score + _fl_delta_os))
-                sl_tp = _format_sl_tp("buy", price, atr, score=score)
+                # Compute capped SL/TP early — notification and demo position must match.
+                # _compute_oversold_sl_tp applies OVERSOLD_ATR_SL_MAX_PCT=8% cap;
+                # _format_sl_tp does NOT, so we use the capped values for both.
+                _dsl_os, _dtp_os = _compute_oversold_sl_tp(price, atr)
+                sl_tp = (
+                    _format_capped_sl_tp(price, _dsl_os, _dtp_os, score)
+                    if _dsl_os and _dtp_os
+                    else _format_sl_tp("buy", price, atr, score=score)
+                )
                 # Co-movers: up to 3 other coins also oversold
                 _os_others = [
                     f"<code>{s}</code> {p:.1f}%"
@@ -7701,8 +7748,7 @@ def check_overheated_oversold(
                     with state_lock:
                         state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
-                    # Track real demo position so we can measure win-rate later
-                    _dsl_os, _dtp_os = _compute_oversold_sl_tp(price, atr)
+                    # Track real demo position (SL/TP already computed above for notification)
                     if _dsl_os and _dtp_os:
                         _demo_open_position(
                             symbol, "LONG", price, _dsl_os, _dtp_os,
