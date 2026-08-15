@@ -216,7 +216,7 @@ OVERSOLD_DURATION_FILTER_TS = 1_786_712_108
 #
 # SET THIS to the Unix timestamp of the Publish immediately after it happens.
 # Until then it is 0 (= "publish not yet done").
-UNIFIED_START_TS: int = 0
+UNIFIED_START_TS: int = 1_786_787_924  # 2026-08-15 09:18 UTC — first Publish, single unified process
 # ---------------------------------------------------------------------------
 # Non-crypto symbol filter — Gate.io Futures lists synthetic equity/commodity
 # contracts alongside crypto. Block them from ALL signal types by prefix.
