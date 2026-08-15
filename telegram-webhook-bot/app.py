@@ -4940,7 +4940,7 @@ STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_clo
 # (X-of-Y, gaps allowed) — NOT a consecutive streak.  Threshold set upfront
 # (not tuned on backtest) per the EMA-lesson: avoid fitting to a handful of examples.
 OVERHEATED_DURATION_WINDOW   = 12   # look at last 12 completed 1h candles
-OVERHEATED_DURATION_MIN_UP   = 8    # min up-closes required for LONG (overheated)
+OVERHEATED_DURATION_MIN_UP   = 0    # duration filter for overheated_24h/early (0 = выключен; 8 = ≥8/12 1h свечей вверх)
 OVERHEATED_DURATION_MIN_DOWN = 0    # duration filter for oversold_24h (0 = выключен; 8 = ≥8/12 1h свечей вниз)
 
 # --- VWAP Reversion shadow (mean-reversion complement to Серия 1ч) ---
@@ -7276,17 +7276,6 @@ def check_overheated_oversold(
                     body += f"\n⏳ {html.escape(_ai_hold_oh)}"
                 if _ai_note_oh:
                     body += f"\n🤖 ИИ подтвердил: <i>{html.escape(_ai_note_oh)}</i>"
-                # Score gate — applied before both shadow and live paths so the
-                # A/B comparison (overheated_24h vs overheated_early) uses the
-                # same quality bar. send_alert_with_log would apply this for the
-                # live path, but the shadow path bypasses it — gate manually here.
-                _oh_min_score = MIN_SCORE_BY_TYPE.get("overheated_24h", MIN_ALERT_SCORE)
-                if score < _oh_min_score:
-                    logger.info(
-                        "Suppressed %s/overheated_24h (score=%d < min %d)",
-                        symbol, score, _oh_min_score,
-                    )
-                    continue
                 # Shadow path: SHADOW_ONLY_MODE=True, no per-strategy live flag.
                 # Record shadow tracking position so A/B data vs overheated_early
                 # is complete — previously SHADOW_ONLY_MODE silently dropped the event.
