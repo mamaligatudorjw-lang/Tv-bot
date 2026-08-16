@@ -1570,9 +1570,15 @@ def _demo_open_position(
                              "callback_data": _ew_shadow_cb}
                         ])
                     _watch_markup = {"inline_keyboard": _shadow_rows}
+                    # Conflict direction warning — checks both alerts and
+                    # demo_positions so shadow signals are covered too.
+                    _shadow_conflict = _conflict_direction_line(symbol, direction)
+                    _shadow_body = notify_body
+                    if _shadow_conflict:
+                        _shadow_body = f"{notify_body}\n{_shadow_conflict}"
                     _telegram_send(
                         TELEGRAM_CHAT_ID,
-                        f"🔬 SHADOW — не реальная позиция\n{notify_body}",
+                        f"🔬 SHADOW — не реальная позиция\n{_shadow_body}",
                         reply_markup=_watch_markup,
                     )
     except Exception as exc:
@@ -3676,20 +3682,34 @@ def _trend_warning_line(symbol: str, recommendation: str) -> str:
 _CONFLICT_WINDOW_SEC = 4 * 3600   # look-back window for opposite-direction conflict check
 
 def _conflict_direction_line(symbol: str, direction: str) -> str:
-    """Return a warning string if the OPPOSITE direction alert was sent for this
+    """Return a warning string if the OPPOSITE direction signal was sent for this
     symbol within the last 4 hours.  Empty string if no conflict found.
 
+    Searches BOTH tables:
+    - alerts       — real signals sent through send_alert_with_log
+    - demo_positions — shadow signals (overheated_24h, pump_24h_fade, bb_squeeze,
+                       ema_cross, overheated_early, etc.) that bypass alerts
+
     direction — direction of the CURRENT signal ('LONG' or 'SHORT').
-    Queries the alerts table so the check is restart-safe.
     """
     opposite = "SHORT" if direction == "LONG" else "LONG"
+    cutoff   = int(time.time()) - _CONFLICT_WINDOW_SEC
     try:
         with _db_lock:
             row = _get_db().execute(
-                "SELECT alert_type, ts FROM alerts "
-                "WHERE symbol=? AND recommendation=? AND ts > ? "
-                "ORDER BY ts DESC LIMIT 1",
-                (symbol, opposite, int(time.time()) - _CONFLICT_WINDOW_SEC),
+                """
+                SELECT alert_type, ts FROM (
+                    SELECT alert_type, ts
+                      FROM alerts
+                     WHERE symbol=? AND recommendation=? AND ts > ?
+                    UNION ALL
+                    SELECT alert_type, ts_open AS ts
+                      FROM demo_positions
+                     WHERE symbol=? AND direction=? AND ts_open > ?
+                ) ORDER BY ts DESC LIMIT 1
+                """,
+                (symbol, opposite, cutoff,
+                 symbol, opposite, cutoff),
             ).fetchone()
         if not row:
             return ""
