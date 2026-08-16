@@ -1560,9 +1560,15 @@ def _demo_open_position(
                         f"ew:{_ew_src}:{symbol}:{direction}"
                         f":{entry_price:.6g}:{sl_price:.6g}:{_atype_cb}"
                     )
+                    _cont_cb = (
+                        f"cont:{_new_demo_id}:{symbol}:{direction}"
+                        f":{entry_price:.8g}:{_atype_cb}"
+                    )
                     _shadow_rows: list[list[dict]] = [
-                        [{"text": "🔔 Уведомить о развороте",
-                          "callback_data": _watch_cb}],
+                        [{"text": "🔔 Разворот",
+                          "callback_data": _watch_cb},
+                         {"text": "📈 Продолжение",
+                          "callback_data": _cont_cb}],
                     ]
                     if len(_ew_shadow_cb.encode()) <= 64:
                         _shadow_rows.append([
@@ -1800,7 +1806,8 @@ def check_watchlist() -> None:
                 conn.commit()
                 logger.info("Watchlist: auto-expired %d entries", expired)
             rows = conn.execute(
-                "SELECT id, source_demo_id, symbol, direction, alert_type, entry_price, added_ts "
+                "SELECT id, source_demo_id, symbol, direction, alert_type, "
+                "entry_price, added_ts, mode "
                 "FROM watchlist WHERE status='active' AND expires_ts > ?",
                 (now,)
             ).fetchall()
@@ -1808,7 +1815,7 @@ def check_watchlist() -> None:
         logger.warning("check_watchlist DB fetch: %s", exc)
         return
 
-    for wl_id, demo_id, symbol, direction, alert_type, entry_price, added_ts in rows:
+    for wl_id, demo_id, symbol, direction, alert_type, entry_price, added_ts, wl_mode in rows:
         try:
             # Per-entry cooldown: don't re-alert within 4 h of the last trigger
             with _watchlist_lock:
@@ -1829,8 +1836,14 @@ def check_watchlist() -> None:
             last_vol   = float(last_c[5])
             avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
 
-            # Condition 1: candle direction matches signal
-            if direction == "LONG":
+            # Condition 1: candle direction based on mode.
+            # reversal:     check OPPOSITE direction (LONG signal → SHORT candle)
+            # continuation: check SAME direction (LONG signal → LONG candle)
+            _is_cont = (wl_mode or "reversal") == "continuation"
+            _check_dir = direction if _is_cont else (
+                "SHORT" if direction == "LONG" else "LONG"
+            )
+            if _check_dir == "LONG":
                 cond_candle = last_close > last_open
                 touch_val   = last_low
             else:
@@ -1885,8 +1898,8 @@ def check_watchlist() -> None:
                 with _watchlist_lock:
                     _watchlist_last_trigger[wl_id] = now
 
-                dir_emoji = "📈" if direction == "LONG" else "📉"
-                dir_word  = "LONG" if direction == "LONG" else "SHORT"
+                dir_emoji = "📈" if _check_dir == "LONG" else "📉"
+                dir_word  = _check_dir   # "LONG" or "SHORT"
                 age_sec   = now - (added_ts or now)
                 age_str   = (
                     f"{age_sec // 60} мин" if age_sec < 3600
@@ -1897,10 +1910,10 @@ def check_watchlist() -> None:
                     f"{'✅' if cond_touch  else '❌'} Касание зоны входа ±0.5%\n"
                     f"{'✅' if cond_volume else '❌'} Объём ≥1.5× среднего (10 свечей)"
                 )
-                # SL/TP от цены подтверждения (кэп 8%/12% уже применён)
+                # SL/TP от цены подтверждения по направлению подтверждения
                 with state_lock:
                     _wl_atr = state["atr_4h"].get(symbol)
-                if direction == "LONG":
+                if _check_dir == "LONG":
                     _wl_sl, _wl_tp = _compute_oversold_sl_tp(last_close, _wl_atr)
                 else:
                     _wl_sl, _wl_tp = _compute_pump_fade_sl_tp(last_close, _wl_atr)
@@ -1908,9 +1921,14 @@ def check_watchlist() -> None:
                     f"\n🔴 SL: <b>${_wl_sl:,.6g}</b>  │  🟢 TP: <b>${_wl_tp:,.6g}</b>"
                     if _wl_sl and _wl_tp else ""
                 )
-                _wl_conflict = _conflict_direction_line(symbol, direction)
+                _wl_conflict = _conflict_direction_line(symbol, _check_dir)
+                _wl_header = (
+                    f"📈 <b>Продолжение подтверждено — {dir_word}</b> {dir_emoji}"
+                    if _is_cont else
+                    f"🔔 <b>Разворот подтверждён — {dir_word}</b> {dir_emoji}"
+                )
                 body = (
-                    f"🔔 <b>Разворот подтверждён — {dir_word}</b> {dir_emoji}\n"
+                    f"{_wl_header}\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
                     f"<code>{symbol}</code> · {alert_type} · {age_str} назад\n"
                     f"💰 Цена подтверждения: <b>${last_close:,.6g}</b>\n"
@@ -4481,8 +4499,10 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_userpos_status "
             "ON user_positions(status)"
         )
-        # ── Reversal watchlist ───────────────────────────────────────────────
-        # One row per shadow-signal the user asked to watch for reversal conf.
+        # ── Reversal / Continuation watchlist ───────────────────────────────
+        # One row per shadow-signal the user asked to watch.
+        # mode='reversal':     check candle in OPPOSITE direction (market reversal)
+        # mode='continuation': check candle in SAME direction as signal
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS watchlist (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4493,18 +4513,30 @@ def _get_db() -> sqlite3.Connection:
                 entry_price    REAL    NOT NULL,
                 added_ts       INTEGER NOT NULL,
                 expires_ts     INTEGER NOT NULL,
-                status         TEXT    NOT NULL DEFAULT 'active'
+                status         TEXT    NOT NULL DEFAULT 'active',
+                mode           TEXT    NOT NULL DEFAULT 'reversal'
             )
         """)
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_watchlist_active "
             "ON watchlist(status, expires_ts)"
         )
-        # DB-level race guard: only one active entry per (symbol, direction).
-        # Partial index so completed/expired rows don't interfere.
+        # Migration: add mode column for existing DBs
+        try:
+            _db_conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN mode TEXT NOT NULL DEFAULT 'reversal'"
+            )
+        except sqlite3.OperationalError:
+            pass
+        # DB-level race guard: one active entry per (symbol, direction, mode).
+        # Allows simultaneous reversal + continuation watches for the same coin.
+        try:
+            _db_conn.execute("DROP INDEX IF EXISTS ux_watchlist_active")
+        except Exception:
+            pass
         _db_conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_watchlist_active "
-            "ON watchlist(symbol, direction) WHERE status='active'"
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_watchlist_active_v2 "
+            "ON watchlist(symbol, direction, mode) WHERE status='active'"
         )
         # Every reversal-confirmation check is logged here for future WR analysis.
         _db_conn.execute("""
@@ -5724,10 +5756,10 @@ def handle_callback_query(cb: dict) -> None:
                     _ins = db.execute(
                         "INSERT OR IGNORE INTO watchlist "
                         "(source_demo_id, symbol, direction, alert_type, "
-                        " entry_price, added_ts, expires_ts) "
-                        "VALUES (?,?,?,?,?,?,?)",
+                        " entry_price, added_ts, expires_ts, mode) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
                         (_w_demo_id, _w_sym, _w_dir, _w_atype or "unknown",
-                         _w_entry, now_w, now_w + 48 * 3600),
+                         _w_entry, now_w, now_w + 48 * 3600, "reversal"),
                     )
                     db.commit()
                     _inserted = _ins.rowcount > 0
@@ -5767,6 +5799,75 @@ def handle_callback_query(cb: dict) -> None:
                         )
             except Exception as w_exc:
                 logger.error("watch callback failed: %s", w_exc)
+                if chat_id:
+                    _telegram_send(chat_id, "❌ Ошибка базы данных")
+        elif kind == "cont":
+            # Format: cont:{demo_id}:{symbol}:{direction}:{entry_price}:{alert_type}
+            # Same as watch: but stores mode='continuation' — checks candle in the
+            # SAME direction as the signal (price continues the signal move).
+            parts_c = rest.split(":", 4)
+            if len(parts_c) != 5:
+                _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
+                return
+            _c_demo_id_str, _c_sym, _c_dir, _c_entry_str, _c_atype = parts_c
+            try:
+                _c_demo_id = int(_c_demo_id_str)
+                _c_entry   = float(_c_entry_str)
+            except ValueError:
+                _telegram_answer_callback(cb_id, "❌ Некорректные данные кнопки")
+                return
+            _telegram_answer_callback(cb_id, "📈 Слежу за продолжением 48ч")
+            now_c = int(time.time())
+            try:
+                with _db_lock:
+                    db = _get_db()
+                    _ins_c = db.execute(
+                        "INSERT OR IGNORE INTO watchlist "
+                        "(source_demo_id, symbol, direction, alert_type, "
+                        " entry_price, added_ts, expires_ts, mode) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (_c_demo_id, _c_sym, _c_dir, _c_atype or "unknown",
+                         _c_entry, now_c, now_c + 48 * 3600, "continuation"),
+                    )
+                    db.commit()
+                    _c_inserted = _ins_c.rowcount > 0
+                if _c_inserted:
+                    logger.info(
+                        "Watchlist continuation added: %s %s demo_id=%d",
+                        _c_sym, _c_dir, _c_demo_id,
+                    )
+                    if chat_id:
+                        _telegram_send(
+                            chat_id,
+                            f"📈 <b>Наблюдение за продолжением добавлено</b>\n"
+                            f"<code>{_c_sym}</code> {_c_dir} ({_c_atype or '?'})\n"
+                            f"Жду подтверждения продолжения движения — авто-удаление через 48ч\n"
+                            f"Отмена: <code>/unwatch {_c_sym}</code>",
+                        )
+                else:
+                    logger.info(
+                        "Watchlist continuation duplicate blocked: %s %s demo_id=%d",
+                        _c_sym, _c_dir, _c_demo_id,
+                    )
+                    if chat_id:
+                        try:
+                            with _db_lock:
+                                _ex_c = _get_db().execute(
+                                    "SELECT alert_type FROM watchlist "
+                                    "WHERE symbol=? AND direction=? AND mode='continuation' "
+                                    "AND status='active'",
+                                    (_c_sym, _c_dir),
+                                ).fetchone()
+                            _ex_c_atype = (_ex_c[0] if _ex_c else None) or "?"
+                        except Exception:
+                            _ex_c_atype = "?"
+                        _telegram_send(
+                            chat_id,
+                            f"📈 <code>{_c_sym}</code> {_c_dir} уже в наблюдении"
+                            f" (продолжение, сигнал: {_ex_c_atype})",
+                        )
+            except Exception as c_exc:
+                logger.error("cont callback failed: %s", c_exc)
                 if chat_id:
                     _telegram_send(chat_id, "❌ Ошибка базы данных")
         elif kind == "ew":
