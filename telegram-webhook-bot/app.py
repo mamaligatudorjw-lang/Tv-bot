@@ -1794,7 +1794,7 @@ def check_watchlist() -> None:
                 conn.commit()
                 logger.info("Watchlist: auto-expired %d entries", expired)
             rows = conn.execute(
-                "SELECT id, source_demo_id, symbol, direction, alert_type, entry_price "
+                "SELECT id, source_demo_id, symbol, direction, alert_type, entry_price, added_ts "
                 "FROM watchlist WHERE status='active' AND expires_ts > ?",
                 (now,)
             ).fetchall()
@@ -1802,7 +1802,7 @@ def check_watchlist() -> None:
         logger.warning("check_watchlist DB fetch: %s", exc)
         return
 
-    for wl_id, demo_id, symbol, direction, alert_type, entry_price in rows:
+    for wl_id, demo_id, symbol, direction, alert_type, entry_price, added_ts in rows:
         try:
             # Per-entry cooldown: don't re-alert within 4 h of the last trigger
             with _watchlist_lock:
@@ -1880,17 +1880,38 @@ def check_watchlist() -> None:
                     _watchlist_last_trigger[wl_id] = now
 
                 dir_emoji = "📈" if direction == "LONG" else "📉"
+                dir_word  = "LONG" if direction == "LONG" else "SHORT"
+                age_sec   = now - (added_ts or now)
+                age_str   = (
+                    f"{age_sec // 60} мин" if age_sec < 3600
+                    else f"{age_sec // 3600}ч{(age_sec % 3600) // 60:02d}м"
+                )
                 conds_lines = (
                     f"{'✅' if cond_candle else '❌'} Свеча закрылась в направлении сигнала\n"
                     f"{'✅' if cond_touch  else '❌'} Касание зоны входа ±0.5%\n"
                     f"{'✅' if cond_volume else '❌'} Объём ≥1.5× среднего (10 свечей)"
                 )
+                # SL/TP от цены подтверждения (кэп 8%/12% уже применён)
+                with state_lock:
+                    _wl_atr = state["atr_4h"].get(symbol)
+                if direction == "LONG":
+                    _wl_sl, _wl_tp = _compute_oversold_sl_tp(last_close, _wl_atr)
+                else:
+                    _wl_sl, _wl_tp = _compute_pump_fade_sl_tp(last_close, _wl_atr)
+                _wl_levels = (
+                    f"\n🔴 SL: <b>${_wl_sl:,.6g}</b>  │  🟢 TP: <b>${_wl_tp:,.6g}</b>"
+                    if _wl_sl and _wl_tp else ""
+                )
+                _wl_conflict = _conflict_direction_line(symbol, direction)
                 body = (
-                    f"🔔 <b>Разворот подтверждён</b> {dir_emoji}\n"
-                    f"<code>{symbol}</code> · {alert_type}\n"
-                    f"💲 Цена: <b>${last_close:,.6g}</b>\n"
-                    f"📍 Зона входа: <b>${entry_price:,.6g}</b>\n\n"
-                    f"{conds_lines}"
+                    f"🔔 <b>Разворот подтверждён — {dir_word}</b> {dir_emoji}\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<code>{symbol}</code> · {alert_type} · {age_str} назад\n"
+                    f"💰 Цена подтверждения: <b>${last_close:,.6g}</b>\n"
+                    f"📍 Ожидаемая зона входа: <b>${entry_price:,.6g}</b>"
+                    + _wl_levels
+                    + f"\n\n{conds_lines}"
+                    + (f"\n{_wl_conflict}" if _wl_conflict else "")
                 )
                 send_telegram(body)
                 logger.info(
@@ -3652,6 +3673,38 @@ def _trend_warning_line(symbol: str, recommendation: str) -> str:
     return ""
 
 
+_CONFLICT_WINDOW_SEC = 4 * 3600   # look-back window for opposite-direction conflict check
+
+def _conflict_direction_line(symbol: str, direction: str) -> str:
+    """Return a warning string if the OPPOSITE direction alert was sent for this
+    symbol within the last 4 hours.  Empty string if no conflict found.
+
+    direction — direction of the CURRENT signal ('LONG' or 'SHORT').
+    Queries the alerts table so the check is restart-safe.
+    """
+    opposite = "SHORT" if direction == "LONG" else "LONG"
+    try:
+        with _db_lock:
+            row = _get_db().execute(
+                "SELECT alert_type, ts FROM alerts "
+                "WHERE symbol=? AND recommendation=? AND ts > ? "
+                "ORDER BY ts DESC LIMIT 1",
+                (symbol, opposite, int(time.time()) - _CONFLICT_WINDOW_SEC),
+            ).fetchone()
+        if not row:
+            return ""
+        at, ts = row
+        age_sec = int(time.time()) - ts
+        if age_sec < 3600:
+            age_str = f"{age_sec // 60} мин назад"
+        else:
+            age_str = f"{age_sec // 3600}ч{(age_sec % 3600) // 60:02d}м назад"
+        return f"⚠️ {age_str} был <b>{opposite}</b> ({at}) по этой монете"
+    except Exception as _cx_exc:
+        logger.debug("_conflict_direction_line failed for %s: %s", symbol, _cx_exc)
+        return ""
+
+
 def _bear_downtrend_blocks_long(symbol: str) -> tuple[bool, int]:
     """Return (should_block, down_days) when a LONG signal should be suppressed.
 
@@ -4506,6 +4559,21 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_ewl_ew "
             "ON entry_watch_log(entry_watch_id)"
         )
+        # pump_fade_pending: persists across restarts so 4-h confirmation window
+        # survives bot deploys/restarts.  Restored into _pump_fade_pending dict
+        # by _restore_cooldowns_from_db() at startup.
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS pump_fade_pending (
+                symbol     TEXT PRIMARY KEY,
+                ts         INTEGER NOT NULL,
+                pump_price REAL    NOT NULL,
+                peak_price REAL    NOT NULL,
+                pct24      REAL,
+                rsi        REAL,
+                atr        REAL,
+                repeat_n   INTEGER DEFAULT 1
+            )
+        """)
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -5405,6 +5473,10 @@ def send_alert_with_log(
         entry_price=price,
         sl_price=sl_price,
     )
+    # Conflict warning — opposite direction within 4h for same symbol.
+    _cfl = _conflict_direction_line(symbol, recommendation)
+    if _cfl:
+        body_text = f"{body_text}\n{_cfl}"
     # Regime label: append market context to every outgoing alert.
     _regime_send, _regime_label = get_regime_label(alert_type, recommendation)
     if not _regime_send:
@@ -8346,6 +8418,7 @@ def check_pump_24h_fade(
         # Register for pump_fade_confirmed (confirmation-gated parallel track).
         # On new-peak exempt re-fires: update the pending entry so the confirmed
         # track follows the new (higher) detection level with a fresh 4h TTL.
+        _pfp_was_registered = False
         with _pfp_lock:
             if symbol not in _pump_fade_pending or _pf_exempt:
                 _pump_fade_pending[symbol] = {
@@ -8357,11 +8430,25 @@ def check_pump_24h_fade(
                     "atr":        atr,
                     "repeat_n":   _repeat_num,
                 }
+                _pfp_was_registered = True
                 logger.info(
                     "pump_fade_confirmed: %s %s pct24=+%.1f%% rsi=%.1f pump_price=%.6g",
                     "re-registered" if _pf_exempt else "registered",
                     symbol, pct24, rsi, price,
                 )
+        if _pfp_was_registered:
+            try:
+                with _db_lock:
+                    _get_db().execute(
+                        "INSERT OR REPLACE INTO pump_fade_pending "
+                        "(symbol, ts, pump_price, peak_price, pct24, rsi, atr, repeat_n) "
+                        "VALUES (?,?,?,?,?,?,?,?)",
+                        (symbol, int(now), price, price,
+                         pct24, rsi, atr if atr else None, _repeat_num),
+                    )
+                    _get_db().commit()
+            except Exception as _pfp_dbc:
+                logger.debug("pump_fade_pending DB write failed for %s: %s", symbol, _pfp_dbc)
 
         score = compute_signal_score(
             "volume_surge_short", "sell",   # conceptually identical: fade overbought
@@ -8473,6 +8560,18 @@ def check_pump_fade_confirmed() -> int:
         for sym in expired_syms:
             del _pump_fade_pending[sym]
         pending_copy = dict(_pump_fade_pending)
+    # Remove expired entries from DB
+    if expired_syms:
+        try:
+            with _db_lock:
+                _get_db().execute(
+                    f"DELETE FROM pump_fade_pending WHERE symbol IN "
+                    f"({','.join('?'*len(expired_syms))})",
+                    expired_syms,
+                )
+                _get_db().commit()
+        except Exception as _pfp_exp_exc:
+            logger.debug("pump_fade_pending DB expire delete failed: %s", _pfp_exp_exc)
 
     # --- Record TTL expiries in DB (persistent across restarts, countable by SQL) ---
     for sym, exp_e in expired_entries.items():
@@ -8521,6 +8620,16 @@ def check_pump_fade_confirmed() -> int:
                     continue   # removed by another path (shouldn't happen — safety)
                 peak_price = max(_pump_fade_pending[symbol]["peak_price"], candle_max)
                 _pump_fade_pending[symbol]["peak_price"] = peak_price
+            # Persist updated peak to DB so restarts keep the running high
+            try:
+                with _db_lock:
+                    _get_db().execute(
+                        "UPDATE pump_fade_pending SET peak_price=? WHERE symbol=?",
+                        (peak_price, symbol),
+                    )
+                    _get_db().commit()
+            except Exception as _pfp_pk_exc:
+                logger.debug("pump_fade_pending peak DB update failed %s: %s", symbol, _pfp_pk_exc)
 
             pump_price = entry["pump_price"]   # kept for statistics only
 
@@ -8547,6 +8656,14 @@ def check_pump_fade_confirmed() -> int:
             # exactly one shadow position per detection event.
             with _pfp_lock:
                 _pump_fade_pending.pop(symbol, None)
+            try:
+                with _db_lock:
+                    _get_db().execute(
+                        "DELETE FROM pump_fade_pending WHERE symbol=?", (symbol,)
+                    )
+                    _get_db().commit()
+            except Exception as _pfp_cnf_exc:
+                logger.debug("pump_fade_pending DB delete on confirm failed %s: %s", symbol, _pfp_cnf_exc)
 
             # ── Filters equal to pump_24h_fade real path ────────────────────
             # Keeps the A/B pair (pump_24h_fade vs pump_fade_confirmed) under the
@@ -8601,6 +8718,9 @@ def check_pump_fade_confirmed() -> int:
                 f"🟢 TP: <b>${_dtp_pfc:,.6g}</b>  │  🔴 SL: <b>${_dsl_pfc:,.6g}</b>"
                 + "\n⚠️ <i>[ТЕСТ: shadow — сравниваем с pump_24h_fade]</i>"
             )
+            _pfc_conflict = _conflict_direction_line(symbol, "SHORT")
+            if _pfc_conflict:
+                _pfc_body += f"\n{_pfc_conflict}"
 
             _demo_open_position(
                 symbol, "SHORT", entry_price, _dsl_pfc, _dtp_pfc,
@@ -13704,12 +13824,33 @@ def _restore_cooldowns_from_db() -> None:
                 state["last_bb_squeeze_alerted"][sym] = ts
             for sym, ts in emc_rows:
                 state["last_ema_cross_alerted"][sym] = ts
+        # Restore pump_fade_pending — entries still within 4-h TTL
+        pfp_rows = conn.execute(
+            "SELECT symbol, ts, pump_price, peak_price, pct24, rsi, atr, repeat_n "
+            "FROM pump_fade_pending WHERE ts > ?",
+            (now_ts - PUMP_FADE_CONFIRMED_TTL,),
+        ).fetchall()
         logger.info(
             "Cooldowns restored: %d oversold, %d streak_1h, %d vwap_rev, "
             "%d liq_rev, %d bb_squeeze, %d ema_cross",
             len(os_rows), len(sk_rows), len(vr_rows), len(lr_rows),
             len(bbs_rows), len(emc_rows),
         )
+        restored_pfp = 0
+        with _pfp_lock:
+            for _pfp_sym, _pfp_ts, _pfp_pp, _pfp_peak, _pfp_pct, _pfp_rsi, _pfp_atr, _pfp_rn in pfp_rows:
+                _pump_fade_pending[_pfp_sym] = {
+                    "ts":         _pfp_ts,
+                    "pct24":      _pfp_pct  or 0.0,
+                    "rsi":        _pfp_rsi  or 0.0,
+                    "pump_price": _pfp_pp,
+                    "peak_price": _pfp_peak,
+                    "atr":        _pfp_atr,
+                    "repeat_n":   _pfp_rn   or 1,
+                }
+                restored_pfp += 1
+        if restored_pfp:
+            logger.info("pump_fade_pending: restored %d entries from DB", restored_pfp)
     except Exception as exc:
         logger.warning("_restore_cooldowns_from_db failed: %s", exc)
 
