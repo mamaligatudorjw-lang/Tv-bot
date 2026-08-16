@@ -1774,6 +1774,15 @@ _ew_lock = threading.Lock()
 # pump_fade_confirmed: pending detection entries waiting for reversal confirmation
 _pump_fade_pending: dict[str, dict] = {}  # symbol → {ts, pct24, rsi, pump_price, peak_price, atr}
 _pfp_lock = threading.Lock()
+
+# ── Continuation-confirmation pending ────────────────────────────────────────
+# Key: (symbol, alert_type) — supports both overheated_24h and ema_cross.
+# Filled on every signal fire; cleared on confirmation or 4-h TTL.
+_cont_pending: dict[tuple[str, str], dict] = {}
+_cont_lock    = threading.Lock()
+CONT_CONFIRMED_TTL      = 4 * 3600   # seconds — same as pump_fade
+CONT_CONFIRMED_TF       = "15m"      # confirmation candle timeframe
+CONT_CONFIRMED_VOL_MULT = 1.5        # volume threshold multiplier
 # TTL expiries and confirmations are tracked as demo_positions rows with
 # shadow_reason='pump_fade_ttl_expired' / no special reason respectively, so
 # stats survive bot restarts and are visible via plain SQL queries.
@@ -4626,6 +4635,20 @@ def _get_db() -> sqlite3.Connection:
                 repeat_n   INTEGER DEFAULT 1
             )
         """)
+        # continuation_pending: persists across restarts for 4-h confirmation
+        # window.  Covers overheated_24h and ema_cross continuation signals.
+        # Restored into _cont_pending dict by _restore_cooldowns_from_db().
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS continuation_pending (
+                symbol       TEXT    NOT NULL,
+                alert_type   TEXT    NOT NULL,
+                ts           INTEGER NOT NULL,
+                signal_price REAL    NOT NULL,
+                direction    TEXT    NOT NULL,
+                atr          REAL,
+                PRIMARY KEY (symbol, alert_type)
+            )
+        """)
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -6669,6 +6692,45 @@ def check_bollinger_squeeze(
     return sent
 
 
+def _register_cont_pending(
+    symbol: str, alert_type: str, direction: str,
+    signal_price: float, atr: "float | None",
+) -> None:
+    """Register a (symbol, alert_type) pair for continuation confirmation.
+
+    Thread-safe; idempotent — re-registers with a fresh 4-h TTL on repeat fires.
+    Persists to DB so the window survives bot restarts.
+    Covers alert_type in {'overheated_24h', 'ema_cross'}.
+    """
+    now = int(time.time())
+    key = (symbol, alert_type)
+    with _cont_lock:
+        _cont_pending[key] = {
+            "ts":           now,
+            "signal_price": signal_price,
+            "direction":    direction,
+            "atr":          atr,
+        }
+    try:
+        with _db_lock:
+            _get_db().execute(
+                "INSERT OR REPLACE INTO continuation_pending "
+                "(symbol, alert_type, ts, signal_price, direction, atr) "
+                "VALUES (?,?,?,?,?,?)",
+                (symbol, alert_type, now, signal_price, direction,
+                 atr if atr else None),
+            )
+            _get_db().commit()
+    except Exception as _cp_exc:
+        logger.debug(
+            "continuation_pending DB write failed %s %s: %s", symbol, alert_type, _cp_exc,
+        )
+    logger.info(
+        "cont_confirmed: registered %s %s %s signal_price=%.6g",
+        alert_type, symbol, direction, signal_price,
+    )
+
+
 def check_ema_crossover(tickers: dict[str, dict]) -> int:
     """Shadow: EMA(9) × EMA(21) crossover on 4h with minimum gap threshold.
 
@@ -6759,6 +6821,9 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
                 f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
             ),
         )
+
+        # Register for continuation confirmation (auto-watch for 4h)
+        _register_cont_pending(symbol, "ema_cross", direction, price, atr_4h)
 
         with state_lock:
             state["last_ema_cross_alerted"][symbol] = now
@@ -7576,6 +7641,8 @@ def check_overheated_oversold(
                             score=score,
                             notify_body=body,
                         )
+                    # Auto-register for continuation confirmation
+                    _register_cont_pending(symbol, "overheated_24h", "LONG", price, atr)
                     with state_lock:
                         state["last_overheated_alerted"][symbol] = now
                     sent_oh += 1
@@ -7599,6 +7666,8 @@ def check_overheated_oversold(
                             alert_type="overheated_24h",
                             score=score,
                         )
+                        # Auto-register for continuation confirmation
+                        _register_cont_pending(symbol, "overheated_24h", "LONG", price, atr)
 
         elif (pct24 >= oh_threshold
               and OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
@@ -8860,6 +8929,187 @@ def check_pump_fade_confirmed() -> int:
 
         except Exception as exc:
             logger.warning("pump_fade_confirmed check %s: %s", symbol, exc)
+
+    return confirmed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def check_cont_confirmed() -> int:
+    """Continuation-confirmation check for overheated_24h and ema_cross.
+
+    Each signal fire auto-registers the coin in _cont_pending (via
+    _register_cont_pending called from check_ema_crossover / overheated scanner).
+    This function runs every 60 s and checks the last completed 15m candle for
+    three conditions confirming the move is continuing:
+
+      1. Candle closed IN the signal direction (bullish for LONG, bearish for SHORT)
+      2. Candle high > signal_price (LONG) / low < signal_price (SHORT) —
+         a breakout through the signal level, not just a touch
+      3. Volume ≥ CONT_CONFIRMED_VOL_MULT × 10-bar average
+
+    TTL 4 h.  On expiry writes a ttl_expired record (status='ttl_expired') to
+    demo_positions so confirmation-rate stats are available via SQL.
+    Separate alert_type ('overheated_confirmed' / 'ema_cross_confirmed') keeps
+    stats clean from the parent strategies.
+    """
+    now = time.time()
+    confirmed = 0
+
+    # ── Expire stale entries ────────────────────────────────────────────────
+    with _cont_lock:
+        expired_keys = [
+            k for k, e in _cont_pending.items()
+            if now - e["ts"] > CONT_CONFIRMED_TTL
+        ]
+        expired_entries = {k: _cont_pending[k] for k in expired_keys}
+        for k in expired_keys:
+            del _cont_pending[k]
+        pending_copy = dict(_cont_pending)
+
+    # Remove from DB
+    if expired_keys:
+        try:
+            with _db_lock:
+                for _exp_sym, _exp_atype in expired_keys:
+                    _get_db().execute(
+                        "DELETE FROM continuation_pending WHERE symbol=? AND alert_type=?",
+                        (_exp_sym, _exp_atype),
+                    )
+                _get_db().commit()
+        except Exception as _cp_exp_exc:
+            logger.debug("cont_pending DB expire delete failed: %s", _cp_exp_exc)
+
+    # Record TTL expiries in demo_positions for WR tracking
+    for (exp_sym, exp_atype), exp_e in expired_entries.items():
+        conf_atype = exp_atype.replace("_24h", "") + "_confirmed"
+        age_min    = int((now - exp_e["ts"]) / 60)
+        logger.info(
+            "cont_confirmed: %s %s expired TTL signal=%.6g dir=%s age=%dmin",
+            exp_atype, exp_sym, exp_e["signal_price"], exp_e["direction"], age_min,
+        )
+        try:
+            px = exp_e["signal_price"]
+            with _db_lock:
+                _get_db().execute(
+                    "INSERT INTO demo_positions "
+                    "(symbol, direction, entry_price, sl_price, tp_price, ts_open, "
+                    " size_usd, status, is_shadow, shadow_reason, alert_type, is_top) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0, 'ttl_expired', 1, "
+                    "        'cont_ttl_expired', ?, 0)",
+                    (exp_sym, exp_e["direction"], px, px, px,
+                     int(exp_e["ts"]), conf_atype),
+                )
+                _get_db().commit()
+        except Exception as _ttl_exc:
+            logger.warning(
+                "cont_ttl_expired DB record failed %s %s: %s", exp_atype, exp_sym, _ttl_exc,
+            )
+
+    # ── Check each pending entry ────────────────────────────────────────────
+    for (symbol, alert_type), entry in pending_copy.items():
+        try:
+            candles = _gateio_klines(symbol, CONT_CONFIRMED_TF, 15)
+            if len(candles) < 12:
+                continue
+            completed  = candles[:-1]   # drop the live (unfinished) candle
+            last_c     = completed[-1]
+            last_open  = float(last_c[1])
+            last_high  = float(last_c[2])
+            last_low   = float(last_c[3])
+            last_close = float(last_c[4])
+            last_vol   = float(last_c[5])
+            avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
+
+            signal_price = entry["signal_price"]
+            direction    = entry["direction"]
+            age_min      = int((now - entry["ts"]) / 60)
+
+            # Condition 1: candle closed in signal direction
+            cond_candle = (
+                last_close > last_open if direction == "LONG"
+                else last_close < last_open
+            )
+            # Condition 2: breakout through signal_price level
+            if direction == "LONG":
+                cond_break = last_high > signal_price
+            else:
+                cond_break = last_low < signal_price
+
+            # Condition 3: elevated volume
+            cond_volume = (
+                avg_vol_10 > 0
+                and last_vol >= avg_vol_10 * CONT_CONFIRMED_VOL_MULT
+            )
+
+            logger.debug(
+                "cont_confirmed check %s %s %s: candle=%s break=%s vol=%s",
+                alert_type, symbol, direction, cond_candle, cond_break, cond_volume,
+            )
+
+            if not (cond_candle and cond_break and cond_volume):
+                continue
+
+            # All 3 met — remove from pending FIRST (exactly-once guarantee)
+            with _cont_lock:
+                _cont_pending.pop((symbol, alert_type), None)
+            try:
+                with _db_lock:
+                    _get_db().execute(
+                        "DELETE FROM continuation_pending WHERE symbol=? AND alert_type=?",
+                        (symbol, alert_type),
+                    )
+                    _get_db().commit()
+            except Exception as _cp_del_exc:
+                logger.debug(
+                    "cont_pending DB delete on confirm failed %s: %s", symbol, _cp_del_exc,
+                )
+
+            entry_price  = last_close     # entry at confirmation candle close
+            atr          = entry["atr"]
+            vol_ratio    = last_vol / avg_vol_10 if avg_vol_10 > 0 else 0.0
+            conf_atype   = alert_type.replace("_24h", "") + "_confirmed"
+
+            _conf_sl, _conf_tp = _compute_demo_sl_tp(direction, entry_price, atr)
+            if not (_conf_sl and _conf_tp):
+                continue
+
+            _orig_label = {
+                "overheated_24h": "Импульс вверх",
+                "ema_cross":      "EMA Cross 4h",
+            }.get(alert_type, alert_type)
+            dir_emoji = "📈" if direction == "LONG" else "📉"
+
+            _conf_body = (
+                f"{dir_emoji} <b>{_orig_label} — продолжение {direction} (подтверждён)</b>\n"
+                f"Цена пробила уровень сигнала в направлении движения\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"<code>{symbol}</code>\n"
+                f"📡 Исходный сигнал: <b>{_orig_label}</b> ({age_min} мин назад)\n"
+                f"📍 Цена сигнала: <b>${signal_price:,.6g}</b> → "
+                f"пробой {'вверх' if direction == 'LONG' else 'вниз'}\n"
+                f"💰 Цена входа (подтверждение): <b>${entry_price:,.6g}</b>\n"
+                f"🔊 Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
+                f"🟢 TP: <b>${_conf_tp:,.6g}</b>  │  🔴 SL: <b>${_conf_sl:,.6g}</b>"
+            )
+            _conf_conflict = _conflict_direction_line(symbol, direction)
+            if _conf_conflict:
+                _conf_body += f"\n{_conf_conflict}"
+
+            _demo_open_position(
+                symbol, direction, entry_price, _conf_sl, _conf_tp,
+                is_shadow=True,
+                alert_type=conf_atype,
+                notify_body=_conf_body,
+            )
+
+            logger.info(
+                "cont_confirmed: %s %s %s confirmed @%.6g signal=%.6g vol=%.1fx age=%dmin",
+                conf_atype, symbol, direction, entry_price, signal_price, vol_ratio, age_min,
+            )
+            confirmed += 1
+
+        except Exception as exc:
+            logger.warning("cont_confirmed check %s %s: %s", alert_type, symbol, exc)
 
     return confirmed
 
@@ -13861,6 +14111,9 @@ scheduler.add_job(
     check_pump_fade_confirmed, "interval", seconds=60, id="pump_fade_confirmed_check",
 )
 scheduler.add_job(
+    check_cont_confirmed, "interval", seconds=60, id="cont_confirmed_check",
+)
+scheduler.add_job(
     _send_pump_fade_weekly_report, "interval", days=7, id="pump_fade_weekly_report",
 )
 # Skip background threads when imported under tests (pytest's conftest sets
@@ -13972,6 +14225,24 @@ def _restore_cooldowns_from_db() -> None:
                 restored_pfp += 1
         if restored_pfp:
             logger.info("pump_fade_pending: restored %d entries from DB", restored_pfp)
+        # Restore continuation_pending — entries still within 4-h TTL
+        cont_rows = conn.execute(
+            "SELECT symbol, alert_type, ts, signal_price, direction, atr "
+            "FROM continuation_pending WHERE ts > ?",
+            (now_ts - CONT_CONFIRMED_TTL,),
+        ).fetchall()
+        restored_cont = 0
+        with _cont_lock:
+            for _cp_sym, _cp_atype, _cp_ts, _cp_sp, _cp_dir, _cp_atr in cont_rows:
+                _cont_pending[(_cp_sym, _cp_atype)] = {
+                    "ts":           _cp_ts,
+                    "signal_price": _cp_sp,
+                    "direction":    _cp_dir,
+                    "atr":          _cp_atr,
+                }
+                restored_cont += 1
+        if restored_cont:
+            logger.info("cont_confirmed: restored %d entries from DB", restored_cont)
     except Exception as exc:
         logger.warning("_restore_cooldowns_from_db failed: %s", exc)
 
