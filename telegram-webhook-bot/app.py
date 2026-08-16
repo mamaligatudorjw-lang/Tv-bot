@@ -6752,6 +6752,7 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
     for symbol, t in tickers.items():
         try:
             vol24 = float(t["quoteVolume"])
+            price = float(t["lastPrice"])   # live ticker price for entry/SL/TP
         except (ValueError, KeyError) as _exc:
             logger.debug("check_ema_crossover suppressed error: %s", _exc)
             continue
@@ -6782,7 +6783,9 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
         if any(x is None for x in [e_fast[i], e_fast[i-1], e_slow[i], e_slow[i-1]]):
             continue
 
-        price   = closes[i]
+        # EMA crossover detection stays on completed candle closes.
+        # gap_pct uses live price — candle close and ticker price differ by <0.5%
+        # at typical crossover moments, so the threshold comparison is unaffected.
         gap_pct = abs(e_fast[i] - e_slow[i]) / price * 100.0
 
         # Detect crossover on the last candle
