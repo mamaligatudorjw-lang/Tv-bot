@@ -1511,26 +1511,33 @@ def _demo_open_position(
     try:
         with _db_lock:
             conn = _get_db()
-            # Skip if the same symbol+direction is already open (real or shadow separately).
-            # Exception: continuation confirmations (_confirmed suffix) are allowed through
-            # even when the parent signal position is still open — they are ladder steps,
-            # not independent duplicate trades.
-            _is_cont_confirmed = bool(alert_type and alert_type.endswith("_confirmed"))
-            if not _is_cont_confirmed:
+            # Skip if the same symbol+direction+alert_type is already open.
+            # alert_type is included so each strategy holds its position independently;
+            # one open ema_cross LONG does not block an overheated_24h LONG on the same coin.
+            # NULL alert_type falls back to IS NULL comparison (matches DB unique index behaviour).
+            if alert_type is not None:
                 existing = conn.execute(
                     "SELECT id, alert_type, ts_open FROM demo_positions "
-                    "WHERE symbol=? AND direction=? AND status='open' AND is_shadow=?",
+                    "WHERE symbol=? AND direction=? AND status='open' "
+                    "AND is_shadow=? AND alert_type=?",
+                    (symbol, direction, 1 if is_shadow else 0, alert_type),
+                ).fetchone()
+            else:
+                existing = conn.execute(
+                    "SELECT id, alert_type, ts_open FROM demo_positions "
+                    "WHERE symbol=? AND direction=? AND status='open' "
+                    "AND is_shadow=? AND alert_type IS NULL",
                     (symbol, direction, 1 if is_shadow else 0),
                 ).fetchone()
-                if existing:
-                    logger.warning(
-                        "Demo DUPLICATE BLOCKED: %s %s/%s — already open id=%d type=%s "
-                        "opened=%d pid=%d ts_recv=%d",
-                        symbol, direction, alert_type or "?",
-                        existing[0], existing[1] or "?", existing[2] or 0,
-                        _pid, _ts_recv,
-                    )
-                    return
+            if existing:
+                logger.warning(
+                    "Demo DUPLICATE BLOCKED: %s %s/%s — already open id=%d type=%s "
+                    "opened=%d pid=%d ts_recv=%d",
+                    symbol, direction, alert_type or "?",
+                    existing[0], existing[1] or "?", existing[2] or 0,
+                    _pid, _ts_recv,
+                )
+                return
             cur = conn.execute(
                 "INSERT OR IGNORE INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
@@ -4422,11 +4429,17 @@ def _get_db() -> sqlite3.Connection:
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
             "ON demo_positions(status, is_shadow)"
         )
-        # Unique constraint: only one open position per (symbol, direction, is_shadow).
-        # Belt-and-suspenders against the in-memory duplicate check above.
+        # Unique constraint: one open position per (symbol, direction, is_shadow, alert_type).
+        # Each strategy holds its slot independently; strategies no longer block each other.
+        # Migration: drop the old broader index (one-per-coin) if it still exists,
+        # then create the narrower per-strategy index.
+        try:
+            _db_conn.execute("DROP INDEX IF EXISTS ux_demo_open_one_per_coin")
+        except Exception as _idx_drop_exc:
+            logger.warning("Could not drop ux_demo_open_one_per_coin: %s", _idx_drop_exc)
         _db_conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_demo_open_one_per_coin "
-            "ON demo_positions(symbol, direction, is_shadow) WHERE status='open'"
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_demo_open_one_per_strategy "
+            "ON demo_positions(symbol, direction, is_shadow, alert_type) WHERE status='open'"
         )
         # Migrate: is_top flag for existing installs
         try:
