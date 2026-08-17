@@ -1511,21 +1511,26 @@ def _demo_open_position(
     try:
         with _db_lock:
             conn = _get_db()
-            # Skip if the same symbol+direction is already open (real or shadow separately)
-            existing = conn.execute(
-                "SELECT id, alert_type, ts_open FROM demo_positions "
-                "WHERE symbol=? AND direction=? AND status='open' AND is_shadow=?",
-                (symbol, direction, 1 if is_shadow else 0),
-            ).fetchone()
-            if existing:
-                logger.warning(
-                    "Demo DUPLICATE BLOCKED: %s %s/%s — already open id=%d type=%s "
-                    "opened=%d pid=%d ts_recv=%d",
-                    symbol, direction, alert_type or "?",
-                    existing[0], existing[1] or "?", existing[2] or 0,
-                    _pid, _ts_recv,
-                )
-                return
+            # Skip if the same symbol+direction is already open (real or shadow separately).
+            # Exception: continuation confirmations (_confirmed suffix) are allowed through
+            # even when the parent signal position is still open — they are ladder steps,
+            # not independent duplicate trades.
+            _is_cont_confirmed = bool(alert_type and alert_type.endswith("_confirmed"))
+            if not _is_cont_confirmed:
+                existing = conn.execute(
+                    "SELECT id, alert_type, ts_open FROM demo_positions "
+                    "WHERE symbol=? AND direction=? AND status='open' AND is_shadow=?",
+                    (symbol, direction, 1 if is_shadow else 0),
+                ).fetchone()
+                if existing:
+                    logger.warning(
+                        "Demo DUPLICATE BLOCKED: %s %s/%s — already open id=%d type=%s "
+                        "opened=%d pid=%d ts_recv=%d",
+                        symbol, direction, alert_type or "?",
+                        existing[0], existing[1] or "?", existing[2] or 0,
+                        _pid, _ts_recv,
+                    )
+                    return
             cur = conn.execute(
                 "INSERT OR IGNORE INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
