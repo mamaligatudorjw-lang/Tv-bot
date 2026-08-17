@@ -11137,6 +11137,7 @@ def _refresh_price_cache() -> None:
     calls from PositionMonitor threads and check_demo_positions, eliminating the main
     source of rate-limit pressure and monitoring lag.
     """
+    global _price_cache_ts  # assignment rebinds the name — must declare global
     try:
         resp = _gateio_get("/tickers", timeout=10)
         all_tickers = resp.json()
@@ -11157,6 +11158,8 @@ def _refresh_price_cache() -> None:
                 _price_cache.update(new_prices)
                 _price_cache_ts = time.time()
             logger.debug("_refresh_price_cache: %d prices updated", len(new_prices))
+        else:
+            logger.warning("_refresh_price_cache: Gate.io returned 0 prices (empty response)")
     except Exception as exc:
         logger.warning("_refresh_price_cache failed: %s", exc)
 
