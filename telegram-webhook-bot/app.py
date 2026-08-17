@@ -272,7 +272,7 @@ OVERSOLD_1M_GREEN_CANDLES     = 3       # сколько зелёных 1м св
                                          # False = входить сразу (текущий режим)
 AI_VETO_ENABLED                 = False  # False = ИИ не блокирует сигналы (все теневые ai_veto → реальные)
 VOL_SURGE_ENABLED               = False  # объёмный всплеск + CRSI
-BREAKDOWN_ENABLED               = False  # пробой вниз SHORT
+BREAKDOWN_ENABLED               = True   # пробой вниз SHORT (теневой режим с 2026-08-16)
 MOMENTUM_LONG_ENABLED           = False  # моментум LONG (рост)
 NEW_LISTING_ENABLED             = False  # новые листинги SHORT
 LISTING_PEAK_ENABLED            = False  # пик листинга SHORT
@@ -397,6 +397,7 @@ PUMP_24H_PCT = 30.0
 # Условия: 24h рост ≥ PUMP_FADE_MIN_PCT + RSI > PUMP_FADE_RSI_MIN → SHORT.
 # Включить реальные позиции: PUMP_FADE_SHADOW_ONLY = False
 PUMP_FADE_SHADOW_ONLY   = True     # True = только shadow-сбор; False = реальная paper-торговля
+BREAKDOWN_SHADOW_ONLY   = True     # True = только shadow-сбор; не переключать до 2+ недель данных
 PUMP_FADE_MIN_PCT       = 30.0     # мин. 24h рост % для квалификации
 PUMP_FADE_RSI_MIN       = 65.0     # RSI выше порога — подтверждение перегрева
 PUMP_FADE_MAX_PCT       = 200.0    # игнорировать крайние выбросы (листинговые пампы)
@@ -492,6 +493,8 @@ CONFLUENCE_ATR_SL_MAX_PCT = 8.0    # max SL distance as % of entry; 0=no cap
 # Distinct wrapper preserves ability to tune independently of confluence.
 OVERSOLD_ATR_SL_MAX_PCT  = 8.0    # max SL distance as % of entry for oversold_24h LONG; 0=no cap
 OVERSOLD_SL_CAP_SINCE    = 1786741084  # unix ts when cap was introduced (2026-08-14)
+BREAKDOWN_ATR_SL_MAX_PCT = 8.0    # max SL distance as % of entry for breakdown_short SHORT; matches confluence cap
+BREAKDOWN_SHADOW_SINCE   = 1786950279  # unix ts when shadow mode enabled (2026-08-16 ~20:44 UTC)
 
 # In BULL market, counter-trend SHORTs require stronger conviction.
 SHORT_BULL_REGIME_MIN_SCORE = 80   # raised from type-default 75 when regime=BULL
@@ -540,7 +543,8 @@ ALERT_TYPE_SHADOW_ONLY: dict[str, bool] = {
     "oversold_24h":  False,          # всегда реальные сигналы
     "streak_1h":     False,          # всегда реальные сигналы
     "confluence":    False,          # всегда реальные сигналы
-    "pump_24h_fade": PUMP_FADE_SHADOW_ONLY,  # управляется флагом стратегии (менять там)
+    "pump_24h_fade":   PUMP_FADE_SHADOW_ONLY,  # управляется флагом стратегии (менять там)
+    "breakdown_short": BREAKDOWN_SHADOW_ONLY,   # включена 2026-08-16; переключить когда 2+ недели данных
 }
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа
 
@@ -1468,6 +1472,19 @@ def _compute_pump_fade_sl_tp(
     Controlled by PUMP_FADE_SL_MAX_PCT.
     """
     cap = PUMP_FADE_SL_MAX_PCT if PUMP_FADE_SL_MAX_PCT > 0 else None
+    return _compute_demo_sl_tp("SHORT", price, atr, max_sl_pct=cap)
+
+
+def _compute_breakdown_sl_tp(
+    price: float, atr: float | None
+) -> tuple[float | None, float | None]:
+    """_compute_demo_sl_tp for breakdown_short SHORT entries with 8% SL cap.
+
+    Matches confluence/oversold cap so WR is measured on the same scale and
+    appears in the same /demo table as other active strategies.
+    Introduced 2026-08-16 (BREAKDOWN_SHADOW_SINCE).
+    """
+    cap = BREAKDOWN_ATR_SL_MAX_PCT if BREAKDOWN_ATR_SL_MAX_PCT > 0 else None
     return _compute_demo_sl_tp("SHORT", price, atr, max_sl_pct=cap)
 
 
@@ -8128,7 +8145,7 @@ def check_breakdown_short(
             headline = "📉 <b>ПРОБОЙ ВНИЗ — шорт продолжается</b>"
             subtitle = "Монета в нисходящем тренде, импульс не исчерпан"
 
-        sl_tp = _format_sl_tp("sell", price, atr)
+        sl_tp = _format_sl_tp("sell", price, atr, score=score)
         body = (
             f"{headline}\n"
             f"{subtitle}\n"
@@ -8153,6 +8170,17 @@ def check_breakdown_short(
                 symbol, "B(oversold)" if path_b else "A(room)", pct24, rsi,
             )
             sent += 1
+            # Открываем теневую позицию для WR-трекинга в /demo.
+            # notify_body не передаём — Telegram-уведомление уже отправлено выше через send_alert_with_log.
+            _dsl_bd, _dtp_bd = _compute_breakdown_sl_tp(price, atr)
+            if _dsl_bd and _dtp_bd:
+                _demo_open_position(
+                    symbol, "SHORT", price, _dsl_bd, _dtp_bd,
+                    is_shadow=True,
+                    shadow_reason="breakdown_shadow_mode",
+                    alert_type="breakdown_short",
+                    score=score,
+                )
 
     return sent
 
