@@ -1797,9 +1797,13 @@ _pfp_lock = threading.Lock()
 # Filled on every signal fire; cleared on confirmation or 4-h TTL.
 _cont_pending: dict[tuple[str, str], dict] = {}
 _cont_lock    = threading.Lock()
-CONT_CONFIRMED_TTL      = 4 * 3600   # seconds — same as pump_fade
-CONT_CONFIRMED_TF       = "15m"      # confirmation candle timeframe
-CONT_CONFIRMED_VOL_MULT = 1.5        # volume threshold multiplier
+CONT_CONFIRMED_TTL          = 4 * 3600   # seconds — same as pump_fade
+CONT_CONFIRMED_TF           = "15m"      # confirmation candle timeframe
+CONT_CONFIRMED_VOL_MULT     = 1.5        # volume threshold multiplier
+CONT_CONFIRMED_MAX_REPEATS  = 3          # max confirmations per entry (ladder)
+CONT_CONFIRMED_REPEAT_PCT   = 5.0        # min % move from last confirm for next confirm
+# TP multipliers per confirmation step: 1st=2.0×SL, 2nd=1.5×SL, 3rd=1.0×SL
+CONT_CONFIRMED_TP_MULTS     = [2.0, 1.5, 1.0]
 # TTL expiries and confirmations are tracked as demo_positions rows with
 # shadow_reason='pump_fade_ttl_expired' / no special reason respectively, so
 # stats survive bot restarts and are visible via plain SQL queries.
@@ -4657,15 +4661,28 @@ def _get_db() -> sqlite3.Connection:
         # Restored into _cont_pending dict by _restore_cooldowns_from_db().
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS continuation_pending (
-                symbol       TEXT    NOT NULL,
-                alert_type   TEXT    NOT NULL,
-                ts           INTEGER NOT NULL,
-                signal_price REAL    NOT NULL,
-                direction    TEXT    NOT NULL,
-                atr          REAL,
+                symbol              TEXT    NOT NULL,
+                alert_type          TEXT    NOT NULL,
+                ts                  INTEGER NOT NULL,
+                signal_price        REAL    NOT NULL,
+                direction           TEXT    NOT NULL,
+                atr                 REAL,
+                confirm_num         INTEGER DEFAULT 0,
+                last_confirm_price  REAL,
                 PRIMARY KEY (symbol, alert_type)
             )
         """)
+        # Migration: add ladder columns for existing DB (idempotent — fails silently if already present)
+        for _mig_col, _mig_def in [
+            ("confirm_num",        "INTEGER DEFAULT 0"),
+            ("last_confirm_price", "REAL"),
+        ]:
+            try:
+                _db_conn.execute(
+                    f"ALTER TABLE continuation_pending ADD COLUMN {_mig_col} {_mig_def}"
+                )
+            except Exception:
+                pass  # column already exists
         _db_conn.commit()
         logger.info("Hit-rate DB ready at %s", HIT_RATE_DB_PATH)
     return _db_conn
@@ -6723,17 +6740,20 @@ def _register_cont_pending(
     key = (symbol, alert_type)
     with _cont_lock:
         _cont_pending[key] = {
-            "ts":           now,
-            "signal_price": signal_price,
-            "direction":    direction,
-            "atr":          atr,
+            "ts":                now,
+            "signal_price":      signal_price,
+            "direction":         direction,
+            "atr":               atr,
+            "confirm_num":       0,
+            "last_confirm_price": None,
         }
     try:
         with _db_lock:
             _get_db().execute(
                 "INSERT OR REPLACE INTO continuation_pending "
-                "(symbol, alert_type, ts, signal_price, direction, atr) "
-                "VALUES (?,?,?,?,?,?)",
+                "(symbol, alert_type, ts, signal_price, direction, atr, "
+                " confirm_num, last_confirm_price) "
+                "VALUES (?,?,?,?,?,?,0,NULL)",
                 (symbol, alert_type, now, signal_price, direction,
                  atr if atr else None),
             )
@@ -9051,20 +9071,25 @@ def check_cont_confirmed() -> int:
             last_vol   = float(last_c[5])
             avg_vol_10 = sum(float(c[5]) for c in completed[-10:]) / 10.0
 
-            signal_price = entry["signal_price"]
-            direction    = entry["direction"]
-            age_min      = int((now - entry["ts"]) / 60)
+            signal_price     = entry["signal_price"]
+            direction        = entry["direction"]
+            age_min          = int((now - entry["ts"]) / 60)
+            confirm_num_cur  = entry.get("confirm_num", 0)
+            last_confirm_px  = entry.get("last_confirm_price")  # None on first confirmation
+
+            # Breakout level: use last confirmation price for repeats, signal_price for first
+            check_level = last_confirm_px if last_confirm_px else signal_price
 
             # Condition 1: candle closed in signal direction
             cond_candle = (
                 last_close > last_open if direction == "LONG"
                 else last_close < last_open
             )
-            # Condition 2: breakout through signal_price level
+            # Condition 2: breakout through check_level (updated per confirmation)
             if direction == "LONG":
-                cond_break = last_high > signal_price
+                cond_break = last_high > check_level
             else:
-                cond_break = last_low < signal_price
+                cond_break = last_low < check_level
 
             # Condition 3: elevated volume
             cond_volume = (
@@ -9072,37 +9097,75 @@ def check_cont_confirmed() -> int:
                 and last_vol >= avg_vol_10 * CONT_CONFIRMED_VOL_MULT
             )
 
-            logger.debug(
-                "cont_confirmed check %s %s %s: candle=%s break=%s vol=%s",
-                alert_type, symbol, direction, cond_candle, cond_break, cond_volume,
-            )
-
+            # ── INFO-level rejection logging (diagnostic baseline at 1.5×) ──
             if not (cond_candle and cond_break and cond_volume):
-                continue
-
-            # All 3 met — remove from pending FIRST (exactly-once guarantee)
-            with _cont_lock:
-                _cont_pending.pop((symbol, alert_type), None)
-            try:
-                with _db_lock:
-                    _get_db().execute(
-                        "DELETE FROM continuation_pending WHERE symbol=? AND alert_type=?",
-                        (symbol, alert_type),
-                    )
-                    _get_db().commit()
-            except Exception as _cp_del_exc:
-                logger.debug(
-                    "cont_pending DB delete on confirm failed %s: %s", symbol, _cp_del_exc,
+                _vol_tag = (
+                    f"vol({last_vol/avg_vol_10:.2f}x<{CONT_CONFIRMED_VOL_MULT}x)"
+                    if avg_vol_10 > 0 else "vol(noavg)"
                 )
-
-            entry_price  = last_close     # entry at confirmation candle close
-            atr          = entry["atr"]
-            vol_ratio    = last_vol / avg_vol_10 if avg_vol_10 > 0 else 0.0
-            conf_atype   = alert_type.replace("_24h", "") + "_confirmed"
-
-            _conf_sl, _conf_tp = _compute_demo_sl_tp(direction, entry_price, atr)
-            if not (_conf_sl and _conf_tp):
+                _fails = (
+                    (["candle"] if not cond_candle else [])
+                    + (["break"] if not cond_break else [])
+                    + ([_vol_tag] if not cond_volume else [])
+                )
+                logger.info(
+                    "cont_confirmed SKIP %s %s %s confirm#%d: %s",
+                    alert_type, symbol, direction,
+                    confirm_num_cur + 1, "+".join(_fails),
+                )
                 continue
+
+            # ── 5% gate for repeat confirmations ─────────────────────────
+            entry_price = last_close
+            if confirm_num_cur > 0 and last_confirm_px:
+                if direction == "LONG":
+                    _needed = last_confirm_px * (1 + CONT_CONFIRMED_REPEAT_PCT / 100)
+                    if entry_price < _needed:
+                        logger.info(
+                            "cont_confirmed SKIP %s %s %s confirm#%d: "
+                            "need +%.1f%% from %.6g, close=%.6g",
+                            alert_type, symbol, direction, confirm_num_cur + 1,
+                            CONT_CONFIRMED_REPEAT_PCT, last_confirm_px, entry_price,
+                        )
+                        continue
+                else:
+                    _needed = last_confirm_px * (1 - CONT_CONFIRMED_REPEAT_PCT / 100)
+                    if entry_price > _needed:
+                        logger.info(
+                            "cont_confirmed SKIP %s %s %s confirm#%d: "
+                            "need -%.1f%% from %.6g, close=%.6g",
+                            alert_type, symbol, direction, confirm_num_cur + 1,
+                            CONT_CONFIRMED_REPEAT_PCT, last_confirm_px, entry_price,
+                        )
+                        continue
+
+            # ── All conditions met ────────────────────────────────────────
+            confirm_num_new = confirm_num_cur + 1
+            atr             = entry["atr"]
+            vol_ratio       = last_vol / avg_vol_10 if avg_vol_10 > 0 else 0.0
+            conf_atype      = alert_type.replace("_24h", "") + "_confirmed"
+            is_last         = confirm_num_new >= CONT_CONFIRMED_MAX_REPEATS
+
+            # TP multiplier decreases with each confirmation (less room left)
+            tp_mult = CONT_CONFIRMED_TP_MULTS[min(confirm_num_new - 1,
+                                                  len(CONT_CONFIRMED_TP_MULTS) - 1)]
+
+            # Compute SL from ATR, then apply ladder TP multiplier
+            _conf_sl, _ = _compute_demo_sl_tp(direction, entry_price, atr)
+            if not _conf_sl:
+                continue
+            if direction == "LONG":
+                _sl_dist = entry_price - _conf_sl
+                _conf_tp = entry_price + _sl_dist * tp_mult
+            else:
+                _sl_dist = _conf_sl - entry_price
+                _conf_tp = entry_price - _sl_dist * tp_mult
+
+            # Progress from original signal
+            if direction == "LONG":
+                _pct_from_signal = (entry_price - signal_price) / signal_price * 100
+            else:
+                _pct_from_signal = (signal_price - entry_price) / signal_price * 100
 
             _orig_label = {
                 "overheated_24h": "Импульс вверх",
@@ -9111,20 +9174,59 @@ def check_cont_confirmed() -> int:
             dir_emoji = "📈" if direction == "LONG" else "📉"
 
             _conf_body = (
-                f"{dir_emoji} <b>{_orig_label} — продолжение {direction} (подтверждён)</b>\n"
-                f"Цена пробила уровень сигнала в направлении движения\n"
+                f"{dir_emoji} <b>{_orig_label} — продолжение {direction}</b>\n"
+                f"Подтверждение {confirm_num_new}/{CONT_CONFIRMED_MAX_REPEATS}"
+                f", +{_pct_from_signal:.1f}% от исходного сигнала\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
                 f"<code>{symbol}</code>\n"
                 f"📡 Исходный сигнал: <b>{_orig_label}</b> ({age_min} мин назад)\n"
-                f"📍 Цена сигнала: <b>${signal_price:,.6g}</b> → "
-                f"пробой {'вверх' if direction == 'LONG' else 'вниз'}\n"
-                f"💰 Цена входа (подтверждение): <b>${entry_price:,.6g}</b>\n"
+                f"📍 Цена сигнала: <b>${signal_price:,.6g}</b>\n"
+                f"💰 Цена входа: <b>${entry_price:,.6g}</b>\n"
                 f"🔊 Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
                 f"🟢 TP: <b>${_conf_tp:,.6g}</b>  │  🔴 SL: <b>${_conf_sl:,.6g}</b>"
+                f"  (TP {tp_mult:.1f}×SL)"
             )
             _conf_conflict = _conflict_direction_line(symbol, direction)
             if _conf_conflict:
                 _conf_body += f"\n{_conf_conflict}"
+
+            # ── Remove or update pending state ────────────────────────────
+            if is_last:
+                # Final confirmation — remove from pending entirely
+                with _cont_lock:
+                    _cont_pending.pop((symbol, alert_type), None)
+                try:
+                    with _db_lock:
+                        _get_db().execute(
+                            "DELETE FROM continuation_pending WHERE symbol=? AND alert_type=?",
+                            (symbol, alert_type),
+                        )
+                        _get_db().commit()
+                except Exception as _cp_del_exc:
+                    logger.debug(
+                        "cont_pending DB delete on final confirm failed %s: %s",
+                        symbol, _cp_del_exc,
+                    )
+            else:
+                # Keep under observation — update confirm_num and last_confirm_price
+                with _cont_lock:
+                    if (symbol, alert_type) in _cont_pending:
+                        _cont_pending[(symbol, alert_type)]["confirm_num"]         = confirm_num_new
+                        _cont_pending[(symbol, alert_type)]["last_confirm_price"]  = entry_price
+                try:
+                    with _db_lock:
+                        _get_db().execute(
+                            "UPDATE continuation_pending "
+                            "SET confirm_num=?, last_confirm_price=? "
+                            "WHERE symbol=? AND alert_type=?",
+                            (confirm_num_new, entry_price, symbol, alert_type),
+                        )
+                        _get_db().commit()
+                except Exception as _cp_upd_exc:
+                    logger.debug(
+                        "cont_pending DB update on confirm failed %s: %s",
+                        symbol, _cp_upd_exc,
+                    )
 
             _demo_open_position(
                 symbol, direction, entry_price, _conf_sl, _conf_tp,
@@ -9134,8 +9236,11 @@ def check_cont_confirmed() -> int:
             )
 
             logger.info(
-                "cont_confirmed: %s %s %s confirmed @%.6g signal=%.6g vol=%.1fx age=%dmin",
-                conf_atype, symbol, direction, entry_price, signal_price, vol_ratio, age_min,
+                "cont_confirmed: %s %s %s confirmed#%d @%.6g signal=%.6g "
+                "vol=%.1fx tp_mult=%.1fx age=%dmin%s",
+                conf_atype, symbol, direction, confirm_num_new, entry_price,
+                signal_price, vol_ratio, tp_mult, age_min,
+                " [FINAL]" if is_last else "",
             )
             confirmed += 1
 
@@ -14258,18 +14363,22 @@ def _restore_cooldowns_from_db() -> None:
             logger.info("pump_fade_pending: restored %d entries from DB", restored_pfp)
         # Restore continuation_pending — entries still within 4-h TTL
         cont_rows = conn.execute(
-            "SELECT symbol, alert_type, ts, signal_price, direction, atr "
+            "SELECT symbol, alert_type, ts, signal_price, direction, atr, "
+            "COALESCE(confirm_num, 0), last_confirm_price "
             "FROM continuation_pending WHERE ts > ?",
             (now_ts - CONT_CONFIRMED_TTL,),
         ).fetchall()
         restored_cont = 0
         with _cont_lock:
-            for _cp_sym, _cp_atype, _cp_ts, _cp_sp, _cp_dir, _cp_atr in cont_rows:
+            for (_cp_sym, _cp_atype, _cp_ts, _cp_sp, _cp_dir,
+                 _cp_atr, _cp_cnum, _cp_lcpx) in cont_rows:
                 _cont_pending[(_cp_sym, _cp_atype)] = {
-                    "ts":           _cp_ts,
-                    "signal_price": _cp_sp,
-                    "direction":    _cp_dir,
-                    "atr":          _cp_atr,
+                    "ts":                _cp_ts,
+                    "signal_price":      _cp_sp,
+                    "direction":         _cp_dir,
+                    "atr":               _cp_atr,
+                    "confirm_num":       _cp_cnum or 0,
+                    "last_confirm_price": _cp_lcpx,
                 }
                 restored_cont += 1
         if restored_cont:
