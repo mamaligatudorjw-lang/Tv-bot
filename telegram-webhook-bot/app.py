@@ -170,6 +170,7 @@ state = {
     "last_bb_squeeze_alerted": {},     # symbol -> ts (Bollinger squeeze shadow cooldown)
     "last_ema_cross_alerted": {},      # symbol -> ts (EMA crossover shadow cooldown)
     "last_high_rejection_alerted": {},  # symbol -> ts (high_rejection_short shadow cooldown)
+    "last_range_breakout_alerted": {},  # symbol -> ts (range_breakout_long shadow cooldown)
     "shadow_notif_today": {},          # {notif_key: {"date": "YYYY-MM-DD", "count": int}}
     "last_lsr_shift_alerted": {},      # symbol -> ts (whale LSR flip cooldown)
     "lsr_prev": {},                    # symbol -> float (previous LSR value for shift detection)
@@ -547,6 +548,7 @@ ALERT_TYPE_SHADOW_ONLY: dict[str, bool] = {
     "pump_24h_fade":        PUMP_FADE_SHADOW_ONLY,       # управляется флагом стратегии (менять там)
     "breakdown_short":      BREAKDOWN_SHADOW_ONLY,       # включена 2026-08-16; переключить когда 2+ недели данных
     "high_rejection_short": True,                        # управляется HIGH_REJECTION_SHADOW_ONLY
+    "range_breakout_long":  True,                        # управляется RANGE_BREAKOUT_SHADOW_ONLY
 }
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа
 
@@ -5280,6 +5282,22 @@ HIGH_REJECTION_MAX_SL_PCT     = 8.0     # SL cap; R:R 2:1 (TP = entry - 2 × SL_
 HIGH_REJECTION_COOLDOWN       = 28800   # 8h per symbol
 HIGH_REJECTION_ENABLED_TS: int = 1787065200  # 2026-08-17 15:00 UTC (enabled timestamp)
 
+# ── range_breakout_long shadow strategy ───────────────────────────────────────
+# Coin corrected ≥25%, consolidated ≥10h in a tight base (≤10% wide),
+# then the last completed 1h bar closed above the base on ≥1.5× volume.
+# SL: seg_low × (1 − buffer), capped at 15% below entry.  TP: R:R 2:1.
+# Enabled 2026-08-18. Set RANGE_BREAKOUT_SHADOW_ONLY=False after 3-week validation.
+RANGE_BREAKOUT_SHADOW_ONLY   = True     # set False to go live after validation
+RANGE_BREAKOUT_MIN_SEG_LEN   = 10       # ≥10 bars (hours) in consolidation
+RANGE_BREAKOUT_MAX_WIDTH      = 0.10    # (max_high − min_low) / min_low ≤ 10%
+RANGE_BREAKOUT_MIN_DROP       = 0.25    # drop from pre-segment high to seg_low ≥ 25%
+RANGE_BREAKOUT_PRE_DROP_WIN   = 48      # bars to look back for the pre-segment high
+RANGE_BREAKOUT_MAX_LOOKBACK   = 48      # max bars to extend segment backwards
+RANGE_BREAKOUT_VOL_FACTOR     = 1.5     # breakout bar volume ≥ N × avg range volume
+RANGE_BREAKOUT_SL_BUFFER      = 0.01    # SL placed 1% below seg_low
+RANGE_BREAKOUT_SL_MAX_PCT     = 0.15    # hard cap: SL cannot exceed 15% below entry
+RANGE_BREAKOUT_COOLDOWN       = 28800   # 8h per symbol
+
 # Shadow signal Telegram notifications — no daily cap.
 # The previous SHADOW_NOTIF_LIMITS dict was removed because the counters lived in
 # memory and reset on every bot restart, making the cap ineffective in practice.
@@ -7042,6 +7060,154 @@ def check_high_rejection_short(tickers: dict[str, dict]) -> int:
             "high_rejection SHORT shadow %s: range=%.1f%% dist_high=%.1f%% "
             "vol=%.1fx sl=%.6g tp=%.6g",
             symbol, range_pct, dist_from_high_pct, vol_ratio, sl_price, tp_price,
+        )
+        sent += 1
+
+    return sent
+
+
+def check_range_breakout_long(tickers: dict[str, dict]) -> int:
+    """Shadow LONG: coin corrected ≥25%, formed a tight base (≥10h, ≤10% wide),
+    then the last completed 1h bar closed above the base on elevated volume.
+
+    Detection (1h candles, slide backwards from bar i-1):
+      1. Longest contiguous segment ending at bar i-1 where
+         (max_high − min_low) / min_low ≤ RANGE_BREAKOUT_MAX_WIDTH.
+      2. Segment length ≥ RANGE_BREAKOUT_MIN_SEG_LEN bars.
+      3. In RANGE_BREAKOUT_PRE_DROP_WIN bars before segment start:
+         (pre_high − seg_low) / pre_high ≥ RANGE_BREAKOUT_MIN_DROP.
+
+    Breakout (bar i = last completed 1h bar):
+      4. close > seg_high.
+      5. bar i volume ≥ RANGE_BREAKOUT_VOL_FACTOR × avg volume over the range.
+
+    SL: seg_low × (1 − RANGE_BREAKOUT_SL_BUFFER), capped at
+        RANGE_BREAKOUT_SL_MAX_PCT below entry.
+    TP: entry + 2 × (entry − sl_price)  (R:R 2:1).
+    Shadow-only until RANGE_BREAKOUT_SHADOW_ONLY = False.
+    Cooldown: RANGE_BREAKOUT_COOLDOWN seconds per symbol.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now  = time.time()
+
+    for symbol, t in tickers.items():
+        try:
+            price = float(t["lastPrice"])
+            vol24 = float(t["quoteVolume"])
+        except (ValueError, KeyError):
+            continue
+
+        if vol24 < MIN_VOLUME_USDT or price <= 0:
+            continue
+
+        # Cooldown check before expensive candle fetch
+        with state_lock:
+            last_alerted = state["last_range_breakout_alerted"].get(symbol, 0)
+        if now - last_alerted < RANGE_BREAKOUT_COOLDOWN:
+            continue
+
+        try:
+            candles = _gateio_klines(symbol, "1h", 200)
+        except Exception as _exc:
+            logger.debug("check_range_breakout_long klines %s: %s", symbol, _exc)
+            continue
+        if not candles or len(candles) < RANGE_BREAKOUT_MIN_SEG_LEN + 3:
+            continue
+
+        bars = candles
+        n    = len(bars)
+        # bar i  = last completed bar (index n-2; n-1 is still forming)
+        i    = n - 2
+        # e = last bar of the candidate range = i−1
+        e    = i - 1
+        if e < 0:
+            continue
+
+        # ── Step 1: grow range backwards from e ──────────────────────────────
+        seg_high  = float(bars[e][2])
+        seg_low   = float(bars[e][3])
+        seg_start = e
+        for k in range(1, RANGE_BREAKOUT_MAX_LOOKBACK):
+            s = e - k
+            if s < 0:
+                break
+            nh = max(seg_high, float(bars[s][2]))
+            nl = min(seg_low,  float(bars[s][3]))
+            if nl <= 0:
+                break
+            if (nh - nl) / nl > RANGE_BREAKOUT_MAX_WIDTH:
+                break
+            seg_high  = nh
+            seg_low   = nl
+            seg_start = s
+
+        seg_len = e - seg_start + 1
+
+        # ── Step 2: segment length ────────────────────────────────────────────
+        if seg_len < RANGE_BREAKOUT_MIN_SEG_LEN:
+            continue
+
+        # ── Step 4 (fast reject): breakout bar must close above seg_high ─────
+        entry = float(bars[i][4])
+        if entry <= seg_high:
+            continue
+
+        # ── Step 5: volume confirmation ───────────────────────────────────────
+        seg_vols = [float(bars[j][5]) for j in range(seg_start, e + 1)]
+        avg_vol  = sum(seg_vols) / len(seg_vols) if seg_vols else 0.0
+        bar_vol  = float(bars[i][5])
+        if avg_vol > 0 and bar_vol < RANGE_BREAKOUT_VOL_FACTOR * avg_vol:
+            continue
+
+        # ── Step 3: pre-segment drop ──────────────────────────────────────────
+        pre_start = max(0, seg_start - RANGE_BREAKOUT_PRE_DROP_WIN)
+        if pre_start >= seg_start:
+            continue
+        pre_high = max(float(bars[j][2]) for j in range(pre_start, seg_start))
+        if pre_high <= 0:
+            continue
+        drop = (pre_high - seg_low) / pre_high
+        if drop < RANGE_BREAKOUT_MIN_DROP:
+            continue
+
+        # ── SL / TP ───────────────────────────────────────────────────────────
+        sl_raw   = seg_low * (1.0 - RANGE_BREAKOUT_SL_BUFFER)
+        sl_dist  = (entry - sl_raw) / entry
+        sl_dist  = min(sl_dist, RANGE_BREAKOUT_SL_MAX_PCT)   # hard cap
+        sl_price = entry * (1.0 - sl_dist)
+        tp_price = entry + 2.0 * (entry - sl_price)          # R:R 2:1
+
+        if sl_price <= 0 or tp_price <= entry:
+            continue
+
+        vol_ratio = bar_vol / avg_vol if avg_vol > 0 else 0.0
+        width_pct = (seg_high - seg_low) / seg_low * 100.0
+
+        _demo_open_position(
+            symbol, "LONG", entry, sl_price, tp_price,
+            is_shadow=True,
+            alert_type="range_breakout_long",
+            score=70,
+            notify_body=(
+                f"📦 Пробой базы <b>LONG 📈</b>"
+                f" <code>{symbol}</code>\n"
+                f"Цена: <b>${entry:,.6g}</b>  │  "
+                f"База: <b>{seg_len}ч</b>, ширина <b>{width_pct:.1f}%</b>\n"
+                f"Коррекция до базы: <b>−{drop * 100:.1f}%</b>  │  "
+                f"Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
+                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+            ),
+        )
+
+        with state_lock:
+            state["last_range_breakout_alerted"][symbol] = now
+
+        logger.info(
+            "range_breakout LONG shadow %s: seg=%dh width=%.1f%% drop=%.1f%% "
+            "vol=%.1fx entry=%.6g sl=%.6g tp=%.6g",
+            symbol, seg_len, width_pct, drop * 100.0, vol_ratio, entry, sl_price, tp_price,
         )
         sent += 1
 
@@ -10393,6 +10559,13 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_high_rejection_short failed: %s", _e)
                     summary["errors"].append(f"high_rejection: {_e}")
+
+                # 6i-shadow-5. Range breakout LONG — tight base after ≥25% correction, 1h close above (shadow)
+                try:
+                    summary["range_breakout_alerts"] = check_range_breakout_long(tickers)
+                except Exception as _e:
+                    logger.error("check_range_breakout_long failed: %s", _e)
+                    summary["errors"].append(f"range_breakout: {_e}")
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
                 summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs) if WHALE_LSR_ENABLED else 0
@@ -14509,6 +14682,12 @@ def _restore_cooldowns_from_db() -> None:
                 "  AND ts_open > ? GROUP BY symbol",
                 (now_ts - HIGH_REJECTION_COOLDOWN,),
             ).fetchall()
+            rbk_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='range_breakout_long' AND is_shadow=1 "
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - RANGE_BREAKOUT_COOLDOWN,),
+            ).fetchall()
         with state_lock:
             for sym, ts in os_rows:
                 state["last_oversold_alerted"][sym] = ts
@@ -14524,6 +14703,8 @@ def _restore_cooldowns_from_db() -> None:
                 state["last_ema_cross_alerted"][sym] = ts
             for sym, ts in hir_rows:
                 state["last_high_rejection_alerted"][sym] = ts
+            for sym, ts in rbk_rows:
+                state["last_range_breakout_alerted"][sym] = ts
         # Restore pump_fade_pending — entries still within 4-h TTL
         pfp_rows = conn.execute(
             "SELECT symbol, ts, pump_price, peak_price, pct24, rsi, atr, repeat_n "
@@ -14532,9 +14713,9 @@ def _restore_cooldowns_from_db() -> None:
         ).fetchall()
         logger.info(
             "Cooldowns restored: %d oversold, %d streak_1h, %d vwap_rev, "
-            "%d liq_rev, %d bb_squeeze, %d ema_cross, %d high_rejection",
+            "%d liq_rev, %d bb_squeeze, %d ema_cross, %d high_rejection, %d range_breakout",
             len(os_rows), len(sk_rows), len(vr_rows), len(lr_rows),
-            len(bbs_rows), len(emc_rows), len(hir_rows),
+            len(bbs_rows), len(emc_rows), len(hir_rows), len(rbk_rows),
         )
         restored_pfp = 0
         with _pfp_lock:
