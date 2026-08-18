@@ -49,16 +49,18 @@ def gateio_tickers() -> list[dict]:
     return gateio_get("/tickers", timeout=15)
 
 
-# ── Strategy parameters (from spec, do not change) ───────────────────────────
-WINDOW_BARS   = 60        # 10 days × 6 bars/day (4h candles)
-ZONE_WIDTH    = 1.03      # zone = [zone_low, zone_low × 1.03]
-MIN_TOUCHES   = 2         # need ≥ this many distinct touches
-MIN_GAP_BARS  = 6         # ≥24h between touches (6 × 4h = 24h)
-NO_BREAK_BARS = 6         # "no new low in last 24h" = last 6 bars
-BOUNCE_MIN    = 1.08      # price ≥ zone_low × 1.08  (+8%)
-BOUNCE_MAX    = 1.20      # price ≤ zone_low × 1.20  (+20%)
-BELOW_HIGH    = 0.85      # price ≤ 10d high × 0.85  (≥15% below high)
-COOLDOWN_BARS = 12        # 48h cooldown between signals per symbol (for rate calc)
+# ── Strategy parameters (tightened v2) ───────────────────────────────────────
+# v1 (original spec): ZONE_WIDTH=1.03, MIN_TOUCHES=2, BELOW_HIGH=0.85 → 18.4/day — too many
+# v2 (tightened per user): 3 touches, 1.5% zone, ≥25% prior drop to zone
+WINDOW_BARS    = 60        # 10 days × 6 bars/day (4h candles)
+ZONE_WIDTH     = 1.015     # zone = [zone_low, zone_low × 1.015]  (was 1.03)
+MIN_TOUCHES    = 3         # need ≥ this many distinct touches      (was 2)
+MIN_GAP_BARS   = 6         # ≥24h between touches (6 × 4h = 24h)
+NO_BREAK_BARS  = 6         # "no new low in last 24h" = last 6 bars
+BOUNCE_MIN     = 1.08      # price ≥ zone_low × 1.08  (+8%)
+BOUNCE_MAX     = 1.20      # price ≤ zone_low × 1.20  (+20%)
+MIN_DROP_TO_ZONE = 0.25    # (win_high - zone_low) / win_high ≥ 25%  (replaces BELOW_HIGH)
+COOLDOWN_BARS  = 12        # 48h cooldown between signals per symbol (for rate calc)
 
 MIN_VOL_USDT  = 50_000    # 24h volume filter (same as bot)
 FETCH_LIMIT   = 360 + 10  # ~60 days of 4h data
@@ -112,8 +114,8 @@ def count_signals(candles: list) -> dict:
         if not (zone_low * BOUNCE_MIN <= price <= zone_low * BOUNCE_MAX):
             continue
 
-        # ── Condition 6: price ≥15% below 10-day high ───────────────────────
-        if price > win_high * BELOW_HIGH:
+        # ── Condition 6: prior drop to zone ≥25% (not a shallow sideways range) ──
+        if win_high <= 0 or (win_high - zone_low) / win_high < MIN_DROP_TO_ZONE:
             continue
 
         # ── Cooldown: simulate ~48h gap between signals ──────────────────────
@@ -169,10 +171,10 @@ def main():
             liquid.append(base)
 
     print(f"Liquid pairs to analyse: {len(liquid)}")
-    print(f"Parameters: window={WINDOW_BARS} bars (10d), zone=+{(ZONE_WIDTH-1)*100:.0f}%, "
+    print(f"Parameters: window={WINDOW_BARS} bars (10d), zone=+{(ZONE_WIDTH-1)*100:.1f}%, "
           f"touches≥{MIN_TOUCHES} (gap≥{MIN_GAP_BARS}bars), "
           f"bounce {int((BOUNCE_MIN-1)*100)}-{int((BOUNCE_MAX-1)*100)}%, "
-          f"≥{int((1-BELOW_HIGH)*100)}% below high, cooldown={COOLDOWN_BARS} bars")
+          f"drop-to-zone≥{int(MIN_DROP_TO_ZONE*100)}%, cooldown={COOLDOWN_BARS} bars")
     print()
 
     results = []
@@ -285,15 +287,15 @@ def main():
             continue
         cond_counts["zone+touches+nobreak+bounce"] += 1
 
-        if price > win_high * BELOW_HIGH:
+        if win_high <= 0 or (win_high - zone_low) / win_high < MIN_DROP_TO_ZONE:
             continue
         cond_counts["all_5"] += 1
 
-    print(f"  Zone exists (always true):                 {cond_counts['zone_exists']:>4}")
-    print(f"  + ≥2 touches with 24h gap:                 {cond_counts['zone+2touches']:>4}")
-    print(f"  + no break in last 24h:                    {cond_counts['zone+touches+nobreak']:>4}")
-    print(f"  + price 8-20% above zone_low:              {cond_counts['zone+touches+nobreak+bounce']:>4}")
-    print(f"  + price ≥15% below 10d high (all 5 met):  {cond_counts['all_5']:>4}")
+    print(f"  Zone exists (always true):                  {cond_counts['zone_exists']:>4}")
+    print(f"  + ≥3 touches with 24h gap (zone ±1.5%):    {cond_counts['zone+2touches']:>4}")
+    print(f"  + no break in last 24h:                     {cond_counts['zone+touches+nobreak']:>4}")
+    print(f"  + price 8-20% above zone_low:               {cond_counts['zone+touches+nobreak+bounce']:>4}")
+    print(f"  + drop-to-zone ≥25% (all 5 met):           {cond_counts['all_5']:>4}")
 
     print()
     print("Done.")
