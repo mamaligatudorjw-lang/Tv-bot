@@ -169,6 +169,7 @@ state = {
     "last_liq_reversal_alerted": {},   # symbol -> ts (liq reversal confirmation shadow cooldown)
     "last_bb_squeeze_alerted": {},     # symbol -> ts (Bollinger squeeze shadow cooldown)
     "last_ema_cross_alerted": {},      # symbol -> ts (EMA crossover shadow cooldown)
+    "last_high_rejection_alerted": {},  # symbol -> ts (high_rejection_short shadow cooldown)
     "shadow_notif_today": {},          # {notif_key: {"date": "YYYY-MM-DD", "count": int}}
     "last_lsr_shift_alerted": {},      # symbol -> ts (whale LSR flip cooldown)
     "lsr_prev": {},                    # symbol -> float (previous LSR value for shift detection)
@@ -543,8 +544,9 @@ ALERT_TYPE_SHADOW_ONLY: dict[str, bool] = {
     "oversold_24h":  False,          # всегда реальные сигналы
     "streak_1h":     False,          # всегда реальные сигналы
     "confluence":    False,          # всегда реальные сигналы
-    "pump_24h_fade":   PUMP_FADE_SHADOW_ONLY,  # управляется флагом стратегии (менять там)
-    "breakdown_short": BREAKDOWN_SHADOW_ONLY,   # включена 2026-08-16; переключить когда 2+ недели данных
+    "pump_24h_fade":        PUMP_FADE_SHADOW_ONLY,       # управляется флагом стратегии (менять там)
+    "breakdown_short":      BREAKDOWN_SHADOW_ONLY,       # включена 2026-08-16; переключить когда 2+ недели данных
+    "high_rejection_short": True,                        # управляется HIGH_REJECTION_SHADOW_ONLY
 }
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа
 
@@ -5263,6 +5265,21 @@ EMA_CROSS_ATR_SL_MULT   = 1.0    # SL = 1.0 × 4h-ATR
 EMA_CROSS_ATR_TP_MULT   = 2.0    # TP = 2.0 × SL dist  (R:R 2:1)
 EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 
+# --- High Rejection SHORT shadow ---
+# Entry: coin surged intraday (range >= 20%), now rejecting from the 24h high (price >= 3% below).
+# The 24h high must have been set within the last 4 hours (fresh rejection, not a stale high).
+# Last completed 15m candle must be bearish with volume >= 1.5× 10-bar average.
+# Direction: SHORT only.  SL cap 8%, R:R 2:1 (same as other shadow strategies).
+# Thresholds are round numbers chosen a priori — do NOT tune to historical data until 3+ weeks in.
+HIGH_REJECTION_SHADOW_ONLY    = True     # set False to go live after validation
+HIGH_REJECTION_RANGE_PCT      = 20.0    # 24h range (high-low)/low >= this %
+HIGH_REJECTION_DIST_FROM_HIGH = 3.0     # price must be >= this % below 24h high
+HIGH_REJECTION_HIGH_AGE_H     = 4.0     # 24h high must appear in last N hours of 15m candles
+HIGH_REJECTION_VOL_MULT       = 1.5     # last 15m candle volume >= N × 10-bar average
+HIGH_REJECTION_MAX_SL_PCT     = 8.0     # SL cap; R:R 2:1 (TP = entry - 2 × SL_dist)
+HIGH_REJECTION_COOLDOWN       = 28800   # 8h per symbol
+HIGH_REJECTION_ENABLED_TS: int = 1787065200  # 2026-08-17 15:00 UTC (enabled timestamp)
+
 # Shadow signal Telegram notifications — no daily cap.
 # The previous SHADOW_NOTIF_LIMITS dict was removed because the counters lived in
 # memory and reset on every bot restart, making the cap ineffective in practice.
@@ -6889,6 +6906,142 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
         logger.info(
             "EMA cross shadow %s %s: price=%.6g gap=%.3f%% sl=%.6g tp=%.6g",
             symbol, direction, price, gap_pct, sl_price, tp_price,
+        )
+        sent += 1
+
+    return sent
+
+
+def check_high_rejection_short(tickers: dict[str, dict]) -> int:
+    """Shadow SHORT: coin surged intraday, price now rejecting from the 24h high.
+
+    Five conditions (all required):
+      1. (high_24h - low_24h) / low_24h >= HIGH_REJECTION_RANGE_PCT
+         — coin actually moved, not just ticking near an old high.
+      2. (high_24h - price) / high_24h >= HIGH_REJECTION_DIST_FROM_HIGH / 100
+         — rejection has started; not trying to call the exact top.
+      3. max(high of last HIGH_REJECTION_HIGH_AGE_H × 4 candles) >= high_24h × 0.998
+         — the 24h high was set recently (fresh reversal, not yesterday's high).
+      4. Last completed 15m candle closed bearish (close < open).
+      5. Last 15m candle volume >= HIGH_REJECTION_VOL_MULT × 10-bar average.
+
+    Direction: SHORT only.
+    SL/TP: _compute_demo_sl_tp("SHORT", ...) with HIGH_REJECTION_MAX_SL_PCT cap; R:R 2:1.
+    Shadow-only (HIGH_REJECTION_SHADOW_ONLY = True) until validation.
+    """
+    if not tickers:
+        return 0
+    sent = 0
+    now = time.time()
+    fresh_bars = int(HIGH_REJECTION_HIGH_AGE_H * 4)   # 15m candles in the fresh-high window
+    candle_limit = max(fresh_bars + 2, 18)             # enough for window + vol avg + ATR
+
+    for symbol, t in tickers.items():
+        try:
+            high_24h = float(t.get("highPrice") or 0)
+            low_24h  = float(t.get("lowPrice")  or 0)
+            price    = float(t["lastPrice"])
+            vol24    = float(t["quoteVolume"])
+        except (ValueError, KeyError) as _exc:
+            logger.debug("check_high_rejection_short suppressed error: %s", _exc)
+            continue
+
+        if vol24 < MIN_VOLUME_USDT:
+            continue
+        if high_24h <= 0 or low_24h <= 0 or price <= 0:
+            continue
+
+        # Condition 1: 24h range
+        range_pct = (high_24h - low_24h) / low_24h * 100.0
+        if range_pct < HIGH_REJECTION_RANGE_PCT:
+            continue
+
+        # Condition 2: price >= HIGH_REJECTION_DIST_FROM_HIGH% below 24h high
+        dist_from_high_pct = (high_24h - price) / high_24h * 100.0
+        if dist_from_high_pct < HIGH_REJECTION_DIST_FROM_HIGH:
+            continue
+
+        # Cooldown check before expensive candle fetch
+        with state_lock:
+            last_alerted = state["last_high_rejection_alerted"].get(symbol, 0)
+        if now - last_alerted < HIGH_REJECTION_COOLDOWN:
+            continue
+
+        # Fetch 15m candles for conditions 3, 4, 5 and ATR
+        try:
+            candles = _gateio_klines(symbol, "15m", candle_limit)
+        except Exception as _exc:
+            logger.debug("check_high_rejection_short klines %s: %s", symbol, _exc)
+            continue
+        if not candles or len(candles) < 12:
+            continue
+
+        # Condition 3: 24h high set within last HIGH_REJECTION_HIGH_AGE_H hours
+        recent_window = candles[-fresh_bars:] if len(candles) >= fresh_bars else candles
+        recent_high   = max(float(c[2]) for c in recent_window)
+        if recent_high < high_24h * 0.998:
+            continue   # 24h high was set more than HIGH_REJECTION_HIGH_AGE_H hours ago
+
+        # Conditions 4 & 5: last *completed* candle (index -2; -1 is still forming)
+        if len(candles) < 2:
+            continue
+        last_c     = candles[-2]
+        last_open  = float(last_c[1])
+        last_close = float(last_c[4])
+        last_vol   = float(last_c[5])
+
+        # Condition 4: bearish close
+        if last_close >= last_open:
+            continue
+
+        # Condition 5: volume confirmation
+        vol_window = candles[-11:-1]   # 10 completed candles before the last
+        if len(vol_window) < 5:
+            continue
+        avg_vol_10 = sum(float(c[5]) for c in vol_window) / len(vol_window)
+        if avg_vol_10 > 0 and last_vol < avg_vol_10 * HIGH_REJECTION_VOL_MULT:
+            continue
+
+        # ATR from last 14 completed 15m candles (simple high-low average)
+        atr_window = candles[-15:-1]
+        atr = (
+            sum(float(c[2]) - float(c[3]) for c in atr_window) / len(atr_window)
+            if atr_window else None
+        )
+
+        sl_price, tp_price = _compute_demo_sl_tp(
+            "SHORT", price, atr, max_sl_pct=HIGH_REJECTION_MAX_SL_PCT
+        )
+        if sl_price is None or tp_price is None:
+            continue
+        if not (tp_price < price < sl_price):
+            continue
+
+        vol_ratio = last_vol / avg_vol_10 if avg_vol_10 > 0 else 0.0
+
+        _demo_open_position(
+            symbol, "SHORT", price, sl_price, tp_price,
+            is_shadow=True,
+            alert_type="high_rejection_short",
+            score=65,
+            notify_body=(
+                f"🔻 Отбой от максимума <b>SHORT 📉</b>"
+                f" <code>{symbol}</code>\n"
+                f"Цена: <b>${price:,.6g}</b>  │  "
+                f"Размах 24ч: <b>{range_pct:.1f}%</b>  │  "
+                f"От макс: <b>−{dist_from_high_pct:.1f}%</b>\n"
+                f"Объём свечи: <b>{vol_ratio:.1f}×</b> среднего\n"
+                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+            ),
+        )
+
+        with state_lock:
+            state["last_high_rejection_alerted"][symbol] = now
+
+        logger.info(
+            "high_rejection SHORT shadow %s: range=%.1f%% dist_high=%.1f%% "
+            "vol=%.1fx sl=%.6g tp=%.6g",
+            symbol, range_pct, dist_from_high_pct, vol_ratio, sl_price, tp_price,
         )
         sent += 1
 
@@ -10079,7 +10232,8 @@ def run_checks():
         "vwap_rev_alerts": 0,          # VWAP reversion shadow (mean-reversion complement)
         "liq_reversal_alerts": 0,      # liquidity reversal confirmation shadow
         "bb_squeeze_alerts": 0,        # Bollinger squeeze shadow
-        "ema_cross_alerts": 0,         # EMA 9/21 crossover shadow (4h)
+        "ema_cross_alerts": 0,            # EMA 9/21 crossover shadow (4h)
+        "high_rejection_alerts": 0,    # shadow SHORT: rejection from 24h high (range≥20%, dist≥3%)
         "whale_lsr_shift_alerts": 0,   # whale LSR flip alerts
         "errors": [],
     }
@@ -10232,6 +10386,13 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_ema_crossover failed: %s", _e)
                     summary["errors"].append(f"ema_cross: {_e}")
+
+                # 6i-shadow-4. High rejection SHORT — intraday pump + reversal from 24h high (shadow)
+                try:
+                    summary["high_rejection_alerts"] = check_high_rejection_short(tickers)
+                except Exception as _e:
+                    logger.error("check_high_rejection_short failed: %s", _e)
+                    summary["errors"].append(f"high_rejection: {_e}")
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
                 summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs) if WHALE_LSR_ENABLED else 0
@@ -14342,6 +14503,12 @@ def _restore_cooldowns_from_db() -> None:
                 "  AND ts_open > ? GROUP BY symbol",
                 (now_ts - EMA_CROSS_COOLDOWN,),
             ).fetchall()
+            hir_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='high_rejection_short' AND is_shadow=1 "
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - HIGH_REJECTION_COOLDOWN,),
+            ).fetchall()
         with state_lock:
             for sym, ts in os_rows:
                 state["last_oversold_alerted"][sym] = ts
@@ -14355,6 +14522,8 @@ def _restore_cooldowns_from_db() -> None:
                 state["last_bb_squeeze_alerted"][sym] = ts
             for sym, ts in emc_rows:
                 state["last_ema_cross_alerted"][sym] = ts
+            for sym, ts in hir_rows:
+                state["last_high_rejection_alerted"][sym] = ts
         # Restore pump_fade_pending — entries still within 4-h TTL
         pfp_rows = conn.execute(
             "SELECT symbol, ts, pump_price, peak_price, pct24, rsi, atr, repeat_n "
@@ -14363,9 +14532,9 @@ def _restore_cooldowns_from_db() -> None:
         ).fetchall()
         logger.info(
             "Cooldowns restored: %d oversold, %d streak_1h, %d vwap_rev, "
-            "%d liq_rev, %d bb_squeeze, %d ema_cross",
+            "%d liq_rev, %d bb_squeeze, %d ema_cross, %d high_rejection",
             len(os_rows), len(sk_rows), len(vr_rows), len(lr_rows),
-            len(bbs_rows), len(emc_rows),
+            len(bbs_rows), len(emc_rows), len(hir_rows),
         )
         restored_pfp = 0
         with _pfp_lock:
