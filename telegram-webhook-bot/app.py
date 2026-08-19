@@ -5173,9 +5173,10 @@ MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "50"))
 
 # Shadow-only early momentum experiment.  This branch intentionally has a
 # lower score floor than the mature overheated_24h signal: it is designed to
-# catch the less-confirmed, earlier stage of the move.
+# catch the less-confirmed, earlier stage of the move.  Temporary value:
+# review after at least 7 days of overheated_early shadow data.
 OVERHEATED_EARLY_MIN_SCORE = int(
-    os.environ.get("OVERHEATED_EARLY_MIN_SCORE", "48")
+    os.environ.get("OVERHEATED_EARLY_MIN_SCORE", "40")
 )
 
 # Per-type score minimums — override the global MIN_ALERT_SCORE for specific
