@@ -5271,7 +5271,7 @@ EMA_CROSS_ATR_TP_MULT   = 2.0    # TP = 2.0 × SL dist  (R:R 2:1)
 EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 # Price source was fixed from the completed 4h candle close to the live ticker.
 # Marker: 2026-08-15 23:00 Europe/Chisinau = 2026-08-15 20:00 UTC.
-EMA_CROSS_PRICE_FIX_TS: int = 1786824000
+EMA_CROSS_PRICE_FIX_TS: int = 1786912858
 
 # --- High Rejection SHORT shadow ---
 # Entry: coin surged intraday (range >= 20%), now rejecting from the 24h high (price >= 3% below).
