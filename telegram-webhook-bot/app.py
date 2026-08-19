@@ -365,6 +365,11 @@ OVERSOLD_COOLDOWN = 7200           # 2h
 # Shadow-only parallel test vs overheated_24h; only RSI range differs.
 OVERHEATED_EARLY_RSI_MIN  = 55.0   # RSI lower bound for early entry
 OVERHEATED_EARLY_COOLDOWN = OVERHEATED_COOLDOWN  # 4h, same as parent
+# INFO diagnostics are intentionally limited to symbols near the overheated
+# threshold or already in the early-impulse RSI zone.  Logging every ticker on
+# every cycle would produce hundreds of lines per minute and hide the useful
+# rejection trail.
+OVERHEATED_DIAG_PCT_MARGIN = 5.0
 
 # Liquidity reversal confirmation shadow
 # Shadow-only for ~3 weeks to compare vs plain liquidity (no confirmation).
@@ -8015,6 +8020,39 @@ def check_overheated_oversold(
 
         oh_threshold = _vol_threshold(symbol, OVERHEATED_24H_PCT, 2.5)
         os_threshold = _vol_threshold(symbol, OVERSOLD_24H_PCT, 2.5)
+
+        # ── INFO diagnostic baseline for overheated_24h / overheated_early ──
+        # Keep the measured values in the log even when neither branch is
+        # entered.  This makes "no signal" distinguishable from a later gate
+        # rejection without logging all hundreds of tickers every minute.
+        _oh_diag_candidate = (
+            pct24 >= oh_threshold - OVERHEATED_DIAG_PCT_MARGIN
+            or rsi >= OVERHEATED_EARLY_RSI_MIN
+        )
+        if _oh_diag_candidate:
+            _early_pre_fails = []
+            if pct24 < oh_threshold:
+                _early_pre_fails.append("pct24")
+            if not (OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
+                _early_pre_fails.append("rsi")
+            logger.info(
+                "overheated_early CHECK %s: pct24=%.1f%% threshold=%.1f%% "
+                "rsi=%.1f range=[%.0f,%.0f) price=%.6g pre_fail=%s",
+                symbol, pct24, oh_threshold, rsi,
+                OVERHEATED_EARLY_RSI_MIN, RSI_OVERBOUGHT, price,
+                ",".join(_early_pre_fails) if _early_pre_fails else "none",
+            )
+            _oh_pre_fails = []
+            if pct24 < oh_threshold:
+                _oh_pre_fails.append("pct24")
+            if rsi < RSI_OVERBOUGHT:
+                _oh_pre_fails.append("rsi")
+            logger.info(
+                "overheated_24h CHECK %s: pct24=%.1f%% threshold=%.1f%% "
+                "rsi=%.1f min=%.0f price=%.6g pre_fail=%s",
+                symbol, pct24, oh_threshold, rsi, RSI_OVERBOUGHT, price,
+                ",".join(_oh_pre_fails) if _oh_pre_fails else "none",
+            )
         with state_lock:
             atr = state["atr_4h"].get(symbol)
         # Cold-cache fallback: if ATR is missing (e.g. after bot restart before the
@@ -8036,8 +8074,8 @@ def check_overheated_oversold(
             with state_lock:
                 ema_oh = state["ema200_4h"].get(symbol)
             if ema_oh is not None and price < ema_oh:
-                logger.debug(
-                    "Overheated LONG suppressed by EMA-200 filter: %s price=%.6g ema=%.6g",
+                logger.info(
+                    "overheated_24h SKIP %s: ema200 price=%.6g < ema=%.6g",
                     symbol, price, ema_oh,
                 )
                 ema_blocked_oh += 1
@@ -8053,8 +8091,9 @@ def check_overheated_oversold(
             )
             if _oh_up_count is not None and _oh_up_count < OVERHEATED_DURATION_MIN_UP:
                 logger.info(
-                    "Overheated blocked by duration filter: %s up=%d/%d",
+                    "overheated_24h SKIP %s: duration up=%d/%d < min=%d",
                     symbol, _oh_up_count, OVERHEATED_DURATION_WINDOW,
+                    OVERHEATED_DURATION_MIN_UP,
                 )
                 _dsl_dur_oh, _dtp_dur_oh = _compute_demo_sl_tp("LONG", price, atr)
                 if _dsl_dur_oh and _dtp_dur_oh:
@@ -8202,6 +8241,13 @@ def check_overheated_oversold(
                         )
                         # Auto-register for continuation confirmation
                         _register_cont_pending(symbol, "overheated_24h", "LONG", price, atr)
+            else:
+                logger.info(
+                    "overheated_24h SKIP %s: cooldown remaining=%ds "
+                    "(last=%d cooldown=%ds regime=%s)",
+                    symbol, int(oh_cooldown - (now - last)), int(last),
+                    oh_cooldown, regime,
+                )
 
         elif (pct24 >= oh_threshold
               and OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
@@ -8210,10 +8256,15 @@ def check_overheated_oversold(
             # RSI range (55–70 here vs ≥70 in parent). Every other filter is
             # identical so the 3-week comparison measures RSI-range effect only.
             if not OVERHEATED_ENABLED:
+                logger.info("overheated_early SKIP %s: disabled", symbol)
                 continue
             with state_lock:
                 ema_oe = state["ema200_4h"].get(symbol)
             if ema_oe is not None and price < ema_oe:
+                logger.info(
+                    "overheated_early SKIP %s: ema200 price=%.6g < ema=%.6g",
+                    symbol, price, ema_oe,
+                )
                 continue  # uptrend confirmation: price must be above EMA-200
 
             # Duration filter (= overheated_24h: ≥8/12 hourly candles up)
@@ -8225,8 +8276,9 @@ def check_overheated_oversold(
             )
             if _oe_up_count is not None and _oe_up_count < OVERHEATED_DURATION_MIN_UP:
                 logger.info(
-                    "Overheated_early blocked by duration filter: %s up=%d/%d",
+                    "overheated_early SKIP %s: duration up=%d/%d < min=%d",
                     symbol, _oe_up_count, OVERHEATED_DURATION_WINDOW,
+                    OVERHEATED_DURATION_MIN_UP,
                 )
                 _dsl_dur_oe, _dtp_dur_oe = _compute_demo_sl_tp("LONG", price, atr)
                 if _dsl_dur_oe and _dtp_dur_oe:
@@ -8243,16 +8295,25 @@ def check_overheated_oversold(
             with state_lock:
                 last_oe = state["last_overheated_early_alerted"].get(symbol, 0)
             if now - last_oe < OVERHEATED_EARLY_COOLDOWN:
+                logger.info(
+                    "overheated_early SKIP %s: cooldown remaining=%ds "
+                    "(last=%d cooldown=%ds)",
+                    symbol,
+                    int(OVERHEATED_EARLY_COOLDOWN - (now - last_oe)),
+                    int(last_oe), OVERHEATED_EARLY_COOLDOWN,
+                )
                 continue
 
             # ── Filters identical to overheated_24h real path ───────────────
             # is_hidden: user hides this type or symbol entirely
             if is_hidden("overheated_early", symbol):
+                logger.info("overheated_early SKIP %s: hidden", symbol)
                 continue
             # Silenced
             with state_lock:
                 _oe_silenced = state["silenced"]
             if _oe_silenced:
+                logger.info("overheated_early SKIP %s: silenced", symbol)
                 continue
             # Open real-position dedup (mirrors send_alert_with_log check)
             try:
@@ -8263,6 +8324,10 @@ def check_overheated_oversold(
                         (symbol,),
                     ).fetchone()[0]
                 if _oe_already_open:
+                    logger.info(
+                        "overheated_early SKIP %s: open real position count=%d",
+                        symbol, _oe_already_open,
+                    )
                     continue
             except Exception:
                 pass
@@ -8278,8 +8343,9 @@ def check_overheated_oversold(
             _oe_min_score = MIN_SCORE_BY_TYPE.get("overheated_24h", MIN_ALERT_SCORE)
             if _oe_score < _oe_min_score:
                 logger.info(
-                    "Suppressed %s/overheated_early (score=%d < min %d)",
-                    symbol, _oe_score, _oe_min_score,
+                    "overheated_early SKIP %s: score=%d < min=%d "
+                    "(pct24=%.1f%% rsi=%.1f)",
+                    symbol, _oe_score, _oe_min_score, pct24, rsi,
                 )
                 continue
 
@@ -8288,7 +8354,8 @@ def check_overheated_oversold(
             _liq_veto_oe, _liq_reason_oe = _check_liq_veto(symbol, "buy", _vol24_oe)
             if _liq_veto_oe:
                 logger.info(
-                    "SUPPRESSED overheated_early %s — ликвидации: %s", symbol, _liq_reason_oe,
+                    "overheated_early SKIP %s: liquidity veto: %s",
+                    symbol, _liq_reason_oe,
                 )
                 _dsl_lv_oe, _dtp_lv_oe = _compute_demo_sl_tp("LONG", price, atr)
                 if _dsl_lv_oe and _dtp_lv_oe:
@@ -8307,7 +8374,8 @@ def check_overheated_oversold(
                 )
                 if not _ai_ok_oe:
                     logger.info(
-                        "SUPPRESSED overheated_early %s — ИИ: %s", symbol, _ai_note_oe,
+                        "overheated_early SKIP %s: AI veto: %s",
+                        symbol, _ai_note_oe,
                     )
                     _dsl_av_oe, _dtp_av_oe = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_av_oe and _dtp_av_oe:
