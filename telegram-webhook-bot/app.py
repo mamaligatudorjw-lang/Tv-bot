@@ -5171,6 +5171,13 @@ def _strength_label(score: int) -> str:
 
 MIN_ALERT_SCORE = int(os.environ.get("MIN_ALERT_SCORE", "50"))
 
+# Shadow-only early momentum experiment.  This branch intentionally has a
+# lower score floor than the mature overheated_24h signal: it is designed to
+# catch the less-confirmed, earlier stage of the move.
+OVERHEATED_EARLY_MIN_SCORE = int(
+    os.environ.get("OVERHEATED_EARLY_MIN_SCORE", "48")
+)
+
 # Per-type score minimums — override the global MIN_ALERT_SCORE for specific
 # signal types where historical data shows a higher bar improves quality.
 MIN_SCORE_BY_TYPE: dict[str, int] = {
@@ -8255,9 +8262,9 @@ def check_overheated_oversold(
         elif (pct24 >= oh_threshold
               and OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
             # ── overheated_early: Ранний импульс LONG (RSI 55–70) ────────────
-            # Shadow-only A/B test vs overheated_24h. The ONLY difference is the
-            # RSI range (55–70 here vs ≥70 in parent). Every other filter is
-            # identical so the 3-week comparison measures RSI-range effect only.
+            # Shadow-only test vs overheated_24h.  The RSI range is earlier
+            # (55–70 here vs ≥70 in parent) and the score floor is deliberately
+            # lower so this branch can test less-confirmed entries.
             if not OVERHEATED_ENABLED:
                 logger.info("overheated_early SKIP %s: disabled", symbol)
                 continue
@@ -8342,8 +8349,10 @@ def check_overheated_oversold(
             _fl_delta_oe, _fl_text_oe, _, _ = _funding_lsr_score_and_text(symbol, "buy")
             _oe_score = max(0, min(100, _oe_score + _fl_delta_oe))
 
-            # Score gate (= overheated_24h threshold, currently 75)
-            _oe_min_score = MIN_SCORE_BY_TYPE.get("overheated_24h", MIN_ALERT_SCORE)
+            # Separate score gate for the early-stage shadow experiment.
+            # Do not inherit overheated_24h's mature-signal floor here:
+            # requiring 75 defeats the purpose of catching the earlier move.
+            _oe_min_score = OVERHEATED_EARLY_MIN_SCORE
             if _oe_score < _oe_min_score:
                 logger.info(
                     "overheated_early SKIP %s: score=%d < min=%d "
