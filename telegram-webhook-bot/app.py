@@ -8067,6 +8067,7 @@ def check_overheated_oversold(
 
         if pct24 >= oh_threshold and rsi >= RSI_OVERBOUGHT:
             if not OVERHEATED_ENABLED:
+                logger.info("overheated_24h SKIP %s: disabled", symbol)
                 continue  # OVERHEATED_ENABLED=False: overheated_24h заблокирован
             # Momentum LONG: coin pumped hard with high RSI → ride the momentum.
             # Backtest shows 63% of overheated events continue rising in next 12h.
@@ -8155,7 +8156,8 @@ def check_overheated_oversold(
                 _liq_veto_oh, _liq_reason_oh = _check_liq_veto(symbol, "buy", _vol24_oh)
                 if _liq_veto_oh:
                     logger.info(
-                        "SUPPRESSED overheated %s — ликвидации: %s", symbol, _liq_reason_oh
+                        "overheated_24h SKIP %s: liquidity veto: %s",
+                        symbol, _liq_reason_oh,
                     )
                     _dsl_lv, _dtp_lv = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_lv and _dtp_lv:
@@ -8175,7 +8177,8 @@ def check_overheated_oversold(
                     )
                     if not _ai_ok_oh:
                         logger.info(
-                            "SUPPRESSED overheated %s — ИИ: %s", symbol, _ai_note_oh,
+                            "overheated_24h SKIP %s: AI veto: %s",
+                            symbol, _ai_note_oh,
                         )
                         _dsl, _dtp = _compute_demo_sl_tp("LONG", price, atr)
                         if _dsl and _dtp:
