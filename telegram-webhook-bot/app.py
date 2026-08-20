@@ -6,6 +6,7 @@ import base64
 import logging
 import json
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import sqlite3
 import threading
 import numpy as np
@@ -3027,6 +3028,67 @@ def handle_demo_command(chat_id: int) -> None:
                 f"Σ P&L {ms}${sc_manual_pnl:.2f} — исключены из WR и Σ выше</i>"
             )
         _telegram_send(chat_id, "\n".join(_sr_lines))
+
+
+def handle_emacross_command(chat_id: int, raw_text: str = "/emacross") -> None:
+    """Report post-fix EMA Cross shadow PnL by local closing date."""
+    local_tz = ZoneInfo("Europe/Chisinau")
+    parts = raw_text.strip().split()
+    requested_date = parts[1] if len(parts) > 1 else None
+    try:
+        target_date = (
+            datetime.strptime(requested_date, "%Y-%m-%d").date()
+            if requested_date else None
+        )
+        with _db_lock:
+            conn = _get_db()
+            rows = conn.execute(
+                "SELECT ts_close, status, pnl_usd "
+                "FROM ema_cross_post_fix_closed ORDER BY ts_close"
+            ).fetchall()
+        if not rows:
+            _telegram_send(chat_id, "📊 <b>EMA Cross после фикса</b>\nНет закрытых shadow-позиций.")
+            return
+
+        by_date: dict = {}
+        for ts_close, _status, pnl_usd in rows:
+            close_date = datetime.fromtimestamp(ts_close, local_tz).date()
+            count, pnl = by_date.get(close_date, (0, 0.0))
+            by_date[close_date] = (count + 1, pnl + (pnl_usd or 0.0))
+        target_date = target_date or max(by_date)
+
+        today_count, today_pnl = by_date.get(target_date, (0, 0.0))
+        before_count = sum(n for day, (n, _) in by_date.items() if day < target_date)
+        before_pnl = sum(p for day, (_, p) in by_date.items() if day < target_date)
+        after_count = sum(n for day, (n, _) in by_date.items() if day > target_date)
+        after_pnl = sum(p for day, (_, p) in by_date.items() if day > target_date)
+        total_count = len(rows)
+        total_pnl = sum((pnl or 0.0) for _, _, pnl in rows)
+
+        def money(value: float) -> str:
+            return f"{'+' if value >= 0 else ''}${value:.2f}"
+
+        lines = [
+            "📊 <b>EMA Cross после фикса цены</b>",
+            "Источник: <code>ema_cross_post_fix_closed</code>",
+            f"Фикс: <code>{datetime.fromtimestamp(EMA_CROSS_PRICE_FIX_TS, ZoneInfo('UTC')).isoformat()}</code>",
+            f"Всего: <b>{total_count}</b> закрыто · <b>{money(total_pnl)}</b>",
+            "",
+            f"📅 <b>{target_date.isoformat()}</b>: <b>{today_count}</b> · <b>{money(today_pnl)}</b>",
+            f"⏮ <b>До этой даты</b>: <b>{before_count}</b> · <b>{money(before_pnl)}</b>",
+        ]
+        if after_count:
+            lines.append(f"⏭ После этой даты: <b>{after_count}</b> · <b>{money(after_pnl)}</b>")
+        lines += ["", "📆 <b>По дням закрытия (Europe/Chisinau)</b>"]
+        for day in sorted(by_date):
+            count, pnl = by_date[day]
+            lines.append(f"  {day.isoformat()}: {count} закрыто · {money(pnl)}")
+        _telegram_send(chat_id, "\n".join(lines))
+    except ValueError:
+        _telegram_send(chat_id, "Формат: <code>/emacross YYYY-MM-DD</code>")
+    except Exception as exc:
+        logger.exception("EMA Cross report failed: %s", exc)
+        _telegram_send(chat_id, f"❌ Ошибка отчёта EMA Cross: {html.escape(str(exc))}")
 
 
 def handle_demoshadow_command(chat_id: int) -> None:
