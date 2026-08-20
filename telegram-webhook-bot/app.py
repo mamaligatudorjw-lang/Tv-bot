@@ -3354,6 +3354,7 @@ def _poll_telegram_commands() -> None:
         "/demo":        handle_demo_command,
         "/demo2":       handle_demo2_command,
         "/demoshadow":  handle_demoshadow_command,
+        "/emacross":    handle_emacross_command,
         "/scorestats":     handle_scorestats_command,
         "/retroanalysis": lambda cid: threading.Thread(
             target=_run_retro_duration_analysis, args=(cid,), daemon=True
@@ -3461,7 +3462,7 @@ def _poll_telegram_commands() -> None:
                         logger.info("Command %s from chat_id=%s", cmd, chat_id)
                         # Commands that take args receive the full raw text;
                         # the rest are called with just chat_id (backwards-compat).
-                        takes_args = cmd in ("/trade", "/analyze", "/ai", "/addpos", "/closepos", "/unwatch")
+                        takes_args = cmd in ("/trade", "/analyze", "/ai", "/addpos", "/closepos", "/unwatch", "/emacross")
                         def _run(h=handler, cid=chat_id, c=cmd, rt=raw_text, ta=takes_args):
                             try:
                                 if ta:
@@ -4630,6 +4631,20 @@ def _get_db() -> sqlite3.Connection:
             "UPDATE demo_positions SET exit_method='manual' "
             "WHERE status='manual' AND exit_method IS NULL"
         )
+        # One stable cohort for EMA Cross post-fix reporting. Recreate it on
+        # startup so the configured fix timestamp is always reflected.
+        _db_conn.execute("DROP VIEW IF EXISTS ema_cross_post_fix_closed")
+        _db_conn.execute(f"""
+            CREATE VIEW ema_cross_post_fix_closed AS
+            SELECT id, ts_open, symbol, direction, entry_price, exit_price,
+                   status, ts_close, pnl_usd, exit_method
+            FROM demo_positions
+            WHERE alert_type = 'ema_cross'
+              AND is_shadow = 1
+              AND status != 'open'
+              AND ts_close IS NOT NULL
+              AND ts_open >= {EMA_CROSS_PRICE_FIX_TS}
+        """)
         # Migrate: repeat_num — ordinal of pump_fade repeat signals (1 = first, 2 = first repeat…)
         try:
             _db_conn.execute(
