@@ -1615,7 +1615,10 @@ def _demo_open_position(
                 if (shadow_reason or "").startswith("confluence_cap")
                 else (alert_type or "unknown")
             )
-            if _shadow_notif_allowed(_notif_key):
+            if (
+                _shadow_notif_allowed(_notif_key)
+                and _shadow_strategy_telegram_allowed(alert_type)
+            ):
                 with state_lock:
                     _silenced = state["silenced"]
                 if not _silenced:
@@ -3771,6 +3774,13 @@ def _shadow_notif_allowed(notif_key: str) -> bool:
     return True
 
 
+def _shadow_strategy_telegram_allowed(alert_type: str | None) -> bool:
+    """Return whether a shadow strategy may create a Telegram notification."""
+    if alert_type in ("ema_cross", "ema_cross_confirmed"):
+        return EMA_CROSS_TELEGRAM_NOTIFICATIONS
+    return True
+
+
 def _trend_warning_line(symbol: str, recommendation: str) -> str:
     """Return a warning string if the signal direction conflicts with the
     multi-day daily trend, or '' if no conflict detected.
@@ -5338,6 +5348,9 @@ BB_SQUEEZE_COOLDOWN     = 28800   # 8h per symbol
 # Switched to 4h: gap p75=0.117%, threshold 0.15% covers best-performing tier.
 # Backtest (10 pairs × 500 4h candles, thresh≥0.15%): WR=36.8%, ΣPnL=+11.4%, avg=+0.30%.
 EMA_CROSS_SHADOW_ONLY   = True    # set False to go live after validation
+# Keep collecting EMA Cross 4h shadow results, but hide its Telegram messages
+# until the strategy is re-evaluated.
+EMA_CROSS_TELEGRAM_NOTIFICATIONS = False
 EMA_CROSS_FAST          = 9       # fast EMA period
 EMA_CROSS_SLOW          = 21      # slow EMA period
 EMA_CROSS_GAP_PCT       = 0.15    # min |EMA9-EMA21|/price at crossover (4h-realistic %)
