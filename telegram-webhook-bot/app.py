@@ -628,6 +628,40 @@ def _telegram_send(
         return False
 
 
+def _record_telegram_delivery(
+    *,
+    symbol: str,
+    alert_type: str,
+    direction: str | None,
+    delivered: bool,
+    mode: str,
+) -> None:
+    """Persist the outcome of a strategy Telegram delivery.
+
+    Telegram's API response is otherwise only observable in the process log.
+    Keeping this small audit row lets /status and later investigations
+    distinguish "strategy triggered" from "message was accepted by Telegram".
+    """
+    try:
+        with _db_lock:
+            conn = _get_db()
+            conn.execute(
+                "INSERT INTO telegram_delivery_log "
+                "(ts, symbol, alert_type, direction, mode, delivered, pid) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(time.time()), symbol, alert_type, direction, mode,
+                    1 if delivered else 0, os.getpid(),
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        logger.warning(
+            "telegram delivery audit failed for %s/%s: %s",
+            symbol, alert_type, exc,
+        )
+
+
 def _telegram_answer_callback(callback_id: str, text: str = "") -> None:
     """Acknowledge a callback_query so Telegram stops showing a loading spinner."""
     try:
@@ -1622,10 +1656,22 @@ def _demo_open_position(
                     _shadow_body = notify_body
                     if _shadow_conflict:
                         _shadow_body = f"{notify_body}\n{_shadow_conflict}"
-                    _telegram_send(
+                    _delivery_ok = _telegram_send(
                         TELEGRAM_CHAT_ID,
                         f"🔬 SHADOW — не реальная позиция\n{_shadow_body}",
                         reply_markup=_watch_markup,
+                    )
+                    _record_telegram_delivery(
+                        symbol=symbol,
+                        alert_type=alert_type or "unknown",
+                        direction=direction,
+                        delivered=_delivery_ok,
+                        mode="shadow",
+                    )
+                    logger.info(
+                        "Telegram shadow delivery: %s %s/%s delivered=%s pid=%d",
+                        symbol, direction, alert_type or "unknown",
+                        _delivery_ok, _pid,
                     )
     except Exception as exc:
         logger.warning("_demo_open_position failed for %s: %s", symbol, exc)
@@ -4340,6 +4386,22 @@ def _get_db() -> sqlite3.Connection:
                 ts INTEGER NOT NULL
             )
         """)
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_delivery_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts         INTEGER NOT NULL,
+                symbol     TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
+                direction  TEXT,
+                mode       TEXT NOT NULL,
+                delivered  INTEGER NOT NULL,
+                pid        INTEGER
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tg_delivery_ts "
+            "ON telegram_delivery_log(ts)"
+        )
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -9335,6 +9397,7 @@ def check_pump_24h_fade(
                 score=score,
                 notify_body=(
                     f"📉 Pump Fade <b>SHORT 📉</b> <code>{symbol}</code>\n"
+                    f"Стратегия: <code>pump_24h_fade</code>\n"
                     f"Цена: <b>${price:,.6g}</b>  |  +{pct24:.1f}% за 24ч  |  RSI {rsi:.0f}\n"
                     f"🟢 TP: <b>${_dtp_pf:,.6g}</b>  │  🔴 SL: <b>${_dsl_pf:,.6g}</b>"
                 ) if is_shadow else None,
