@@ -8197,10 +8197,13 @@ def check_overheated_oversold(
                 _early_pre_fails.append("rsi")
             logger.info(
                 "overheated_early CHECK %s: pct24=%.1f%% threshold=%.1f%% "
-                "rsi=%.1f range=[%.0f,%.0f) price=%.6g pre_fail=%s",
+                "rsi=%.1f range=[%.0f,%.0f) price=%.6g btc_pct24=%s "
+                "pre_fail=%s final_reason=%s",
                 symbol, pct24, oh_threshold, rsi,
                 OVERHEATED_EARLY_RSI_MIN, RSI_OVERBOUGHT, price,
+                f"{btc_pct24:.1f}%" if btc_pct24 is not None else "na",
                 ",".join(_early_pre_fails) if _early_pre_fails else "none",
+                "precondition_pct24_or_rsi" if _early_pre_fails else "passed",
             )
             _oh_pre_fails = []
             if pct24 < oh_threshold:
@@ -8418,14 +8421,21 @@ def check_overheated_oversold(
             # Shadow-only test vs overheated_24h.  The RSI range is earlier
             # (55–70 here vs ≥70 in parent) and the score floor is deliberately
             # lower so this branch can test less-confirmed entries.
+            logger.info(
+                "overheated_early PRECHECK %s: pct24=%.1f%% threshold=%.1f%% "
+                "rsi=%.1f range=[%.0f,%.0f) btc_pct24=%s",
+                symbol, pct24, oh_threshold, rsi,
+                OVERHEATED_EARLY_RSI_MIN, RSI_OVERBOUGHT,
+                f"{btc_pct24:.1f}%" if btc_pct24 is not None else "na",
+            )
             if not OVERHEATED_ENABLED:
-                logger.info("overheated_early SKIP %s: disabled", symbol)
+                logger.info("overheated_early FINAL %s: reason=disabled", symbol)
                 continue
             with state_lock:
                 ema_oe = state["ema200_4h"].get(symbol)
             if ema_oe is not None and price < ema_oe:
                 logger.info(
-                    "overheated_early SKIP %s: ema200 price=%.6g < ema=%.6g",
+                    "overheated_early FINAL %s: reason=ema200 price=%.6g < ema=%.6g",
                     symbol, price, ema_oe,
                 )
                 continue  # uptrend confirmation: price must be above EMA-200
@@ -8439,7 +8449,7 @@ def check_overheated_oversold(
             )
             if _oe_up_count is not None and _oe_up_count < OVERHEATED_DURATION_MIN_UP:
                 logger.info(
-                    "overheated_early SKIP %s: duration up=%d/%d < min=%d",
+                    "overheated_early FINAL %s: reason=duration up=%d/%d < min=%d",
                     symbol, _oe_up_count, OVERHEATED_DURATION_WINDOW,
                     OVERHEATED_DURATION_MIN_UP,
                 )
@@ -8459,7 +8469,7 @@ def check_overheated_oversold(
                 last_oe = state["last_overheated_early_alerted"].get(symbol, 0)
             if now - last_oe < OVERHEATED_EARLY_COOLDOWN:
                 logger.info(
-                    "overheated_early SKIP %s: cooldown remaining=%ds "
+                    "overheated_early FINAL %s: reason=cooldown remaining=%ds "
                     "(last=%d cooldown=%ds)",
                     symbol,
                     int(OVERHEATED_EARLY_COOLDOWN - (now - last_oe)),
@@ -8470,13 +8480,13 @@ def check_overheated_oversold(
             # ── Filters identical to overheated_24h real path ───────────────
             # is_hidden: user hides this type or symbol entirely
             if is_hidden("overheated_early", symbol):
-                logger.info("overheated_early SKIP %s: hidden", symbol)
+                logger.info("overheated_early FINAL %s: reason=hidden", symbol)
                 continue
             # Silenced
             with state_lock:
                 _oe_silenced = state["silenced"]
             if _oe_silenced:
-                logger.info("overheated_early SKIP %s: silenced", symbol)
+                logger.info("overheated_early FINAL %s: reason=silenced", symbol)
                 continue
             # Open real-position dedup (mirrors send_alert_with_log check)
             try:
@@ -8488,29 +8498,40 @@ def check_overheated_oversold(
                     ).fetchone()[0]
                 if _oe_already_open:
                     logger.info(
-                        "overheated_early SKIP %s: open real position count=%d",
+                        "overheated_early FINAL %s: reason=open_real_position count=%d",
                         symbol, _oe_already_open,
                     )
                     continue
             except Exception:
                 pass
 
-            _oe_score = compute_signal_score(
+            _oe_score_base = compute_signal_score(
                 "overheated_24h", "buy",  # identical scoring formula
                 rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
             )
-            _fl_delta_oe, _fl_text_oe, _, _ = _funding_lsr_score_and_text(symbol, "buy")
-            _oe_score = max(0, min(100, _oe_score + _fl_delta_oe))
+            _fl_delta_oe, _fl_text_oe, _fl_fpts_oe, _fl_lpts_oe = (
+                _funding_lsr_score_and_text(symbol, "buy")
+            )
+            _oe_score = max(0, min(100, _oe_score_base + _fl_delta_oe))
 
             # Separate score gate for the early-stage shadow experiment.
             # Do not inherit overheated_24h's mature-signal floor here:
             # requiring 75 defeats the purpose of catching the earlier move.
             _oe_min_score = OVERHEATED_EARLY_MIN_SCORE
+            logger.info(
+                "overheated_early EVAL %s: pct24=%.1f%% rsi=%.1f "
+                "btc_pct24=%s score_base=%d funding_pts=%d lsr_pts=%d "
+                "score=%d min=%d",
+                symbol, pct24, rsi,
+                f"{btc_pct24:.1f}%" if btc_pct24 is not None else "na",
+                _oe_score_base, _fl_fpts_oe, _fl_lpts_oe,
+                _oe_score, _oe_min_score,
+            )
             if _oe_score < _oe_min_score:
                 logger.info(
-                    "overheated_early SKIP %s: score=%d < min=%d "
-                    "(pct24=%.1f%% rsi=%.1f)",
-                    symbol, _oe_score, _oe_min_score, pct24, rsi,
+                    "overheated_early FINAL %s: reason=score_below_min "
+                    "score=%d < min=%d",
+                    symbol, _oe_score, _oe_min_score,
                 )
                 continue
 
@@ -8519,8 +8540,11 @@ def check_overheated_oversold(
             _liq_veto_oe, _liq_reason_oe = _check_liq_veto(symbol, "buy", _vol24_oe)
             if _liq_veto_oe:
                 logger.info(
-                    "overheated_early SKIP %s: liquidity veto: %s",
+                    "overheated_early FINAL %s: reason=liquidity_veto %s "
+                    "score=%d btc_pct24=%s funding_pts=%d lsr_pts=%d",
                     symbol, _liq_reason_oe,
+                    _oe_score, f"{btc_pct24:.1f}%" if btc_pct24 is not None else "na",
+                    _fl_fpts_oe, _fl_lpts_oe,
                 )
                 _dsl_lv_oe, _dtp_lv_oe = _compute_demo_sl_tp("LONG", price, atr)
                 if _dsl_lv_oe and _dtp_lv_oe:
@@ -8539,8 +8563,11 @@ def check_overheated_oversold(
                 )
                 if not _ai_ok_oe:
                     logger.info(
-                        "overheated_early SKIP %s: AI veto: %s",
+                        "overheated_early FINAL %s: reason=ai_veto %s "
+                        "score=%d btc_pct24=%s funding_pts=%d lsr_pts=%d",
                         symbol, _ai_note_oe,
+                        _oe_score, f"{btc_pct24:.1f}%" if btc_pct24 is not None else "na",
+                        _fl_fpts_oe, _fl_lpts_oe,
                     )
                     _dsl_av_oe, _dtp_av_oe = _compute_demo_sl_tp("LONG", price, atr)
                     if _dsl_av_oe and _dtp_av_oe:
@@ -8586,8 +8613,12 @@ def check_overheated_oversold(
                 with state_lock:
                     state["last_overheated_early_alerted"][symbol] = now
                 logger.info(
-                    "overheated_early shadow: %s pct24=+%.1f%% rsi=%.1f score=%d",
-                    symbol, pct24, rsi, _oe_score,
+                    "overheated_early FINAL %s: reason=PASS pct24=+%.1f%% "
+                    "rsi=%.1f btc_pct24=%s score_base=%d funding_pts=%d "
+                    "lsr_pts=%d score=%d",
+                    symbol, pct24, rsi,
+                    f"{btc_pct24:.1f}%" if btc_pct24 is not None else "na",
+                    _oe_score_base, _fl_fpts_oe, _fl_lpts_oe, _oe_score,
                 )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
