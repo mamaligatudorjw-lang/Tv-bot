@@ -17,7 +17,7 @@
     "candle_interval": "15m",
     "signal_min_utc": "2026-08-18T09:36:43+00:00",
     "signal_max_utc": "2026-08-21T10:36:48+00:00",
-    "analysis_run_utc": "2026-08-21T11:01:59.504359+00:00",
+    "analysis_run_utc": "2026-08-21T11:44:42.009819+00:00",
     "window_not_elapsed": 8,
     "missing_price": 0,
     "range_missing": 0

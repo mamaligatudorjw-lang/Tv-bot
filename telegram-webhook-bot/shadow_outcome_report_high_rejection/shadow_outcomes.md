@@ -4,6 +4,8 @@ Fixed window: **24h** after entry; source candles: **Gate.io futures 15m**.
 Only `demo_positions.is_shadow=1` signals with valid entry/SL/TP are included.
 Unresolved means neither barrier was touched before the window ended; it is not counted as a win or loss.
 If a candle touches both barriers, the result is `ambiguous` because OHLC cannot establish intrabar order.
+`n = TP-first + SL-first + unresolved + ambiguous`; `WR resolved = TP-first / (TP-first + SL-first)`.
+`avg R` includes unresolved signals at the last available price in the fixed window; ambiguous signals have no R.
 
 ## Coverage
 
@@ -17,7 +19,7 @@ If a candle touches both barriers, the result is `ambiguous` because OHLC cannot
   "candle_interval": "15m",
   "signal_min_utc": "2026-08-18T09:36:43+00:00",
   "signal_max_utc": "2026-08-21T10:36:48+00:00",
-  "analysis_run_utc": "2026-08-21T11:01:59.504359+00:00",
+  "analysis_run_utc": "2026-08-21T11:44:42.009819+00:00",
   "window_not_elapsed": 8,
   "missing_price": 0,
   "range_missing": 0
