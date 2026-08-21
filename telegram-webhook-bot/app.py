@@ -3847,16 +3847,24 @@ def _format_consecutive_uptrend(candles: list | None, now_ts: float | None = Non
     now_ts = time.time() if now_ts is None else now_ts
     hours = max(1, int((now_ts - start_ts) // 3600))
     days, remaining_hours = divmod(hours, 24)
+
+    def _ru_count(value: int, one: str, few: str, many: str) -> str:
+        if value % 10 == 1 and value % 100 != 11:
+            word = one
+        elif value % 10 in (2, 3, 4) and value % 100 not in (12, 13, 14):
+            word = few
+        else:
+            word = many
+        return f"{value} {word}"
+
     if days:
-        duration = f"{days} день{'я' if 2 <= days <= 4 else 'й' if days >= 5 else ''} {remaining_hours} час"
+        duration = _ru_count(days, "день", "дня", "дней")
         if remaining_hours == 0:
-            duration = f"{days} день{'я' if 2 <= days <= 4 else 'й' if days >= 5 else ''}"
-        elif remaining_hours != 1:
-            duration += "а"
+            pass
+        else:
+            duration += " " + _ru_count(remaining_hours, "час", "часа", "часов")
     else:
-        duration = f"{hours} час"
-        if hours != 1:
-            duration += "а"
+        duration = _ru_count(hours, "час", "часа", "часов")
     start_dt = datetime.fromtimestamp(start_ts, ZoneInfo("Europe/Chisinau"))
     month = (
         "янв", "фев", "мар", "апр", "май", "июн",
