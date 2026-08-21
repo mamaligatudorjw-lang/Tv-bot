@@ -1547,6 +1547,7 @@ def _demo_open_position(
     score: int | None = None,
     notify_body: str | None = None,
     repeat_num: int | None = None,
+    rsi_at_signal: float | None = None,
 ) -> None:
     """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
     a real position as TOP for the /demo three-way comparison.
@@ -1587,12 +1588,13 @@ def _demo_open_position(
             cur = conn.execute(
                 "INSERT OR IGNORE INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
-                " size_usd, status, is_shadow, shadow_reason, alert_type, is_top, repeat_num) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?)",
+                " size_usd, status, is_shadow, shadow_reason, alert_type, is_top, repeat_num, "
+                " rsi_at_signal) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
                 (_ts_recv, symbol, direction, entry_price,
                  sl_price, tp_price, size_usd,
                  1 if is_shadow else 0, shadow_reason, alert_type,
-                 1 if is_top else 0, repeat_num),
+                 1 if is_top else 0, repeat_num, rsi_at_signal),
             )
             _new_demo_id = cur.lastrowid  # capture before lock releases
             conn.commit()
@@ -4607,7 +4609,8 @@ def _get_db() -> sqlite3.Connection:
                 alert_type    TEXT,
                 is_top        INTEGER NOT NULL DEFAULT 0,
                 wick_close    INTEGER NOT NULL DEFAULT 0,
-                repeat_num    INTEGER DEFAULT NULL
+                repeat_num    INTEGER DEFAULT NULL,
+                rsi_at_signal REAL
             )
         """)
         # Migrate: wick_close for existing installs
@@ -4617,6 +4620,14 @@ def _get_db() -> sqlite3.Connection:
             )
         except sqlite3.OperationalError as _mig_wc:
             if "duplicate column" not in str(_mig_wc).lower():
+                raise
+        # Migrate: preserve the exact RSI used by the overheated_24h gate.
+        try:
+            _db_conn.execute(
+                "ALTER TABLE demo_positions ADD COLUMN rsi_at_signal REAL"
+            )
+        except sqlite3.OperationalError as _mig_rsi:
+            if "duplicate column" not in str(_mig_rsi).lower():
                 raise
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
@@ -8320,6 +8331,7 @@ def check_overheated_oversold(
                             f"duration_filter: {_oh_up_count}/{OVERHEATED_DURATION_WINDOW}↑"
                         ),
                         alert_type="overheated_24h",
+                        rsi_at_signal=rsi,
                     )
                 continue
 
@@ -8381,6 +8393,7 @@ def check_overheated_oversold(
                             shadow_reason=f"liq_veto: {_liq_reason_oh}",
                             alert_type="overheated_24h",
                             notify_body=body,
+                            rsi_at_signal=rsi,
                         )
                     continue
                 # ── AI veto (AI_VETO_ENABLED=False → отключён) ───────────────
@@ -8402,6 +8415,7 @@ def check_overheated_oversold(
                                 shadow_reason=f"ai_veto: {_ai_note_oh}",
                                 alert_type="overheated_24h",
                                 notify_body=body,
+                                rsi_at_signal=rsi,
                             )
                         continue
                 # ── Факторы фандинг + LSR ────────────────────────────────────
@@ -8430,6 +8444,7 @@ def check_overheated_oversold(
                             alert_type="overheated_24h",
                             score=score,
                             notify_body=body,
+                            rsi_at_signal=rsi,
                         )
                     # Auto-register for continuation confirmation
                     _register_cont_pending(symbol, "overheated_24h", "LONG", price, atr)
@@ -8455,6 +8470,7 @@ def check_overheated_oversold(
                             is_shadow=False,
                             alert_type="overheated_24h",
                             score=score,
+                            rsi_at_signal=rsi,
                         )
                         # Auto-register for continuation confirmation
                         _register_cont_pending(symbol, "overheated_24h", "LONG", price, atr)

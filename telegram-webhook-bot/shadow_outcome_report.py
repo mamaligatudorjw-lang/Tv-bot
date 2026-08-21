@@ -95,7 +95,7 @@ def load_signals(db_path: Path, strategies: set[str] | None) -> list[dict[str, A
     conn.row_factory = sqlite3.Row
     query = """
         SELECT id, ts_open, symbol, direction, entry_price, sl_price, tp_price,
-               status, ts_close, exit_price, alert_type, shadow_reason
+               status, ts_close, exit_price, alert_type, shadow_reason, rsi_at_signal
         FROM demo_positions
         WHERE is_shadow=1
           AND direction IN ('LONG', 'SHORT')
@@ -213,6 +213,21 @@ def hourly_features(
         "trend_delay_hours": delay_hours,
         "trend_delay_bucket": delay_bucket,
     }
+
+
+def apply_recorded_rsi(
+    features: dict[str, Any],
+    recorded_rsi: Any,
+) -> dict[str, Any]:
+    """Prefer the engine snapshot; retain reconstruction for legacy rows."""
+    if recorded_rsi is None:
+        features["rsi_source"] = "reconstructed"
+        return features
+    rsi = float(recorded_rsi)
+    features["rsi_1h"] = rsi
+    features["rsi_bucket"] = "rsi_ge_80" if rsi >= 80 else "rsi_lt_80"
+    features["rsi_source"] = "engine_snapshot"
+    return features
 
 
 def first_touch(
@@ -334,7 +349,7 @@ def write_report(
         "opposite_ts", "opposite_alert_type", "range_24h_pct", "range_bucket",
         "status_existing", "ts_close_existing", "exit_price_existing",
         "rsi_1h", "rsi_bucket", "up_count_12", "trend_streak_candles",
-        "trend_start_ts", "trend_delay_hours", "trend_delay_bucket",
+        "trend_start_ts", "trend_delay_hours", "trend_delay_bucket", "rsi_source",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -455,6 +470,7 @@ def write_report(
         "- For subgroups with n=5–6, one signal moves resolved WR by roughly 15–20 percentage points; these comparisons are directional only and are not a basis for setting a filter threshold.",
         "- This report does not change trading behavior or add filters.",
         "- RSI is reconstructed from the 14 latest completed 1h candles before the signal; the live/incomplete candle is excluded.",
+        "- For rows created after the RSI snapshot migration, `rsi_source=engine_snapshot` is the exact RSI used by the gate. Legacy rows remain `rsi_source=reconstructed` and may differ near a threshold boundary.",
         "- Trend delay uses the consecutive up-close run ending at the last completed 1h candle. A missing run is reported as `no_consecutive_trend`, not assigned an artificial delay.",
         "- The current bot configuration has a 12h duration window but `min_up=0`; this report measures the observed up-close count and does not reinterpret it as an active gate.",
     ]
@@ -543,7 +559,10 @@ def main() -> int:
             outcome, reason = "window_not_elapsed", "analysis_run_before_window_end"
         opposite, opposite_ts, opposite_type = has_opposite_signal(signal, by_symbol)
         range_pct = range_at_entry(candles, ts_open)
-        features = hourly_features(hourly_by_symbol.get(signal["symbol"], []), ts_open)
+        features = apply_recorded_rsi(
+            hourly_features(hourly_by_symbol.get(signal["symbol"], []), ts_open),
+            signal.get("rsi_at_signal"),
+        )
         range_bucket = (
             "missing"
             if range_pct is None else
@@ -591,6 +610,8 @@ def main() -> int:
         "missing_price": sum(row["outcome"] == "missing_price" for row in rows),
         "range_missing": sum(row["range_24h_pct"] == "" for row in rows),
         "rsi_missing": sum(row["rsi_1h"] is None for row in rows),
+        "rsi_engine_snapshot": sum(row["rsi_source"] == "engine_snapshot" for row in rows),
+        "rsi_reconstructed_legacy": sum(row["rsi_source"] == "reconstructed" for row in rows),
         "trend_delay_missing": sum(row["trend_delay_hours"] is None for row in rows),
     }
     write_report(rows, args.out, args.window_hours, args.range_threshold, coverage)
