@@ -3827,6 +3827,45 @@ def _count_up_in_window(closes: list[float], n: int = 6, symbol: str = "") -> "i
     return sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
 
 
+def _format_consecutive_uptrend(candles: list | None, now_ts: float | None = None) -> str:
+    """Describe the latest strict consecutive hourly up-close run.
+
+    This is display-only. It intentionally has no fixed lookback: walking
+    backwards stops at the first non-up close (including an equal close).
+    """
+    if not candles or len(candles) < 2:
+        return "<b>нет данных</b>"
+    streak = 0
+    for i in range(len(candles) - 1, 0, -1):
+        if float(candles[i][4]) > float(candles[i - 1][4]):
+            streak += 1
+        else:
+            break
+    if streak == 0:
+        return "Рост не продолжается подряд"
+    start_ts = int(candles[len(candles) - 1 - streak][0])
+    now_ts = time.time() if now_ts is None else now_ts
+    hours = max(1, int((now_ts - start_ts) // 3600))
+    days, remaining_hours = divmod(hours, 24)
+    if days:
+        duration = f"{days} день{'я' if 2 <= days <= 4 else 'й' if days >= 5 else ''} {remaining_hours} час"
+        if remaining_hours == 0:
+            duration = f"{days} день{'я' if 2 <= days <= 4 else 'й' if days >= 5 else ''}"
+        elif remaining_hours != 1:
+            duration += "а"
+    else:
+        duration = f"{hours} час"
+        if hours != 1:
+            duration += "а"
+    start_dt = datetime.fromtimestamp(start_ts, ZoneInfo("Europe/Chisinau"))
+    month = (
+        "янв", "фев", "мар", "апр", "май", "июн",
+        "июл", "авг", "сен", "окт", "ноя", "дек",
+    )[start_dt.month - 1]
+    start_text = f"{start_dt.day} {month}, {start_dt:%H:%M}"
+    return f"Растёт {duration} подряд (с {start_text})"
+
+
 def _shadow_notif_allowed(notif_key: str) -> bool:
     """Always returns True — daily cap removed (was reset on every restart anyway).
 
@@ -5396,6 +5435,7 @@ STREAK_1H_REVERSAL_PCT  = 0.5   # если живая цена ниже last_clo
 OVERHEATED_DURATION_WINDOW   = 12   # look at last 12 completed 1h candles
 OVERHEATED_DURATION_MIN_UP   = 0    # duration filter for overheated_24h/early (0 = выключен; 8 = ≥8/12 1h свечей вверх)
 OVERHEATED_DURATION_MIN_DOWN = 0    # duration filter for oversold_24h (0 = выключен; 8 = ≥8/12 1h свечей вниз)
+OVERHEATED_DISPLAY_HISTORY   = 1000 # enough history to find the last hourly pullback
 
 # --- VWAP Reversion shadow (mean-reversion complement to Серия 1ч) ---
 # Opposite direction from streak_1h: upstreak → SHORT to VWAP, downstreak → LONG to VWAP.
@@ -8247,7 +8287,11 @@ def check_overheated_oversold(
 
             # Duration filter: require sustained hourly uptrend, not a single-candle spike.
             # Uses _count_up_in_window (X-of-Y, gaps allowed — NOT consecutive streak).
-            _oh_1h_raw    = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
+            _oh_1h_candles = _fetch_1h_ohlcv(symbol, limit=OVERHEATED_DISPLAY_HISTORY)
+            _oh_1h_raw    = (
+                [float(candle[4]) for candle in _oh_1h_candles]
+                if _oh_1h_candles else None
+            )
             # _fetch_1h_closes already drops the live candle; do NOT slice again.
             # None = insufficient data → skip filter (don't block signal).
             _oh_up_count  = _count_up_in_window(
@@ -8297,8 +8341,7 @@ def check_overheated_oversold(
                 )
                 _oh_trend_warn = _trend_warning_line(symbol, "LONG")
                 _oh_dur_str = (
-                    f"<b>{_oh_up_count}</b> из {OVERHEATED_DURATION_WINDOW}"
-                    if _oh_up_count is not None else "<b>нет данных</b>"
+                    _format_consecutive_uptrend(_oh_1h_candles)
                 )
                 body = (
                     f"🚀 <b>ИМПУЛЬС ВВЕРХ — продолжение роста</b>\n"
@@ -8441,7 +8484,11 @@ def check_overheated_oversold(
                 continue  # uptrend confirmation: price must be above EMA-200
 
             # Duration filter (= overheated_24h: ≥8/12 hourly candles up)
-            _oe_1h_raw   = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
+            _oe_1h_candles = _fetch_1h_ohlcv(symbol, limit=OVERHEATED_DISPLAY_HISTORY)
+            _oe_1h_raw   = (
+                [float(candle[4]) for candle in _oe_1h_candles]
+                if _oe_1h_candles else None
+            )
             # _fetch_1h_closes already drops the live candle; do NOT slice again.
             # None = insufficient data → skip filter (don't block signal).
             _oe_up_count = _count_up_in_window(
@@ -8582,8 +8629,7 @@ def check_overheated_oversold(
             _oe_sl_tp = _format_sl_tp("buy", price, atr, score=_oe_score)
             _oe_trend_warn = _trend_warning_line(symbol, "LONG")
             _oe_dur_str = (
-                f"<b>{_oe_up_count}</b> из {OVERHEATED_DURATION_WINDOW}"
-                if _oe_up_count is not None else "<b>нет данных</b>"
+                _format_consecutive_uptrend(_oe_1h_candles)
             )
             _oe_body = (
                 f"🚀 <b>РАННИЙ ИМПУЛЬС ВВЕРХ</b>\n"
