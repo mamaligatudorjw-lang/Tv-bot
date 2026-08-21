@@ -1,0 +1,108 @@
+{
+  "source_report": "shadow_outcome_report_overheated_24h/shadow_outcomes.csv",
+  "eligible_rows": 271,
+  "rows_with_rsi": 295,
+  "thresholds": [
+    {
+      "cutoff": 70,
+      "ge": {
+        "n": 228,
+        "tp_first": 91,
+        "sl_first": 122,
+        "unresolved": 11,
+        "ambiguous": 4,
+        "resolved_wr_pct": 42.72,
+        "avg_r": 0.259,
+        "preliminary": false
+      },
+      "lt": {
+        "n": 43,
+        "tp_first": 17,
+        "sl_first": 19,
+        "unresolved": 6,
+        "ambiguous": 1,
+        "resolved_wr_pct": 47.22,
+        "avg_r": 0.3835,
+        "preliminary": false
+      },
+      "shadow_proxy_all_rows_ge": 246
+    },
+    {
+      "cutoff": 75,
+      "ge": {
+        "n": 189,
+        "tp_first": 74,
+        "sl_first": 103,
+        "unresolved": 9,
+        "ambiguous": 3,
+        "resolved_wr_pct": 41.81,
+        "avg_r": 0.2323,
+        "preliminary": false
+      },
+      "lt": {
+        "n": 82,
+        "tp_first": 34,
+        "sl_first": 38,
+        "unresolved": 8,
+        "ambiguous": 2,
+        "resolved_wr_pct": 47.22,
+        "avg_r": 0.3866,
+        "preliminary": false
+      },
+      "shadow_proxy_all_rows_ge": 204
+    },
+    {
+      "cutoff": 80,
+      "ge": {
+        "n": 126,
+        "tp_first": 46,
+        "sl_first": 74,
+        "unresolved": 4,
+        "ambiguous": 2,
+        "resolved_wr_pct": 38.33,
+        "avg_r": 0.1283,
+        "preliminary": false
+      },
+      "lt": {
+        "n": 145,
+        "tp_first": 62,
+        "sl_first": 67,
+        "unresolved": 13,
+        "ambiguous": 3,
+        "resolved_wr_pct": 48.06,
+        "avg_r": 0.41,
+        "preliminary": false
+      },
+      "shadow_proxy_all_rows_ge": 134
+    },
+    {
+      "cutoff": 85,
+      "ge": {
+        "n": 82,
+        "tp_first": 33,
+        "sl_first": 46,
+        "unresolved": 1,
+        "ambiguous": 2,
+        "resolved_wr_pct": 41.77,
+        "avg_r": 0.2387,
+        "preliminary": false
+      },
+      "lt": {
+        "n": 189,
+        "tp_first": 75,
+        "sl_first": 95,
+        "unresolved": 16,
+        "ambiguous": 3,
+        "resolved_wr_pct": 44.12,
+        "avg_r": 0.2959,
+        "preliminary": false
+      },
+      "shadow_proxy_all_rows_ge": 88
+    }
+  ],
+  "db_counts": {
+    "real_long": 0,
+    "shadow_long": 312
+  },
+  "note": "No threshold changed. Real signals cannot provide an empirical cutoff volume because the current DB contains zero non-shadow overheated_24h LONG positions; shadow counts are a proxy."
+}
