@@ -315,6 +315,8 @@ def write_report(
         "Only `demo_positions.is_shadow=1` signals with valid entry/SL/TP are included.",
         "Unresolved means neither barrier was touched before the window ended; it is not counted as a win or loss.",
         "If a candle touches both barriers, the result is `ambiguous` because OHLC cannot establish intrabar order.",
+        "`n = TP-first + SL-first + unresolved + ambiguous`; `WR resolved = TP-first / (TP-first + SL-first)`.",
+        "`avg R` includes unresolved signals at the last available price in the fixed window; ambiguous signals have no R.",
         "",
         "## Coverage",
         "",
