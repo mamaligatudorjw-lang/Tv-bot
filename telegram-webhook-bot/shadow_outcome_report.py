@@ -25,6 +25,9 @@ import requests
 
 BASE_URL = "https://api.gateio.ws/api/v4"
 INTERVAL_SEC = 15 * 60
+HOUR_SEC = 60 * 60
+RSI_PERIOD = 14
+TREND_WINDOW_H = 12
 COOLDOWN_CONFLICT_SEC = 60 * 60
 DEFAULT_WINDOW_H = 24
 DEFAULT_RANGE_THRESHOLD = 50.0
@@ -40,18 +43,20 @@ def fetch_candles(
     symbol: str,
     start: int,
     end: int,
+    interval: str = "15m",
+    interval_sec: int = INTERVAL_SEC,
     retries: int = 3,
 ) -> list[dict[str, Any]]:
     # Gate.io rejects limit together with from/to and caps a time-range
     # response at roughly 1000 candles. Split long histories into safe chunks.
-    chunk_seconds = 999 * INTERVAL_SEC
+    chunk_seconds = 999 * interval_sec
     all_rows: list[dict[str, Any]] = []
     cursor = start
     while cursor < end:
         chunk_end = min(end, cursor + chunk_seconds)
         params = {
             "contract": gate_symbol(symbol),
-            "interval": "15m",
+            "interval": interval,
             "from": cursor,
             "to": chunk_end,
         }
@@ -140,6 +145,74 @@ def price_r(direction: str, entry: float, stop: float, price: float) -> float:
     if risk <= 0:
         return float("nan")
     return (price - entry) / risk if direction == "LONG" else (entry - price) / risk
+
+
+def simple_rsi(closes: list[float], period: int = RSI_PERIOD) -> float | None:
+    """Match app.py's simple RSI calculation on the latest completed window."""
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [max(delta, 0.0) for delta in deltas[-period:]]
+    losses = [max(-delta, 0.0) for delta in deltas[-period:]]
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    avg_gain = sum(gains) / period
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def hourly_features(
+    candles: list[dict[str, Any]],
+    ts_open: int,
+) -> dict[str, Any]:
+    """Reconstruct signal-time RSI and the latest hourly uptrend diagnostics."""
+    completed = [
+        candle for candle in candles
+        if int(candle["t"]) + HOUR_SEC <= ts_open
+    ]
+    closes = [float(candle["c"]) for candle in completed]
+    rsi = simple_rsi(closes[-(RSI_PERIOD + 1):])
+    recent = completed[-(TREND_WINDOW_H + 1):]
+    recent_closes = [float(candle["c"]) for candle in recent]
+    up_count = (
+        sum(recent_closes[i] > recent_closes[i - 1] for i in range(1, len(recent_closes)))
+        if len(recent_closes) == TREND_WINDOW_H + 1 else None
+    )
+    streak = 0
+    if len(closes) >= 2:
+        for index in range(len(closes) - 1, 0, -1):
+            if closes[index] > closes[index - 1]:
+                streak += 1
+            else:
+                break
+    if streak:
+        start_index = len(completed) - 1 - streak
+        trend_start_ts = int(completed[start_index]["t"])
+        delay_hours = (ts_open - trend_start_ts) / HOUR_SEC
+        if delay_hours < 4:
+            delay_bucket = "0-3.9h"
+        elif delay_hours < 8:
+            delay_bucket = "4-7.9h"
+        elif delay_hours < 12:
+            delay_bucket = "8-11.9h"
+        else:
+            delay_bucket = "12h+"
+    else:
+        trend_start_ts = None
+        delay_hours = None
+        delay_bucket = "no_consecutive_trend"
+    return {
+        "rsi_1h": rsi,
+        "rsi_bucket": (
+            "missing" if rsi is None else "rsi_ge_80" if rsi >= 80 else "rsi_lt_80"
+        ),
+        "up_count_12": up_count,
+        "trend_streak_candles": streak,
+        "trend_start_ts": trend_start_ts,
+        "trend_delay_hours": delay_hours,
+        "trend_delay_bucket": delay_bucket,
+    }
 
 
 def first_touch(
@@ -260,6 +333,8 @@ def write_report(
         "exit_ts_utc", "r", "reason", "opposite_within_60m",
         "opposite_ts", "opposite_alert_type", "range_24h_pct", "range_bucket",
         "status_existing", "ts_close_existing", "exit_price_existing",
+        "rsi_1h", "rsi_bucket", "up_count_12", "trend_streak_candles",
+        "trend_start_ts", "trend_delay_hours", "trend_delay_bucket",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -274,13 +349,18 @@ def write_report(
     short = [r for r in eligible if r["direction"] == "SHORT"]
     summary = {
         "config": {
+            "strategy": "overheated_24h",
+            "strategy_24h_threshold_pct": 15.0,
+            "strategy_rsi_min": 70.0,
+            "strategy_duration_window_hours": TREND_WINDOW_H,
+            "strategy_duration_min_up": 0,
             "window_hours": window_h,
             "candle_interval": "15m",
             "opposite_window_minutes": 60,
             "range_threshold_pct": threshold,
             "min_group_n_preliminary": MIN_GROUP_N,
             "r_definition": "directional pnl divided by absolute entry-to-SL risk; TP=+2R target and SL=-1R where geometry is 2:1",
-            "same_candle_policy": "ambiguous, excluded from resolved win rate but retained in avg R",
+            "same_candle_policy": "ambiguous, excluded from resolved win rate and avg R",
         },
         "coverage": coverage,
         "overall": metrics(eligible),
@@ -289,6 +369,21 @@ def write_report(
             "overall": metrics(short),
             "opposite_within_60m": split_report(short, "opposite_group"),
             "range_24h": split_report(short, "range_bucket"),
+        },
+        "long_only": {
+            "overall": metrics([r for r in eligible if r["direction"] == "LONG"]),
+            "rsi_1h": split_report(
+                [r for r in eligible if r["direction"] == "LONG" and r["rsi_bucket"] != "missing"],
+                "rsi_bucket",
+            ),
+            "trend_delay": split_report(
+                [r for r in eligible if r["direction"] == "LONG"],
+                "trend_delay_bucket",
+            ),
+            "sustainability_up_count_12": split_report(
+                [r for r in eligible if r["direction"] == "LONG" and r["up_count_12"] is not None],
+                "up_count_12",
+            ),
         },
     }
     (output_dir / "shadow_outcomes.json").write_text(
@@ -340,6 +435,18 @@ def write_report(
         "",
         table(summary["short_only"]["range_24h"]),
         "",
+        "## LONG: RSI at signal time",
+        "",
+        table(summary["long_only"]["rsi_1h"]),
+        "",
+        "## LONG: delay from detected consecutive hourly uptrend",
+        "",
+        table(summary["long_only"]["trend_delay"]),
+        "",
+        "## LONG: number of upward closes in the strategy's 12h window",
+        "",
+        table(summary["long_only"]["sustainability_up_count_12"]),
+        "",
         "## Interpretation guardrails",
         "",
         "- Win rate is TP-first among resolved TP/SL outcomes only; unresolved and ambiguous are shown separately.",
@@ -347,6 +454,9 @@ def write_report(
         "- Groups with fewer than 20 signals are preliminary and are not a basis for changing filters.",
         "- For subgroups with n=5–6, one signal moves resolved WR by roughly 15–20 percentage points; these comparisons are directional only and are not a basis for setting a filter threshold.",
         "- This report does not change trading behavior or add filters.",
+        "- RSI is reconstructed from the 14 latest completed 1h candles before the signal; the live/incomplete candle is excluded.",
+        "- Trend delay uses the consecutive up-close run ending at the last completed 1h candle. A missing run is reported as `no_consecutive_trend`, not assigned an artificial delay.",
+        "- The current bot configuration has a 12h duration window but `min_up=0`; this report measures the observed up-close count and does not reinterpret it as an active gate.",
     ]
     (output_dir / "shadow_outcomes.md").write_text("\n".join(md) + "\n", encoding="utf-8")
     print(f"Wrote {csv_path}, {output_dir / 'shadow_outcomes.md'}, {output_dir / 'shadow_outcomes.json'}")
@@ -377,15 +487,34 @@ def main() -> int:
 
     session = requests.Session()
     candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    hourly_by_symbol: dict[str, list[dict[str, Any]]] = {}
     failures: dict[str, str] = {}
-    def fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]] | None, str | None]:
+    need_hourly = any(signal["alert_type"] == "overheated_24h" for signal in signals)
+
+    def fetch_one(
+        symbol: str,
+    ) -> tuple[
+        str,
+        list[dict[str, Any]] | None,
+        list[dict[str, Any]] | None,
+        str | None,
+    ]:
         symbol_signals = signals_by_symbol[symbol]
         start = min(int(row["ts_open"]) for row in symbol_signals) - 24 * 3600
         end = min(now, max(int(row["ts_open"]) for row in symbol_signals) + args.window_hours * 3600)
+        hourly_start = min(int(row["ts_open"]) for row in symbol_signals) - (RSI_PERIOD + TREND_WINDOW_H + 2) * HOUR_SEC
         try:
-            return symbol, fetch_candles(session, symbol, start, end), None
+            fifteen = fetch_candles(session, symbol, start, end)
+            hourly = (
+                fetch_candles(
+                    session, symbol, hourly_start, min(now, max(int(row["ts_open"]) for row in symbol_signals)),
+                    interval="1h", interval_sec=HOUR_SEC,
+                )
+                if need_hourly else []
+            )
+            return symbol, fifteen, hourly, None
         except Exception as exc:
-            return symbol, None, str(exc)
+            return symbol, None, None, str(exc)
 
     symbols = sorted(signals_by_symbol)
     # Gate.io is slow for a few delisted contracts; bounded concurrency keeps
@@ -393,9 +522,11 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = [executor.submit(fetch_one, symbol) for symbol in symbols]
         for index, future in enumerate(as_completed(futures), 1):
-            symbol, candles, error = future.result()
+            symbol, candles, hourly, error = future.result()
             if candles is not None:
                 candles_by_symbol[symbol] = candles
+            if hourly is not None:
+                hourly_by_symbol[symbol] = hourly
             else:
                 failures[symbol] = error or "unknown fetch error"
             if index % 25 == 0 or index == len(symbols):
@@ -412,6 +543,7 @@ def main() -> int:
             outcome, reason = "window_not_elapsed", "analysis_run_before_window_end"
         opposite, opposite_ts, opposite_type = has_opposite_signal(signal, by_symbol)
         range_pct = range_at_entry(candles, ts_open)
+        features = hourly_features(hourly_by_symbol.get(signal["symbol"], []), ts_open)
         range_bucket = (
             "missing"
             if range_pct is None else
@@ -436,6 +568,7 @@ def main() -> int:
             "status_existing": signal["status"],
             "ts_close_existing": signal["ts_close"] or "",
             "exit_price_existing": signal["exit_price"] or "",
+            **features,
         })
         rows.append(output)
 
@@ -448,6 +581,7 @@ def main() -> int:
         "signals_reported": len(rows),
         "signals_eligible_for_fixed_window_metrics": len(eligible),
         "symbols_loaded": len(candles_by_symbol),
+        "hourly_symbols_loaded": len(hourly_by_symbol) if need_hourly else None,
         "symbol_fetch_failures": failures,
         "candle_interval": "15m",
         "signal_min_utc": fmt_ts(min(int(row["ts_open"]) for row in signals)),
@@ -456,6 +590,8 @@ def main() -> int:
         "window_not_elapsed": sum(row["outcome"] == "window_not_elapsed" for row in rows),
         "missing_price": sum(row["outcome"] == "missing_price" for row in rows),
         "range_missing": sum(row["range_24h_pct"] == "" for row in rows),
+        "rsi_missing": sum(row["rsi_1h"] is None for row in rows),
+        "trend_delay_missing": sum(row["trend_delay_hours"] is None for row in rows),
     }
     write_report(rows, args.out, args.window_hours, args.range_threshold, coverage)
     return 0
