@@ -345,6 +345,7 @@ def write_report(
         "- Win rate is TP-first among resolved TP/SL outcomes only; unresolved and ambiguous are shown separately.",
         "- `avg R` includes unresolved signals at the last available price in the fixed window.",
         "- Groups with fewer than 20 signals are preliminary and are not a basis for changing filters.",
+        "- For subgroups with n=5–6, one signal moves resolved WR by roughly 15–20 percentage points; these comparisons are directional only and are not a basis for setting a filter threshold.",
         "- This report does not change trading behavior or add filters.",
     ]
     (output_dir / "shadow_outcomes.md").write_text("\n".join(md) + "\n", encoding="utf-8")
