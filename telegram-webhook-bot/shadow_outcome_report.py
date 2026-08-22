@@ -90,18 +90,23 @@ def fetch_candles(
     return [unique[ts] for ts in sorted(unique)]
 
 
-def load_signals(db_path: Path, strategies: set[str] | None) -> list[dict[str, Any]]:
+def load_signals(
+    db_path: Path,
+    strategies: set[str] | None,
+    include_non_shadow: bool = False,
+) -> list[dict[str, Any]]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     query = """
         SELECT id, ts_open, symbol, direction, entry_price, sl_price, tp_price,
-               status, ts_close, exit_price, alert_type, shadow_reason, rsi_at_signal
+               status, ts_close, exit_price, alert_type, shadow_reason, rsi_at_signal,
+               signal_price, is_shadow
         FROM demo_positions
-        WHERE is_shadow=1
+        WHERE (is_shadow=1 OR (is_shadow=0 AND alert_type='oversold_24h' AND ?=1))
           AND direction IN ('LONG', 'SHORT')
           AND entry_price > 0 AND sl_price > 0 AND tp_price > 0
     """
-    args: list[Any] = []
+    args: list[Any] = [1 if include_non_shadow else 0]
     if strategies:
         placeholders = ",".join("?" for _ in strategies)
         query += f" AND alert_type IN ({placeholders})"
@@ -339,11 +344,14 @@ def write_report(
     window_h: int,
     threshold: float,
     coverage: dict[str, Any],
+    strategy_name: str,
+    fix_split_ts: int | None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / "shadow_outcomes.csv"
     fields = [
         "id", "ts_open", "ts_open_utc", "symbol", "direction", "alert_type",
+        "is_shadow", "signal_price", "fix_cohort",
         "entry_price", "sl_price", "tp_price", "outcome", "exit_ts",
         "exit_ts_utc", "r", "reason", "opposite_within_60m",
         "opposite_ts", "opposite_alert_type", "range_24h_pct", "range_bucket",
@@ -364,7 +372,7 @@ def write_report(
     short = [r for r in eligible if r["direction"] == "SHORT"]
     summary = {
         "config": {
-            "strategy": "overheated_24h",
+            "strategy": strategy_name,
             "strategy_24h_threshold_pct": 15.0,
             "strategy_rsi_min": 70.0,
             "strategy_duration_window_hours": TREND_WINDOW_H,
@@ -376,10 +384,13 @@ def write_report(
             "min_group_n_preliminary": MIN_GROUP_N,
             "r_definition": "directional pnl divided by absolute entry-to-SL risk; TP=+2R target and SL=-1R where geometry is 2:1",
             "same_candle_policy": "ambiguous, excluded from resolved win rate and avg R",
+            "fix_split_ts": fix_split_ts,
+            "fix_split_utc": fmt_ts(fix_split_ts),
         },
         "coverage": coverage,
         "overall": metrics(eligible),
         "by_strategy": split_report(eligible, "alert_type"),
+        "by_fix_cohort": split_report(eligible, "fix_cohort"),
         "short_only": {
             "overall": metrics(short),
             "opposite_within_60m": split_report(short, "opposite_group"),
@@ -422,7 +433,8 @@ def write_report(
         "# Shadow outcome report",
         "",
         f"Fixed window: **{window_h}h** after entry; source candles: **Gate.io futures 15m**.",
-        "Only `demo_positions.is_shadow=1` signals with valid entry/SL/TP are included.",
+        f"Strategy: **{strategy_name}**. Signals with valid entry/SL/TP are included according to the selected shadow/live scope.",
+        "For the oversold live audit, non-shadow rows are intentionally included; this report does not place orders or change bot state.",
         "Unresolved means neither barrier was touched before the window ended; it is not counted as a win or loss.",
         "If a candle touches both barriers, the result is `ambiguous` because OHLC cannot establish intrabar order.",
         "`n = TP-first + SL-first + unresolved + ambiguous`; `WR resolved = TP-first / (TP-first + SL-first)`.",
@@ -437,6 +449,12 @@ def write_report(
         "## Overall",
         "",
         table({"all eligible": summary["overall"]}),
+        "",
+        "## Before vs after the price-basis fix",
+        "",
+        f"Split timestamp: **{fmt_ts(fix_split_ts)}** (rows before it are `pre_fix`, rows on/after it are `post_fix`).",
+        "",
+        table(summary["by_fix_cohort"]),
         "",
         "## By strategy",
         "",
@@ -486,11 +504,26 @@ def main() -> int:
     parser.add_argument("--range-threshold", type=float, default=DEFAULT_RANGE_THRESHOLD)
     parser.add_argument("--workers", type=int, default=4, help="bounded Gate.io fetch concurrency")
     parser.add_argument("--strategy", action="append", dest="strategies")
+    parser.add_argument(
+        "--include-non-shadow",
+        action="store_true",
+        help="also include non-shadow oversold_24h rows (for the live-channel audit)",
+    )
+    parser.add_argument(
+        "--fix-split-ts",
+        type=int,
+        default=1787422699,
+        help="Unix timestamp of the Task #112 price-basis fix publication",
+    )
     args = parser.parse_args()
 
-    signals = load_signals(args.db, set(args.strategies) if args.strategies else None)
+    signals = load_signals(
+        args.db,
+        set(args.strategies) if args.strategies else None,
+        include_non_shadow=args.include_non_shadow,
+    )
     if not signals:
-        print("No eligible shadow signals found.", file=sys.stderr)
+        print("No eligible signals found.", file=sys.stderr)
         return 1
     now = int(time.time())
     max_end = min(now, max(int(row["ts_open"]) for row in signals) + args.window_hours * 3600)
@@ -505,7 +538,10 @@ def main() -> int:
     candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
     hourly_by_symbol: dict[str, list[dict[str, Any]]] = {}
     failures: dict[str, str] = {}
-    need_hourly = any(signal["alert_type"] == "overheated_24h" for signal in signals)
+    need_hourly = any(
+        signal["alert_type"] in ("overheated_24h", "oversold_24h")
+        for signal in signals
+    )
 
     def fetch_one(
         symbol: str,
@@ -571,6 +607,11 @@ def main() -> int:
             f"at_or_above_{args.range_threshold:g}%"
         )
         output = dict(signal)
+        output["fix_cohort"] = (
+            "post_fix"
+            if args.fix_split_ts is not None and ts_open >= args.fix_split_ts
+            else "pre_fix"
+        )
         output.update({
             "ts_open_utc": fmt_ts(ts_open),
             "exit_ts": exit_ts,
@@ -613,8 +654,20 @@ def main() -> int:
         "rsi_engine_snapshot": sum(row["rsi_source"] == "engine_snapshot" for row in rows),
         "rsi_reconstructed_legacy": sum(row["rsi_source"] == "reconstructed" for row in rows),
         "trend_delay_missing": sum(row["trend_delay_hours"] is None for row in rows),
+        "shadow_rows": sum(row["is_shadow"] == 1 for row in rows),
+        "non_shadow_rows": sum(row["is_shadow"] == 0 for row in rows),
+        "fix_split_ts": args.fix_split_ts,
+        "fix_split_utc": fmt_ts(args.fix_split_ts),
     }
-    write_report(rows, args.out, args.window_hours, args.range_threshold, coverage)
+    strategy_name = (
+        next(iter(args.strategies))
+        if args.strategies and len(args.strategies) == 1
+        else "selected strategies"
+    )
+    write_report(
+        rows, args.out, args.window_hours, args.range_threshold, coverage,
+        strategy_name, args.fix_split_ts,
+    )
     return 0
 
 
