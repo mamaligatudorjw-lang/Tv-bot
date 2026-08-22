@@ -94,6 +94,7 @@ def load_signals(
     db_path: Path,
     strategies: set[str] | None,
     include_non_shadow: bool = False,
+    non_shadow_only: bool = False,
 ) -> list[dict[str, Any]]:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -102,11 +103,19 @@ def load_signals(
                status, ts_close, exit_price, alert_type, shadow_reason, rsi_at_signal,
                signal_price, is_shadow
         FROM demo_positions
-        WHERE (is_shadow=1 OR (is_shadow=0 AND alert_type='oversold_24h' AND ?=1))
+        WHERE (
+            (?=1 AND is_shadow=0 AND alert_type='oversold_24h')
+            OR
+            (?=0 AND (is_shadow=1 OR (is_shadow=0 AND alert_type='oversold_24h' AND ?=1)))
+        )
           AND direction IN ('LONG', 'SHORT')
           AND entry_price > 0 AND sl_price > 0 AND tp_price > 0
     """
-    args: list[Any] = [1 if include_non_shadow else 0]
+    args: list[Any] = [
+        1 if non_shadow_only else 0,
+        1 if non_shadow_only else 0,
+        1 if include_non_shadow else 0,
+    ]
     if strategies:
         placeholders = ",".join("?" for _ in strategies)
         query += f" AND alert_type IN ({placeholders})"
@@ -212,6 +221,9 @@ def hourly_features(
         "rsi_bucket": (
             "missing" if rsi is None else "rsi_ge_80" if rsi >= 80 else "rsi_lt_80"
         ),
+        "rsi_oversold_bucket": (
+            "missing" if rsi is None else "rsi_le_30" if rsi <= 30 else "rsi_gt_30"
+        ),
         "up_count_12": up_count,
         "trend_streak_candles": streak,
         "trend_start_ts": trend_start_ts,
@@ -231,6 +243,7 @@ def apply_recorded_rsi(
     rsi = float(recorded_rsi)
     features["rsi_1h"] = rsi
     features["rsi_bucket"] = "rsi_ge_80" if rsi >= 80 else "rsi_lt_80"
+    features["rsi_oversold_bucket"] = "rsi_le_30" if rsi <= 30 else "rsi_gt_30"
     features["rsi_source"] = "engine_snapshot"
     return features
 
@@ -357,6 +370,7 @@ def write_report(
         "opposite_ts", "opposite_alert_type", "range_24h_pct", "range_bucket",
         "status_existing", "ts_close_existing", "exit_price_existing",
         "rsi_1h", "rsi_bucket", "up_count_12", "trend_streak_candles",
+        "rsi_oversold_bucket",
         "trend_start_ts", "trend_delay_hours", "trend_delay_bucket", "rsi_source",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -373,8 +387,9 @@ def write_report(
     summary = {
         "config": {
             "strategy": strategy_name,
-            "strategy_24h_threshold_pct": 15.0,
-            "strategy_rsi_min": 70.0,
+            "strategy_24h_threshold_pct": -10.0 if strategy_name == "oversold_24h" else 15.0,
+            "strategy_rsi_min": None if strategy_name == "oversold_24h" else 70.0,
+            "strategy_rsi_max": 30.0 if strategy_name == "oversold_24h" else None,
             "strategy_duration_window_hours": TREND_WINDOW_H,
             "strategy_duration_min_up": 0,
             "window_hours": window_h,
@@ -390,7 +405,10 @@ def write_report(
         "coverage": coverage,
         "overall": metrics(eligible),
         "by_strategy": split_report(eligible, "alert_type"),
-        "by_fix_cohort": split_report(eligible, "fix_cohort"),
+        "by_fix_cohort": {
+            cohort: metrics([row for row in eligible if row["fix_cohort"] == cohort])
+            for cohort in ("pre_fix", "post_fix")
+        },
         "short_only": {
             "overall": metrics(short),
             "opposite_within_60m": split_report(short, "opposite_group"),
@@ -401,6 +419,10 @@ def write_report(
             "rsi_1h": split_report(
                 [r for r in eligible if r["direction"] == "LONG" and r["rsi_bucket"] != "missing"],
                 "rsi_bucket",
+            ),
+            "rsi_oversold": split_report(
+                [r for r in eligible if r["direction"] == "LONG" and r["rsi_oversold_bucket"] != "missing"],
+                "rsi_oversold_bucket",
             ),
             "trend_delay": split_report(
                 [r for r in eligible if r["direction"] == "LONG"],
@@ -430,7 +452,7 @@ def write_report(
         return "\n".join(lines)
 
     md = [
-        "# Shadow outcome report",
+        "# Outcome report",
         "",
         f"Fixed window: **{window_h}h** after entry; source candles: **Gate.io futures 15m**.",
         f"Strategy: **{strategy_name}**. Signals with valid entry/SL/TP are included according to the selected shadow/live scope.",
@@ -453,6 +475,8 @@ def write_report(
         "## Before vs after the price-basis fix",
         "",
         f"Split timestamp: **{fmt_ts(fix_split_ts)}** (rows before it are `pre_fix`, rows on/after it are `post_fix`).",
+        f"All loaded rows by cohort: **{coverage.get('reported_by_fix_cohort', {})}**; "
+        f"eligible rows by cohort: **{coverage.get('eligible_by_fix_cohort', {})}**.",
         "",
         table(summary["by_fix_cohort"]),
         "",
@@ -471,6 +495,10 @@ def write_report(
         "## LONG: RSI at signal time",
         "",
         table(summary["long_only"]["rsi_1h"]),
+        "",
+        "## LONG: oversold RSI cohort",
+        "",
+        table(summary["long_only"]["rsi_oversold"]),
         "",
         "## LONG: delay from detected consecutive hourly uptrend",
         "",
@@ -510,10 +538,15 @@ def main() -> int:
         help="also include non-shadow oversold_24h rows (for the live-channel audit)",
     )
     parser.add_argument(
+        "--non-shadow-only",
+        action="store_true",
+        help="include only non-shadow oversold_24h rows",
+    )
+    parser.add_argument(
         "--fix-split-ts",
         type=int,
-        default=1787422699,
-        help="Unix timestamp of the Task #112 price-basis fix publication",
+        default=1787422679,
+        help="Unix timestamp of the first bot restart with the Task #112 fix",
     )
     args = parser.parse_args()
 
@@ -521,6 +554,7 @@ def main() -> int:
         args.db,
         set(args.strategies) if args.strategies else None,
         include_non_shadow=args.include_non_shadow,
+        non_shadow_only=args.non_shadow_only,
     )
     if not signals:
         print("No eligible signals found.", file=sys.stderr)
@@ -658,6 +692,18 @@ def main() -> int:
         "non_shadow_rows": sum(row["is_shadow"] == 0 for row in rows),
         "fix_split_ts": args.fix_split_ts,
         "fix_split_utc": fmt_ts(args.fix_split_ts),
+        "reported_by_fix_cohort": {
+            cohort: sum(row["fix_cohort"] == cohort for row in rows)
+            for cohort in ("pre_fix", "post_fix")
+        },
+        "eligible_by_fix_cohort": {
+            cohort: sum(
+                row["fix_cohort"] == cohort
+                and row["outcome"] not in ("window_not_elapsed", "missing_price")
+                for row in rows
+            )
+            for cohort in ("pre_fix", "post_fix")
+        },
     }
     strategy_name = (
         next(iter(args.strategies))
