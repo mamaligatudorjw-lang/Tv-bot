@@ -4,3 +4,4 @@
 - [Streak signal guards](streak-signal-guards.md) — streak LONG/SHORT skips when gain >15% or live price already reversed vs last close.
 - [UNIFIED_START_TS and parallel-bot history](unified-start-ts.md) — two bots ran in parallel until first clean Publish; all stats before that timestamp are tainted.
 - [Gate.io candle analysis](gateio-candle-analysis.md) — historical requests need chunking without limit and bounded concurrency to avoid false zero-coverage reports.
+- [Shadow cooldown persistence](shadow-cooldown-persistence.md) — per-symbol shadow cooldowns must restore after restart or Telegram signals can duplicate.

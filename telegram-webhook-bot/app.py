@@ -15181,6 +15181,12 @@ def _restore_cooldowns_from_db() -> None:
                 "  AND ts_open > ? GROUP BY symbol",
                 (now_ts - EMA_CROSS_COOLDOWN,),
             ).fetchall()
+            oe_rows = conn.execute(
+                "SELECT symbol, MAX(ts_open) FROM demo_positions "
+                "WHERE alert_type='overheated_early' AND is_shadow=1 "
+                "  AND ts_open > ? GROUP BY symbol",
+                (now_ts - OVERHEATED_EARLY_COOLDOWN,),
+            ).fetchall()
             hir_rows = conn.execute(
                 "SELECT symbol, MAX(ts_open) FROM demo_positions "
                 "WHERE alert_type='high_rejection_short' AND is_shadow=1 "
@@ -15206,6 +15212,8 @@ def _restore_cooldowns_from_db() -> None:
                 state["last_bb_squeeze_alerted"][sym] = ts
             for sym, ts in emc_rows:
                 state["last_ema_cross_alerted"][sym] = ts
+            for sym, ts in oe_rows:
+                state["last_overheated_early_alerted"][sym] = ts
             for sym, ts in hir_rows:
                 state["last_high_rejection_alerted"][sym] = ts
             for sym, ts in rbk_rows:
