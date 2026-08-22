@@ -1535,6 +1535,38 @@ def _compute_breakdown_sl_tp(
     return _compute_demo_sl_tp("SHORT", price, atr, max_sl_pct=cap)
 
 
+def _validate_demo_price_basis(
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp_price: float,
+    alert_type: str | None = None,
+) -> None:
+    """Reject a position whose barriers are not based on its entry price.
+
+    Signal/detection prices are metadata and must never be passed as entry_price.
+    Keeping this check at the persistence boundary protects every one of the
+    demo_positions producers, including future strategies.
+    """
+    values = (entry_price, sl_price, tp_price)
+    if not all(math.isfinite(float(value)) and float(value) > 0 for value in values):
+        raise ValueError(
+            f"invalid demo price basis for {alert_type or '?'}: "
+            f"entry={entry_price!r} sl={sl_price!r} tp={tp_price!r}"
+        )
+    if direction == "LONG":
+        valid = sl_price < entry_price < tp_price
+    elif direction == "SHORT":
+        valid = tp_price < entry_price < sl_price
+    else:
+        raise ValueError(f"invalid demo direction: {direction!r}")
+    if not valid:
+        raise ValueError(
+            f"invalid demo barrier ordering for {alert_type or '?'}: "
+            f"{direction} entry={entry_price:.12g} sl={sl_price:.12g} tp={tp_price:.12g}"
+        )
+
+
 def _demo_open_position(
     symbol: str,
     direction: str,
@@ -1549,10 +1581,20 @@ def _demo_open_position(
     notify_body: str | None = None,
     repeat_num: int | None = None,
     rsi_at_signal: float | None = None,
+    signal_price: float | None = None,
 ) -> None:
     """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
     a real position as TOP for the /demo three-way comparison.
     When SHADOW_ONLY_MODE=True, shadow positions are sent to Telegram."""
+    _validate_demo_price_basis(
+        direction, entry_price, sl_price, tp_price, alert_type
+    )
+    if signal_price is None:
+        signal_price = entry_price
+    if not math.isfinite(float(signal_price)) or signal_price <= 0:
+        raise ValueError(
+            f"invalid demo signal price for {alert_type or '?'}: {signal_price!r}"
+        )
     is_top = (not is_shadow) and score is not None and score >= TOP_SIGNAL_SCORE
     _pid = os.getpid()
     _ts_recv = int(time.time())
@@ -1590,12 +1632,12 @@ def _demo_open_position(
                 "INSERT OR IGNORE INTO demo_positions "
                 "(ts_open, symbol, direction, entry_price, sl_price, tp_price, "
                 " size_usd, status, is_shadow, shadow_reason, alert_type, is_top, repeat_num, "
-                " rsi_at_signal) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)",
+                " rsi_at_signal, signal_price) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?)",
                 (_ts_recv, symbol, direction, entry_price,
                  sl_price, tp_price, size_usd,
                  1 if is_shadow else 0, shadow_reason, alert_type,
-                 1 if is_top else 0, repeat_num, rsi_at_signal),
+                 1 if is_top else 0, repeat_num, rsi_at_signal, signal_price),
             )
             _new_demo_id = cur.lastrowid  # capture before lock releases
             conn.commit()
@@ -4611,7 +4653,8 @@ def _get_db() -> sqlite3.Connection:
                 is_top        INTEGER NOT NULL DEFAULT 0,
                 wick_close    INTEGER NOT NULL DEFAULT 0,
                 repeat_num    INTEGER DEFAULT NULL,
-                rsi_at_signal REAL
+                rsi_at_signal REAL,
+                signal_price  REAL
             )
         """)
         # Migrate: wick_close for existing installs
@@ -4630,6 +4673,19 @@ def _get_db() -> sqlite3.Connection:
         except sqlite3.OperationalError as _mig_rsi:
             if "duplicate column" not in str(_mig_rsi).lower():
                 raise
+        # Migrate: retain the original detection/signal price separately from
+        # the executable entry price used for TP/SL and outcome analysis.
+        try:
+            _db_conn.execute(
+                "ALTER TABLE demo_positions ADD COLUMN signal_price REAL"
+            )
+        except sqlite3.OperationalError as _mig_signal:
+            if "duplicate column" not in str(_mig_signal).lower():
+                raise
+        _db_conn.execute(
+            "UPDATE demo_positions SET signal_price=entry_price "
+            "WHERE signal_price IS NULL"
+        )
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_demo_status "
             "ON demo_positions(status, is_shadow)"
@@ -8978,6 +9034,7 @@ def check_breakdown_short(
 
         ema_pct = (ema - price) / ema * 100.0   # how far below EMA (positive = below)
 
+        entry_price = price
         score = compute_signal_score(
             "breakdown_short", "sell",
             rsi=rsi, above_ema=False, pct24=pct24, btc_pct24=btc_pct24,
@@ -8998,7 +9055,10 @@ def check_breakdown_short(
             headline = "📉 <b>ПРОБОЙ ВНИЗ — шорт продолжается</b>"
             subtitle = "Монета в нисходящем тренде, импульс не исчерпан"
 
-        sl_tp = _format_sl_tp("sell", price, atr, score=score)
+        # No separate delayed entry exists on this path; name the execution
+        # proxy explicitly and use it consistently for alert and position data.
+        entry_price = price
+        sl_tp = _format_sl_tp("sell", entry_price, atr, score=score)
         body = (
             f"{headline}\n"
             f"{subtitle}\n"
@@ -9007,12 +9067,12 @@ def check_breakdown_short(
             f"📉 24ч: <b>{pct24:.1f}%</b>\n"
             f"{rsi_line}\n"
             f"📍 Ниже EMA-200: <b>{ema_pct:.1f}%</b>\n"
-            f"💰 Цена: <b>${price:,.6g}</b>\n"
+            f"💰 Цена: <b>${entry_price:,.6g}</b>\n"
             f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
             + (f"\n{sl_tp}" if sl_tp else "")
         )
         delivered, _aid = send_alert_with_log(
-            symbol, "breakdown_short", "SHORT", price, body, score,
+            symbol, "breakdown_short", "SHORT", entry_price, body, score,
             rsi=rsi, pct24=pct24,
         )
         if delivered:
@@ -9025,10 +9085,10 @@ def check_breakdown_short(
             sent += 1
             # Открываем теневую позицию для WR-трекинга в /demo.
             # notify_body не передаём — Telegram-уведомление уже отправлено выше через send_alert_with_log.
-            _dsl_bd, _dtp_bd = _compute_breakdown_sl_tp(price, atr)
+            _dsl_bd, _dtp_bd = _compute_breakdown_sl_tp(entry_price, atr)
             if _dsl_bd and _dtp_bd:
                 _demo_open_position(
-                    symbol, "SHORT", price, _dsl_bd, _dtp_bd,
+                    symbol, "SHORT", entry_price, _dsl_bd, _dtp_bd,
                     is_shadow=True,
                     shadow_reason="breakdown_shadow_mode",
                     alert_type="breakdown_short",
@@ -9131,7 +9191,7 @@ def check_momentum_long(
             )
             continue
 
-        sl_tp = _format_sl_tp("sell", price, atr, score=score)
+        sl_tp = _format_sl_tp("sell", entry_price, atr, score=score)
         body = (
             f"🧪 <b>[ТЕСТ] ПАМП ИССЯКАЕТ — шорт на развороте</b>\n"
             f"Монета выросла +{pct24:.1f}% за 24ч, но начинает откат\n"
@@ -9140,7 +9200,7 @@ def check_momentum_long(
             f"📉 24ч: <b>+{pct24:.1f}%</b> → откат подтверждён\n"
             f"📊 RSI: <b>{rsi:.1f}</b> — fade-зона, импульс гаснет\n"
             f"📍 Выше EMA-200: <b>+{ema_pct:.1f}%</b> (перерасширение)\n"
-            f"💰 Цена: <b>${price:,.6g}</b>\n"
+            f"💰 Цена: <b>${entry_price:,.6g}</b>\n"
             f"🎯 Сила: <b>{score}/100</b> ({_strength_label(score)})"
             + (f"\n{sl_tp}" if sl_tp else "")
         )
@@ -9524,11 +9584,15 @@ def check_pump_24h_fade(
             except Exception as _pfp_dbc:
                 logger.debug("pump_fade_pending DB write failed for %s: %s", symbol, _pfp_dbc)
 
+        # This strategy has no delayed execution step: the live ticker is the
+        # entry proxy. Keep the name explicit so detection metadata cannot be
+        # confused with the price used for TP/SL.
+        entry_price = price
         score = compute_signal_score(
             "volume_surge_short", "sell",   # conceptually identical: fade overbought
             rsi=rsi, pct24=pct24, btc_pct24=btc_pct24,
         )
-        sl_tp = _format_sl_tp("sell", price, atr, score=score)
+        sl_tp = _format_sl_tp("sell", entry_price, atr, score=score)
         is_shadow = PUMP_FADE_SHADOW_ONLY
 
         _repeat_line = ""
@@ -9543,7 +9607,7 @@ def check_pump_24h_fade(
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📈 24ч рост: <b>+{pct24:.1f}%</b> — ожидаем откат\n"
             f"🧊 RSI: <b>{rsi:.1f}</b> — перегрет\n"
-            f"💰 Цена: <b>${price:,.6g}</b>\n"
+            f"💰 Цена: <b>${entry_price:,.6g}</b>\n"
             f"🎯 Сила сигнала: <b>{score}/100</b> ({_strength_label(score)})"
             + (f"\n{sl_tp}" if sl_tp else "")
             + _repeat_line
@@ -9555,18 +9619,19 @@ def check_pump_24h_fade(
                 logger.debug(
                     "pump_24h_fade %s skipped: score=%d < %d", symbol, score, PUMP_FADE_MIN_SCORE
                 )
-                _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(price, atr)
+                _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(entry_price, atr)
                 if _dsl_pf and _dtp_pf:
                     _demo_open_position(
-                        symbol, "SHORT", price, _dsl_pf, _dtp_pf,
+                        symbol, "SHORT", entry_price, _dsl_pf, _dtp_pf,
                         is_shadow=True,
                         shadow_reason=f"low_score: {score}<{PUMP_FADE_MIN_SCORE}",
                         alert_type="pump_24h_fade",
                         repeat_num=_repeat_num,
+                        signal_price=price,
                     )
                 continue
             delivered, _ = send_alert_with_log(
-                symbol, "pump_24h_fade", "SHORT", price, body, score,
+                symbol, "pump_24h_fade", "SHORT", entry_price, body, score,
             )
             if not delivered:
                 continue
@@ -9582,19 +9647,20 @@ def check_pump_24h_fade(
             with state_lock:
                 state["last_pump_alerted"][symbol] = now
 
-        _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(price, atr)
+        _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(entry_price, atr)
         if _dsl_pf and _dtp_pf:
             _demo_open_position(
-                symbol, "SHORT", price, _dsl_pf, _dtp_pf,
+                symbol, "SHORT", entry_price, _dsl_pf, _dtp_pf,
                 is_shadow=is_shadow,
                 shadow_reason=("pump_fade_shadow_mode" if is_shadow else None),
                 alert_type="pump_24h_fade",
                 repeat_num=_repeat_num,
                 score=score,
+                signal_price=price,
                 notify_body=(
                     f"📉 Pump Fade <b>SHORT 📉</b> <code>{symbol}</code>\n"
                     f"Стратегия: <code>pump_24h_fade</code>\n"
-                    f"Цена: <b>${price:,.6g}</b>  |  +{pct24:.1f}% за 24ч  |  RSI {rsi:.0f}\n"
+                    f"Цена: <b>${entry_price:,.6g}</b>  |  +{pct24:.1f}% за 24ч  |  RSI {rsi:.0f}\n"
                     f"🟢 TP: <b>${_dtp_pf:,.6g}</b>  │  🔴 SL: <b>${_dsl_pf:,.6g}</b>"
                 ) if is_shadow else None,
             )
@@ -9801,6 +9867,7 @@ def check_pump_fade_confirmed() -> int:
                 symbol, "SHORT", entry_price, _dsl_pfc, _dtp_pfc,
                 is_shadow=True,
                 alert_type="pump_fade_confirmed",
+                signal_price=pump_price,
                 notify_body=_pfc_body,
             )
 
@@ -10066,6 +10133,7 @@ def check_cont_confirmed() -> int:
                 symbol, direction, entry_price, _conf_sl, _conf_tp,
                 is_shadow=True,
                 alert_type=conf_atype,
+                signal_price=signal_price,
                 notify_body=_conf_body,
             )
 
