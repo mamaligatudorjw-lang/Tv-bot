@@ -342,7 +342,7 @@ WEEKLY_MONTHLY_REFRESH_INTERVAL = 3600  # refresh 7d/30d highs hourly
 
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70.0
-OVERHEATED_24H_RSI_MIN = 80.0
+OVERHEATED_24H_RSI_CAP = 80.0
 RSI_OVERSOLD = 30.0
 VOLUME_SPIKE_MULTIPLIER = 3.0
 MAX_WORKERS = 20
@@ -8268,12 +8268,13 @@ def check_overheated_oversold(
             _oh_pre_fails = []
             if pct24 < oh_threshold:
                 _oh_pre_fails.append("pct24")
-            if rsi < OVERHEATED_24H_RSI_MIN:
+            if rsi < RSI_OVERBOUGHT or rsi >= OVERHEATED_24H_RSI_CAP:
                 _oh_pre_fails.append("rsi")
             logger.info(
                 "overheated_24h CHECK %s: pct24=%.1f%% threshold=%.1f%% "
-                "rsi=%.1f min=%.0f price=%.6g pre_fail=%s",
-                symbol, pct24, oh_threshold, rsi, OVERHEATED_24H_RSI_MIN, price,
+                "rsi=%.1f range=[%.0f,%.0f) price=%.6g pre_fail=%s",
+                symbol, pct24, oh_threshold, rsi,
+                RSI_OVERBOUGHT, OVERHEATED_24H_RSI_CAP, price,
                 ",".join(_oh_pre_fails) if _oh_pre_fails else "none",
             )
         with state_lock:
@@ -8288,7 +8289,10 @@ def check_overheated_oversold(
                 if _fresh_atr and _fresh_atr > 0:
                     atr = _fresh_atr
 
-        if pct24 >= oh_threshold and rsi >= OVERHEATED_24H_RSI_MIN:
+        if (
+            pct24 >= oh_threshold
+            and RSI_OVERBOUGHT <= rsi < OVERHEATED_24H_RSI_CAP
+        ):
             if not OVERHEATED_ENABLED:
                 logger.info("overheated_24h SKIP %s: disabled", symbol)
                 continue  # OVERHEATED_ENABLED=False: overheated_24h заблокирован
