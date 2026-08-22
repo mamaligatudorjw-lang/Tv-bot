@@ -5485,9 +5485,9 @@ BB_SQUEEZE_COOLDOWN     = 28800   # 8h per symbol
 # Switched to 4h: gap p75=0.117%, threshold 0.15% covers best-performing tier.
 # Backtest (10 pairs × 500 4h candles, thresh≥0.15%): WR=36.8%, ΣPnL=+11.4%, avg=+0.30%.
 EMA_CROSS_SHADOW_ONLY   = True    # set False to go live after validation
-# Keep collecting EMA Cross 4h shadow results, but hide its Telegram messages
-# until the strategy is re-evaluated.
-EMA_CROSS_TELEGRAM_NOTIFICATIONS = False
+# Keep collecting EMA Cross 4h shadow results and send them to Telegram;
+# the strategy remains shadow-only and does not open real positions.
+EMA_CROSS_TELEGRAM_NOTIFICATIONS = True
 EMA_CROSS_FAST          = 9       # fast EMA period
 EMA_CROSS_SLOW          = 21      # slow EMA period
 EMA_CROSS_GAP_PCT       = 0.15    # min |EMA9-EMA21|/price at crossover (4h-realistic %)
