@@ -8402,13 +8402,14 @@ def check_overheated_oversold(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
     deadline: float | None = None,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     """Standalone "overheated" (24h >= +20% AND RSI >= 70) and "oversold"
     (24h <= -20% AND RSI <= 30) alerts. Bypass confluence.
-    Returns: sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh
+    Returns: sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh,
+    bear_long_blocked
     """
     if not tickers:
-        return 0, 0, 0, 0
+        return 0, 0, 0, 0, 0
     sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked = 0, 0, 0, 0, 0
     now = time.time()
 
@@ -11111,6 +11112,15 @@ def run_checks():
     cycle_id = f"{os.getpid()}-{int(start * 1000)}"
     _set_cycle_context(cycle_id=cycle_id, cycle_started_ts=start)
     _deadline = start + _CYCLE_HARD_LIMIT
+
+    def _abort_if_deadline(stage: str) -> bool:
+        if time.time() > _deadline:
+            logger.warning(
+                "Cycle deadline exceeded after %s — skipping remaining optional strategies",
+                stage,
+            )
+            return True
+        return False
     summary = {
         "new_listings": 0, "high_breaks": 0,
         "rsi_overbought": 0, "rsi_oversold": 0,
@@ -11256,6 +11266,8 @@ def run_checks():
                 )
                 summary["momentum_alerts"] = mom_sent
                 summary["momentum_ema_blocked"] = mom_ema_blocked
+                if _abort_if_deadline("momentum"):
+                    return
 
                 # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
                 oh_n, os_n, oh_ema_blocked, oh_reversal_blocked, oh_bear_blocked = _run_timed_strategy(
@@ -11280,25 +11292,35 @@ def run_checks():
                 summary["vol_surge_alerts"] = _run_timed_strategy(
                     "volume_surge_crsi", check_volume_surge_crsi, tickers
                 ) if VOL_SURGE_ENABLED else 0
+                if _abort_if_deadline("volume_surge_crsi"):
+                    return
                 # pump_24h_fade: runs always (shadow=True collects data; shadow=False sends alerts)
                 summary["pump_fade_alerts"] = _run_timed_strategy(
                     "pump_24h_fade", check_pump_24h_fade, tickers, rsi_map
                 )
+                if _abort_if_deadline("pump_24h_fade"):
+                    return
 
                 # 6d. TEST: Breakdown continuation SHORT (drop ≥10% + below EMA + RSI 30-58)
                 summary["breakdown_alerts"] = _run_timed_strategy(
                     "breakdown_short", check_breakdown_short, tickers, rsi_map
                 ) if BREAKDOWN_ENABLED else 0
+                if _abort_if_deadline("breakdown_short"):
+                    return
 
                 # 6e. TEST: Momentum continuation LONG (rise ≥10% + above EMA + RSI 42-68)
                 summary["momentum_long_alerts"] = _run_timed_strategy(
                     "momentum_long", check_momentum_long, tickers, rsi_map
                 ) if MOMENTUM_LONG_ENABLED else 0
+                if _abort_if_deadline("momentum_long"):
+                    return
 
                 # 6f. TEST: New listing pump→dump SHORT (≥+20% from listing + RSI≥65)
                 summary["new_listing_short_alerts"] = _run_timed_strategy(
                     "new_listing_pumps", check_new_listing_pumps, tickers, rsi_map
                 ) if NEW_LISTING_ENABLED else 0
+                if _abort_if_deadline("new_listing_pumps"):
+                    return
 
                 # 6g. listing_dump_long disabled — backtest 30d: 0 TP of 4 signals, 50% SL
                 summary["listing_dump_long_alerts"] = 0
@@ -11307,11 +11329,15 @@ def run_checks():
                 summary["listing_peak_short_alerts"] = _run_timed_strategy(
                     "listing_peak_short", check_listing_peak_short, tickers, rsi_map
                 ) if LISTING_PEAK_ENABLED else 0
+                if _abort_if_deadline("listing_peak_short"):
+                    return
 
                 # 6i. Intraday hourly streak — 6+ consecutive green/red 1h candles
                 summary["streak_1h_alerts"] = _run_timed_strategy(
                     "intraday_streak", check_intraday_streak, tickers, rsi_map
                 ) if STREAK_1H_ENABLED else 0
+                if _abort_if_deadline("intraday_streak"):
+                    return
 
                 # 6i-shadow. VWAP reversion — mean-reversion counterpart to streak_1h
                 # (shadow-only, controlled by VWAP_REVERSION_SHADOW_ONLY)
@@ -11323,6 +11349,8 @@ def run_checks():
                     except Exception as _e:
                         logger.error("check_vwap_reversion failed: %s", _e)
                         summary["errors"].append(f"vwap_rev: {_e}")
+                    if _abort_if_deadline("vwap_reversion"):
+                        return
 
                 # 6i-shadow-2. Bollinger Squeeze — squeeze → 1h breakout (shadow)
                 try:
@@ -11332,6 +11360,8 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_bollinger_squeeze failed: %s", _e)
                     summary["errors"].append(f"bb_squeeze: {_e}")
+                if _abort_if_deadline("bollinger_squeeze"):
+                    return
 
                 # 6i-shadow-3. EMA 9/21 crossover with gap threshold on 4h (shadow)
                 try:
@@ -11341,6 +11371,8 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_ema_crossover failed: %s", _e)
                     summary["errors"].append(f"ema_cross: {_e}")
+                if _abort_if_deadline("ema_crossover"):
+                    return
 
                 # 6i-shadow-4. High rejection SHORT — intraday pump + reversal from 24h high (shadow)
                 try:
@@ -11350,6 +11382,8 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_high_rejection_short failed: %s", _e)
                     summary["errors"].append(f"high_rejection: {_e}")
+                if _abort_if_deadline("high_rejection_short"):
+                    return
 
                 # 6i-shadow-4b. Low rejection LONG — intraday drop + bounce from 24h low (shadow)
                 try:
@@ -11359,6 +11393,8 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_low_rejection_long failed: %s", _e)
                     summary["errors"].append(f"low_rejection: {_e}")
+                if _abort_if_deadline("low_rejection_long"):
+                    return
 
                 # 6i-shadow-5. Range breakout LONG — tight base after ≥25% correction, 1h close above (shadow)
                 try:
@@ -11368,14 +11404,20 @@ def run_checks():
                 except Exception as _e:
                     logger.error("check_range_breakout_long failed: %s", _e)
                     summary["errors"].append(f"range_breakout: {_e}")
+                if _abort_if_deadline("range_breakout_long"):
+                    return
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
                 summary["whale_lsr_shift_alerts"] = _run_timed_strategy(
                     "whale_lsr_shift", check_whale_lsr_shift, liquid_pairs
                 ) if WHALE_LSR_ENABLED else 0
+                if _abort_if_deadline("whale_lsr_shift"):
+                    return
 
                 # 6k. Personal position tracker — check user's own open positions
                 check_user_position_reversals()
+                if _abort_if_deadline("user_position_reversals"):
+                    return
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
