@@ -5,3 +5,4 @@
 - [UNIFIED_START_TS and parallel-bot history](unified-start-ts.md) — two bots ran in parallel until first clean Publish; all stats before that timestamp are tainted.
 - [Gate.io candle analysis](gateio-candle-analysis.md) — historical requests need chunking without limit and bounded concurrency to avoid false zero-coverage reports.
 - [Shadow cooldown persistence](shadow-cooldown-persistence.md) — per-symbol shadow cooldowns must restore after restart or Telegram signals can duplicate.
+- [Polling cycle log parsing](polling-cycle-log-parsing.md) — segment the append-only log by scheduler sessions before pairing cycle start and terminal lines.
