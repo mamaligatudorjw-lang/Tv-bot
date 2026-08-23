@@ -8401,6 +8401,7 @@ def check_momentum(
 def check_overheated_oversold(
     tickers: dict[str, dict] | None,
     rsi_map: dict[str, float],
+    deadline: float | None = None,
 ) -> tuple[int, int, int, int]:
     """Standalone "overheated" (24h >= +20% AND RSI >= 70) and "oversold"
     (24h <= -20% AND RSI <= 30) alerts. Bypass confluence.
@@ -8434,6 +8435,17 @@ def check_overheated_oversold(
     # ────────────────────────────────────────────────────────────────────────
 
     for symbol, t in tickers.items():
+        # Network-heavy work below is intentionally sequential because the
+        # strategy shares several rate-limited helpers.  Do not let one slow
+        # polling cycle process stale symbols indefinitely: finish the current
+        # symbol if necessary, then skip the remainder.
+        if deadline is not None and time.time() >= deadline:
+            logger.warning(
+                "Polling deadline reached in overheated_oversold; "
+                "skipping remaining symbols after %s",
+                symbol,
+            )
+            break
         rsi = rsi_map.get(symbol)
         if rsi is None:
             continue
@@ -11247,7 +11259,7 @@ def run_checks():
 
                 # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
                 oh_n, os_n, oh_ema_blocked, oh_reversal_blocked, oh_bear_blocked = _run_timed_strategy(
-                    "overheated_oversold", check_overheated_oversold, tickers, rsi_map
+                    "overheated_oversold", check_overheated_oversold, tickers, rsi_map, _deadline
                 )
                 summary["overheated_reversal_blocked"] = oh_reversal_blocked
                 summary["overheated_alerts"] = oh_n
@@ -11256,6 +11268,12 @@ def run_checks():
                 summary["bear_downtrend_long_blocked"] = (
                     summary.get("bear_downtrend_long_blocked", 0) + oh_bear_blocked
                 )
+                if time.time() > _deadline:
+                    logger.warning(
+                        "Cycle deadline exceeded after overheated_oversold — "
+                        "skipping remaining optional strategies"
+                    )
+                    return
 
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
                 # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
