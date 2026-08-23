@@ -1,0 +1,211 @@
+{
+  "config": {
+    "strategy": "selected strategies",
+    "strategy_24h_threshold_pct": 15.0,
+    "strategy_rsi_min": 70.0,
+    "strategy_rsi_max": null,
+    "strategy_duration_window_hours": 12,
+    "strategy_duration_min_up": 0,
+    "window_hours": 24,
+    "candle_interval": "15m",
+    "opposite_window_minutes": 60,
+    "range_threshold_pct": 50.0,
+    "min_group_n_preliminary": 20,
+    "r_definition": "directional pnl divided by absolute entry-to-SL risk; TP=+2R target and SL=-1R where geometry is 2:1",
+    "same_candle_policy": "ambiguous, excluded from resolved win rate and avg R",
+    "fix_split_ts": 1787422679,
+    "fix_split_utc": "2026-08-22T18:17:59+00:00"
+  },
+  "coverage": {
+    "signals_loaded": 649,
+    "signals_reported": 649,
+    "signals_eligible_for_fixed_window_metrics": 620,
+    "symbols_loaded": 249,
+    "hourly_symbols_loaded": null,
+    "symbol_fetch_failures": {},
+    "candle_interval": "15m",
+    "signal_min_utc": "2026-08-13T11:21:02+00:00",
+    "signal_max_utc": "2026-08-23T18:45:16+00:00",
+    "analysis_run_utc": "2026-08-23T19:32:10.020497+00:00",
+    "window_not_elapsed": 29,
+    "missing_price": 0,
+    "range_missing": 0,
+    "rsi_missing": 649,
+    "rsi_engine_snapshot": 0,
+    "rsi_reconstructed_legacy": 649,
+    "trend_delay_missing": 649,
+    "shadow_rows": 649,
+    "non_shadow_rows": 0,
+    "fix_split_ts": 1787422679,
+    "fix_split_utc": "2026-08-22T18:17:59+00:00",
+    "reported_by_fix_cohort": {
+      "pre_fix": 596,
+      "post_fix": 53
+    },
+    "eligible_by_fix_cohort": {
+      "pre_fix": 596,
+      "post_fix": 24
+    }
+  },
+  "overall": {
+    "n": 620,
+    "tp_first": 214,
+    "sl_first": 206,
+    "resolved": 420,
+    "unresolved": 148,
+    "ambiguous": 52,
+    "missing_price": 0,
+    "win_rate_resolved_pct": 50.95,
+    "avg_r": 0.4404,
+    "preliminary": false
+  },
+  "by_strategy": {
+    "ema_cross": {
+      "n": 330,
+      "tp_first": 112,
+      "sl_first": 136,
+      "resolved": 248,
+      "unresolved": 82,
+      "ambiguous": 0,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 45.16,
+      "avg_r": 0.3452,
+      "preliminary": false
+    },
+    "ema_cross_confirmed": {
+      "n": 290,
+      "tp_first": 102,
+      "sl_first": 70,
+      "resolved": 172,
+      "unresolved": 66,
+      "ambiguous": 52,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 59.3,
+      "avg_r": 0.6528,
+      "preliminary": false
+    }
+  },
+  "by_fix_cohort": {
+    "pre_fix": {
+      "n": 596,
+      "tp_first": 212,
+      "sl_first": 187,
+      "resolved": 399,
+      "unresolved": 146,
+      "ambiguous": 51,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 53.13,
+      "avg_r": 0.4884,
+      "preliminary": false
+    },
+    "post_fix": {
+      "n": 24,
+      "tp_first": 2,
+      "sl_first": 19,
+      "resolved": 21,
+      "unresolved": 2,
+      "ambiguous": 1,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 9.52,
+      "avg_r": -0.6025,
+      "preliminary": false
+    }
+  },
+  "short_only": {
+    "overall": {
+      "n": 272,
+      "tp_first": 57,
+      "sl_first": 93,
+      "resolved": 150,
+      "unresolved": 95,
+      "ambiguous": 27,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 38.0,
+      "avg_r": 0.061,
+      "preliminary": false
+    },
+    "opposite_within_60m": {
+      "no": {
+        "n": 257,
+        "tp_first": 53,
+        "sl_first": 87,
+        "resolved": 140,
+        "unresolved": 91,
+        "ambiguous": 26,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 37.86,
+        "avg_r": 0.0609,
+        "preliminary": false
+      },
+      "yes": {
+        "n": 15,
+        "tp_first": 4,
+        "sl_first": 6,
+        "resolved": 10,
+        "unresolved": 4,
+        "ambiguous": 1,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 40.0,
+        "avg_r": 0.0623,
+        "preliminary": true
+      }
+    },
+    "range_24h": {
+      "at_or_above_50%": {
+        "n": 26,
+        "tp_first": 10,
+        "sl_first": 5,
+        "resolved": 15,
+        "unresolved": 10,
+        "ambiguous": 1,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 66.67,
+        "avg_r": 0.4154,
+        "preliminary": false
+      },
+      "below_50%": {
+        "n": 246,
+        "tp_first": 47,
+        "sl_first": 88,
+        "resolved": 135,
+        "unresolved": 85,
+        "ambiguous": 26,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 34.81,
+        "avg_r": 0.0225,
+        "preliminary": false
+      }
+    }
+  },
+  "long_only": {
+    "overall": {
+      "n": 348,
+      "tp_first": 157,
+      "sl_first": 113,
+      "resolved": 270,
+      "unresolved": 53,
+      "ambiguous": 25,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 58.15,
+      "avg_r": 0.6997,
+      "preliminary": false
+    },
+    "rsi_1h": {},
+    "rsi_oversold": {},
+    "trend_delay": {
+      "no_consecutive_trend": {
+        "n": 348,
+        "tp_first": 157,
+        "sl_first": 113,
+        "resolved": 270,
+        "unresolved": 53,
+        "ambiguous": 25,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 58.15,
+        "avg_r": 0.6997,
+        "preliminary": false
+      }
+    },
+    "sustainability_up_count_12": {}
+  }
+}
