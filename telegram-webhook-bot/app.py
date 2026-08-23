@@ -13,13 +13,64 @@ import numpy as np
 import requests
 from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Per-polling-thread context used for performance telemetry and for measuring
+# how old the shared ticker snapshot was when an alert was delivered.
+_cycle_telemetry = threading.local()
+
+
+def _cycle_context() -> dict:
+    return getattr(_cycle_telemetry, "context", {})
+
+
+def _set_cycle_context(**values) -> None:
+    current = dict(_cycle_context())
+    current.update(values)
+    _cycle_telemetry.context = current
+
+
+def _clear_cycle_context() -> None:
+    if hasattr(_cycle_telemetry, "context"):
+        del _cycle_telemetry.context
+
+
+def _log_strategy_timing(strategy: str, started: float, finished: float) -> None:
+    context = _cycle_context()
+    logger.info(
+        "polling_strategy cycle_id=%s strategy=%s entry_ts=%.3f exit_ts=%.3f elapsed=%.3fs",
+        context.get("cycle_id", "none"), strategy, started, finished,
+        finished - started,
+    )
+
+
+def _log_symbol_timing(strategy: str, symbol: str, started: float, finished: float) -> None:
+    context = _cycle_context()
+    logger.info(
+        "polling_symbol cycle_id=%s strategy=%s symbol=%s entry_ts=%.3f "
+        "exit_ts=%.3f elapsed=%.3fs",
+        context.get("cycle_id", "none"), strategy, symbol, started, finished,
+        finished - started,
+    )
+
+
+def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
+    started = time.time()
+    context = _cycle_context()
+    logger.info(
+        "polling_strategy_enter cycle_id=%s strategy=%s entry_ts=%.3f",
+        context.get("cycle_id", "none"), strategy, started,
+    )
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _log_strategy_timing(strategy, started, time.time())
 
 # Also write to a persistent file so we can debug even when terminal
 # output is not captured by the workflow log viewer.
@@ -4265,30 +4316,50 @@ def get_24h_ticker_futures(symbol: str) -> dict | None:
     return _gateio_ticker(symbol)
 
 
-def refresh_ema200_4h(symbols: list[str]) -> int:
+def refresh_ema200_4h(symbols: list[str], deadline: float | None = None) -> int:
     """Refresh EMA-200, ATR-14, and daily σ for the given symbols (single
     kline fetch per symbol). Kept under the historical name to preserve call
     sites."""
     updated = 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    timed_out = False
+    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    futures = {}
+    try:
         futures = {ex.submit(get_4h_stats, s): s for s in symbols}
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                stats = future.result()
-            except Exception:
-                stats = None
-            if not stats:
-                continue
-            with state_lock:
-                state["ema200_4h"][symbol] = stats["ema200"]
-                if stats.get("atr") is not None:
-                    state["atr_4h"][symbol] = stats["atr"]
-                if stats.get("sigma_daily") is not None:
-                    state["sigma_daily"][symbol] = stats["sigma_daily"]
-            updated += 1
-    with state_lock:
-        state["last_ema200_refresh"] = time.time()
+        try:
+            wait_timeout = max(0.0, deadline - time.time()) if deadline is not None else None
+            for future in as_completed(futures, timeout=wait_timeout):
+                symbol = futures[future]
+                try:
+                    stats = future.result()
+                except Exception:
+                    stats = None
+                if not stats:
+                    continue
+                with state_lock:
+                    state["ema200_4h"][symbol] = stats["ema200"]
+                    if stats.get("atr") is not None:
+                        state["atr_4h"][symbol] = stats["atr"]
+                    if stats.get("sigma_daily") is not None:
+                        state["sigma_daily"][symbol] = stats["sigma_daily"]
+                updated += 1
+        except FuturesTimeoutError:
+            timed_out = True
+            pending = sum(not future.done() for future in futures)
+            logger.warning(
+                "Polling deadline reached in ema200_refresh; kept %d/%d results, "
+                "cancelling %d pending futures",
+                updated, len(futures), pending,
+            )
+    finally:
+        for future in futures:
+            future.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
+    if not timed_out:
+        with state_lock:
+            state["last_ema200_refresh"] = time.time()
+    else:
+        logger.warning("EMA refresh was partial; it will be retried on the next eligible cycle")
     logger.info("Refreshed 4h stats (EMA/ATR/σ) for %d/%d symbols", updated, len(symbols))
     return updated
 
@@ -4530,6 +4601,11 @@ def _get_db() -> sqlite3.Connection:
             ("price_7d", "REAL"),
             ("factor_funding_pts", "INTEGER DEFAULT 0"),
             ("factor_lsr_pts",     "INTEGER DEFAULT 0"),
+            ("snapshot_ts", "REAL"),
+            ("snapshot_price", "REAL"),
+            ("delivery_ts", "REAL"),
+            ("snapshot_age_sec", "REAL"),
+            ("snapshot_gap_pct", "REAL"),
         ):
             try:
                 _db_conn.execute(f"ALTER TABLE alerts ADD COLUMN {_col} {_coltype}")
@@ -5899,15 +5975,21 @@ def send_alert_with_log(
         # consume cooldowns so we don't spam every cycle.
         ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
         return (ok, None)
+    _cycle = _cycle_context()
+    _snapshot_ts = _cycle.get("snapshot_ts")
+    _snapshot_price = (_cycle.get("snapshot_prices") or {}).get(symbol)
+    _alert_insert_ts = time.time()
     try:
         with _db_lock:
             conn = _get_db()
             cur = conn.execute(
                 "INSERT INTO alerts (ts, symbol, alert_type, recommendation, "
-                "price_at_alert, score, factor_funding_pts, factor_lsr_pts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "price_at_alert, score, factor_funding_pts, factor_lsr_pts, "
+                "snapshot_ts, snapshot_price) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (int(time.time()), symbol, alert_type, recommendation,
-                 float(price), score, factor_funding_pts, factor_lsr_pts),
+                 float(price), score, factor_funding_pts, factor_lsr_pts,
+                 _snapshot_ts, _snapshot_price),
             )
             conn.commit()
             alert_id = int(cur.lastrowid or 0)
@@ -5977,6 +6059,40 @@ def send_alert_with_log(
             logger.warning("send_alert_with_log suppressed error: %s", _exc)
             pass
         return (False, None)
+    _delivery_ts = time.time()
+    _delivery_price = _get_current_price(symbol)
+    _snapshot_age = (
+        _delivery_ts - float(_snapshot_ts)
+        if _snapshot_ts is not None else None
+    )
+    _snapshot_gap = None
+    if _snapshot_price and _delivery_price and _snapshot_price > 0:
+        _snapshot_gap = (
+            (float(_delivery_price) - float(_snapshot_price))
+            / float(_snapshot_price) * 100.0
+        )
+    try:
+        with _db_lock:
+            _get_db().execute(
+                "UPDATE alerts SET delivery_ts=?, snapshot_age_sec=?, "
+                "snapshot_gap_pct=? WHERE id=?",
+                (_delivery_ts, _snapshot_age, _snapshot_gap, alert_id),
+            )
+            _get_db().commit()
+    except Exception as _telemetry_exc:
+        logger.warning("alert delivery telemetry update failed for %s: %s", symbol, _telemetry_exc)
+    logger.info(
+        "alert_delivery_measurement cycle_id=%s alert_id=%s symbol=%s "
+        "snapshot_ts=%s delivery_ts=%.3f snapshot_age_sec=%s "
+        "snapshot_price=%s delivery_price=%s gap_pct=%s",
+        _cycle.get("cycle_id", "none"), alert_id, symbol,
+        f"{float(_snapshot_ts):.3f}" if _snapshot_ts is not None else "none",
+        _delivery_ts,
+        f"{_snapshot_age:.3f}" if _snapshot_age is not None else "none",
+        _snapshot_price if _snapshot_price is not None else "none",
+        _delivery_price if _delivery_price is not None else "none",
+        f"{_snapshot_gap:.6f}" if _snapshot_gap is not None else "unavailable",
+    )
     # Launch position monitor for the delivered signal
     if price is not None and price > 0:
         _auto_start_monitor(alert_id, symbol, recommendation, float(price))
@@ -8003,7 +8119,9 @@ def check_weekly_monthly_highs(
     return weekly, monthly
 
 
-def refresh_weekly_monthly_highs(liquid_symbols: list[str]) -> int:
+def refresh_weekly_monthly_highs(
+    liquid_symbols: list[str], deadline: float | None = None
+) -> int:
     """Fetch 31 daily klines per liquid symbol; store 7d/30d highs and volume ranking.
     Single Binance pass populates both highs cache and the /top10 volume ranking cache.
     """
@@ -8012,38 +8130,60 @@ def refresh_weekly_monthly_highs(liquid_symbols: list[str]) -> int:
 
     updated = 0
     ranking: list[tuple[str, float, float, float]] = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    timed_out = False
+    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    futures = {}
+    try:
         futures = {ex.submit(fetch, s): s for s in liquid_symbols}
-        for future in as_completed(futures):
-            symbol, data = future.result()
-            if not data:
-                continue
-            highs  = data["highs"]
-            closes = data.get("closes", [])
-            weekly_high = max(highs[-7:]) if len(highs) >= 7 else max(highs)
-            monthly_high = max(highs)
-            with state_lock:
-                state["weekly_highs"][symbol] = weekly_high
-                state["monthly_highs"][symbol] = monthly_high
-                # Cache yesterday's close-to-close % change for trend detection.
-                # closes[-1] = today (incomplete), closes[-2] = yesterday,
-                # closes[-3] = day before yesterday.
-                if len(closes) >= 3 and closes[-3] > 0:
-                    prior_pct = (closes[-2] - closes[-3]) / closes[-3] * 100
-                    state["prior_day_pct"][symbol] = prior_pct
-            updated += 1
+        try:
+            wait_timeout = max(0.0, deadline - time.time()) if deadline is not None else None
+            for future in as_completed(futures, timeout=wait_timeout):
+                symbol, data = future.result()
+                if not data:
+                    continue
+                highs  = data["highs"]
+                closes = data.get("closes", [])
+                weekly_high = max(highs[-7:]) if len(highs) >= 7 else max(highs)
+                monthly_high = max(highs)
+                with state_lock:
+                    state["weekly_highs"][symbol] = weekly_high
+                    state["monthly_highs"][symbol] = monthly_high
+                    # Cache yesterday's close-to-close % change for trend detection.
+                    # closes[-1] = today (incomplete), closes[-2] = yesterday,
+                    # closes[-3] = day before yesterday.
+                    if len(closes) >= 3 and closes[-3] > 0:
+                        prior_pct = (closes[-2] - closes[-3]) / closes[-3] * 100
+                        state["prior_day_pct"][symbol] = prior_pct
+                updated += 1
 
-            yest = data["yesterday_vol"]
-            today = data["today_vol"]
-            if yest > 0:
-                pct = (today - yest) / yest * 100
-                ranking.append((symbol, yest, today, pct))
+                yest = data["yesterday_vol"]
+                today = data["today_vol"]
+                if yest > 0:
+                    pct = (today - yest) / yest * 100
+                    ranking.append((symbol, yest, today, pct))
+        except FuturesTimeoutError:
+            timed_out = True
+            pending = sum(not future.done() for future in futures)
+            logger.warning(
+                "Polling deadline reached in weekly_monthly_refresh; kept %d/%d "
+                "results, cancelling %d pending futures",
+                updated, len(futures), pending,
+            )
+    finally:
+        for future in futures:
+            future.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
 
     ranking.sort(key=lambda x: x[3], reverse=True)
     with state_lock:
-        state["last_weekly_monthly_refresh"] = time.time()
+        if not timed_out:
+            state["last_weekly_monthly_refresh"] = time.time()
         state["volume_ranking"] = ranking
         state["volume_ranking_updated"] = time.time()
+    if timed_out:
+        logger.warning(
+            "Weekly/monthly refresh was partial; it will be retried on the next eligible cycle"
+        )
     logger.info(
         "Refreshed 7d/30d highs for %d symbols; volume ranking cached (%d entries)",
         updated, len(ranking),
@@ -8053,6 +8193,7 @@ def refresh_weekly_monthly_highs(liquid_symbols: list[str]) -> int:
 
 def check_rsi_and_spikes(
     symbols_volumes: list[tuple[str, float]],
+    deadline: float | None = None,
 ) -> tuple[
     list[tuple[str, float, float]],  # overbought (symbol, rsi, vol)
     list[tuple[str, float, float]],  # oversold
@@ -8071,30 +8212,47 @@ def check_rsi_and_spikes(
         spike, pct = get_5m_signals(symbol)
         return symbol, rsi, spike, pct
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    futures = {}
+    try:
         futures = {ex.submit(fetch, s): s for s, _ in symbols_volumes}
-        for future in as_completed(futures):
-            symbol, rsi, spike_ratio, pct_15m = future.result()
-            vol = volume_map[symbol]
-            if rsi is not None:
-                rsi_map[symbol] = rsi
-            if pct_15m is not None:
-                pct_15m_map[symbol] = pct_15m
+        try:
+            wait_timeout = max(0.0, deadline - time.time()) if deadline is not None else None
+            for future in as_completed(futures, timeout=wait_timeout):
+                symbol, rsi, spike_ratio, pct_15m = future.result()
+                started = time.time()
+                vol = volume_map[symbol]
+                if rsi is not None:
+                    rsi_map[symbol] = rsi
+                if pct_15m is not None:
+                    pct_15m_map[symbol] = pct_15m
 
-            with state_lock:
-                # Cooldowns are READ to gate eligibility, but NOT marked here.
-                # The confluence dispatcher marks them only when an alert is sent.
-                if rsi is not None and rsi >= RSI_OVERBOUGHT:
-                    if now - state["last_rsi_alerted"].get(symbol, 0) >= RSI_ALERT_COOLDOWN:
-                        overbought.append((symbol, rsi, vol))
+                with state_lock:
+                    # Cooldowns are READ to gate eligibility, but NOT marked here.
+                    # The confluence dispatcher marks them only when an alert is sent.
+                    if rsi is not None and rsi >= RSI_OVERBOUGHT:
+                        if now - state["last_rsi_alerted"].get(symbol, 0) >= RSI_ALERT_COOLDOWN:
+                            overbought.append((symbol, rsi, vol))
 
-                elif rsi is not None and rsi <= RSI_OVERSOLD:
-                    if now - state["last_rsi_oversold_alerted"].get(symbol, 0) >= RSI_ALERT_COOLDOWN:
-                        oversold.append((symbol, rsi, vol))
+                    elif rsi is not None and rsi <= RSI_OVERSOLD:
+                        if now - state["last_rsi_oversold_alerted"].get(symbol, 0) >= RSI_ALERT_COOLDOWN:
+                            oversold.append((symbol, rsi, vol))
 
-                if spike_ratio is not None and spike_ratio >= VOLUME_SPIKE_MULTIPLIER:
-                    if now - state["last_vol_spike_alerted"].get(symbol, 0) >= VOLUME_SPIKE_COOLDOWN:
-                        spikes.append((symbol, spike_ratio, vol))
+                    if spike_ratio is not None and spike_ratio >= VOLUME_SPIKE_MULTIPLIER:
+                        if now - state["last_vol_spike_alerted"].get(symbol, 0) >= VOLUME_SPIKE_COOLDOWN:
+                            spikes.append((symbol, spike_ratio, vol))
+                _log_symbol_timing("rsi_and_spikes", symbol, started, time.time())
+        except FuturesTimeoutError:
+            pending = sum(not future.done() for future in futures)
+            logger.warning(
+                "Polling deadline reached in rsi_and_spikes; kept %d/%d results, "
+                "cancelling %d pending futures",
+                len(rsi_map), len(futures), pending,
+            )
+    finally:
+        for future in futures:
+            future.cancel()
+        ex.shutdown(wait=False, cancel_futures=True)
 
     return (
         sorted(overbought, key=lambda x: x[1], reverse=True),
@@ -10938,6 +11096,8 @@ _CYCLE_HARD_LIMIT = 240  # seconds — abort cycle if it runs longer than this
 def run_checks():
     logger.info("Starting Binance check cycle...")
     start = time.time()
+    cycle_id = f"{os.getpid()}-{int(start * 1000)}"
+    _set_cycle_context(cycle_id=cycle_id, cycle_started_ts=start)
     _deadline = start + _CYCLE_HARD_LIMIT
     summary = {
         "new_listings": 0, "high_breaks": 0,
@@ -10982,13 +11142,30 @@ def run_checks():
         if current_pairs:
             # 2. Detect new listings — these get a dedicated eye-catching alert
             # (NOT gated by the confluence rule; new listings are too time-sensitive to suppress)
-            new_listings = check_new_listings(current_pairs)
+            new_listings = _run_timed_strategy(
+                "new_listings", check_new_listings, current_pairs
+            )
             summary["new_listings"] = len(new_listings)
             # Defer sending until after tickers are fetched so price/volume can be filled in
 
             # 3. 24h ticker data
             try:
                 tickers = get_24h_tickers(list(current_pairs))
+                snapshot_ts = time.time()
+                snapshot_prices = {}
+                for _sym, _ticker in tickers.items():
+                    try:
+                        snapshot_prices[_sym] = float(_ticker["lastPrice"])
+                    except (ValueError, KeyError, TypeError):
+                        continue
+                _set_cycle_context(
+                    snapshot_ts=snapshot_ts,
+                    snapshot_prices=snapshot_prices,
+                )
+                logger.info(
+                    "polling_snapshot cycle_id=%s snapshot_ts=%.3f symbols=%d elapsed=%.3fs",
+                    cycle_id, snapshot_ts, len(snapshot_prices), snapshot_ts - start,
+                )
             except Exception as e:
                 logger.error("Failed to fetch tickers: %s", e)
                 summary["errors"].append(f"Tickers fetch: {e}")
@@ -11033,7 +11210,9 @@ def run_checks():
             # 5. Detect 24h high breaks (cooldown not yet marked)
             high_24h: list[tuple[str, float, float, float]] = []
             if tickers:
-                high_24h = check_24h_highs(tickers)
+                high_24h = _run_timed_strategy(
+                    "high_24h", check_24h_highs, tickers
+                )
                 summary["high_breaks"] = len(high_24h)
 
             with state_lock:
@@ -11047,7 +11226,9 @@ def run_checks():
 
             if initialized and liquid_pairs:
                 # 6. Detect RSI + volume spike signals (also returns rsi_map + pct_15m_map)
-                overbought, oversold, vol_spikes, rsi_map, pct_15m_map = check_rsi_and_spikes(liquid_pairs)
+                overbought, oversold, vol_spikes, rsi_map, pct_15m_map = _run_timed_strategy(
+                    "rsi_and_spikes", check_rsi_and_spikes, liquid_pairs, _deadline
+                )
                 summary["rsi_overbought"] = len(overbought)
                 summary["rsi_oversold"] = len(oversold)
                 summary["vol_spikes"] = len(vol_spikes)
@@ -11058,12 +11239,16 @@ def run_checks():
                     return
 
                 # 6a. Standalone momentum alerts (15-min price change tiers)
-                mom_sent, mom_ema_blocked = check_momentum(pct_15m_map, tickers, rsi_map)
+                mom_sent, mom_ema_blocked = _run_timed_strategy(
+                    "momentum", check_momentum, pct_15m_map, tickers, rsi_map
+                )
                 summary["momentum_alerts"] = mom_sent
                 summary["momentum_ema_blocked"] = mom_ema_blocked
 
                 # 6b. Standalone overheated / oversold (24h ±20% confirmed by RSI)
-                oh_n, os_n, oh_ema_blocked, oh_reversal_blocked, oh_bear_blocked = check_overheated_oversold(tickers, rsi_map)
+                oh_n, os_n, oh_ema_blocked, oh_reversal_blocked, oh_bear_blocked = _run_timed_strategy(
+                    "overheated_oversold", check_overheated_oversold, tickers, rsi_map
+                )
                 summary["overheated_reversal_blocked"] = oh_reversal_blocked
                 summary["overheated_alerts"] = oh_n
                 summary["overheated_ema_blocked"] = oh_ema_blocked
@@ -11074,74 +11259,102 @@ def run_checks():
 
                 # 6c. Volume surge (+300% daily vol) + CRSI extreme combo
                 # (Pre-refresh pass — catches surges seen by the previous hour's ranking.)
-                summary["vol_surge_alerts"] = check_volume_surge_crsi(tickers) if VOL_SURGE_ENABLED else 0
+                summary["vol_surge_alerts"] = _run_timed_strategy(
+                    "volume_surge_crsi", check_volume_surge_crsi, tickers
+                ) if VOL_SURGE_ENABLED else 0
                 # pump_24h_fade: runs always (shadow=True collects data; shadow=False sends alerts)
-                summary["pump_fade_alerts"] = check_pump_24h_fade(tickers, rsi_map)
+                summary["pump_fade_alerts"] = _run_timed_strategy(
+                    "pump_24h_fade", check_pump_24h_fade, tickers, rsi_map
+                )
 
                 # 6d. TEST: Breakdown continuation SHORT (drop ≥10% + below EMA + RSI 30-58)
-                summary["breakdown_alerts"] = check_breakdown_short(tickers, rsi_map) if BREAKDOWN_ENABLED else 0
+                summary["breakdown_alerts"] = _run_timed_strategy(
+                    "breakdown_short", check_breakdown_short, tickers, rsi_map
+                ) if BREAKDOWN_ENABLED else 0
 
                 # 6e. TEST: Momentum continuation LONG (rise ≥10% + above EMA + RSI 42-68)
-                summary["momentum_long_alerts"] = check_momentum_long(tickers, rsi_map) if MOMENTUM_LONG_ENABLED else 0
+                summary["momentum_long_alerts"] = _run_timed_strategy(
+                    "momentum_long", check_momentum_long, tickers, rsi_map
+                ) if MOMENTUM_LONG_ENABLED else 0
 
                 # 6f. TEST: New listing pump→dump SHORT (≥+20% from listing + RSI≥65)
-                summary["new_listing_short_alerts"] = check_new_listing_pumps(tickers, rsi_map) if NEW_LISTING_ENABLED else 0
+                summary["new_listing_short_alerts"] = _run_timed_strategy(
+                    "new_listing_pumps", check_new_listing_pumps, tickers, rsi_map
+                ) if NEW_LISTING_ENABLED else 0
 
                 # 6g. listing_dump_long disabled — backtest 30d: 0 TP of 4 signals, 50% SL
                 summary["listing_dump_long_alerts"] = 0
 
                 # 6h. TEST: New listing ATH peak → SHORT long-duration (pump≥30% + RSI≥70)
-                summary["listing_peak_short_alerts"] = check_listing_peak_short(tickers, rsi_map) if LISTING_PEAK_ENABLED else 0
+                summary["listing_peak_short_alerts"] = _run_timed_strategy(
+                    "listing_peak_short", check_listing_peak_short, tickers, rsi_map
+                ) if LISTING_PEAK_ENABLED else 0
 
                 # 6i. Intraday hourly streak — 6+ consecutive green/red 1h candles
-                summary["streak_1h_alerts"] = check_intraday_streak(tickers, rsi_map) if STREAK_1H_ENABLED else 0
+                summary["streak_1h_alerts"] = _run_timed_strategy(
+                    "intraday_streak", check_intraday_streak, tickers, rsi_map
+                ) if STREAK_1H_ENABLED else 0
 
                 # 6i-shadow. VWAP reversion — mean-reversion counterpart to streak_1h
                 # (shadow-only, controlled by VWAP_REVERSION_SHADOW_ONLY)
                 if STREAK_1H_ENABLED:
                     try:
-                        summary["vwap_rev_alerts"] = check_vwap_reversion(tickers, rsi_map)
+                        summary["vwap_rev_alerts"] = _run_timed_strategy(
+                            "vwap_reversion", check_vwap_reversion, tickers, rsi_map
+                        )
                     except Exception as _e:
                         logger.error("check_vwap_reversion failed: %s", _e)
                         summary["errors"].append(f"vwap_rev: {_e}")
 
                 # 6i-shadow-2. Bollinger Squeeze — squeeze → 1h breakout (shadow)
                 try:
-                    summary["bb_squeeze_alerts"] = check_bollinger_squeeze(tickers, rsi_map)
+                    summary["bb_squeeze_alerts"] = _run_timed_strategy(
+                        "bollinger_squeeze", check_bollinger_squeeze, tickers, rsi_map
+                    )
                 except Exception as _e:
                     logger.error("check_bollinger_squeeze failed: %s", _e)
                     summary["errors"].append(f"bb_squeeze: {_e}")
 
                 # 6i-shadow-3. EMA 9/21 crossover with gap threshold on 4h (shadow)
                 try:
-                    summary["ema_cross_alerts"] = check_ema_crossover(tickers)
+                    summary["ema_cross_alerts"] = _run_timed_strategy(
+                        "ema_crossover", check_ema_crossover, tickers
+                    )
                 except Exception as _e:
                     logger.error("check_ema_crossover failed: %s", _e)
                     summary["errors"].append(f"ema_cross: {_e}")
 
                 # 6i-shadow-4. High rejection SHORT — intraday pump + reversal from 24h high (shadow)
                 try:
-                    summary["high_rejection_alerts"] = check_high_rejection_short(tickers)
+                    summary["high_rejection_alerts"] = _run_timed_strategy(
+                        "high_rejection_short", check_high_rejection_short, tickers
+                    )
                 except Exception as _e:
                     logger.error("check_high_rejection_short failed: %s", _e)
                     summary["errors"].append(f"high_rejection: {_e}")
 
                 # 6i-shadow-4b. Low rejection LONG — intraday drop + bounce from 24h low (shadow)
                 try:
-                    summary["low_rejection_alerts"] = check_low_rejection_long(tickers)
+                    summary["low_rejection_alerts"] = _run_timed_strategy(
+                        "low_rejection_long", check_low_rejection_long, tickers
+                    )
                 except Exception as _e:
                     logger.error("check_low_rejection_long failed: %s", _e)
                     summary["errors"].append(f"low_rejection: {_e}")
 
                 # 6i-shadow-5. Range breakout LONG — tight base after ≥25% correction, 1h close above (shadow)
                 try:
-                    summary["range_breakout_alerts"] = check_range_breakout_long(tickers)
+                    summary["range_breakout_alerts"] = _run_timed_strategy(
+                        "range_breakout_long", check_range_breakout_long, tickers
+                    )
                 except Exception as _e:
                     logger.error("check_range_breakout_long failed: %s", _e)
                     summary["errors"].append(f"range_breakout: {_e}")
 
                 # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
-                summary["whale_lsr_shift_alerts"] = check_whale_lsr_shift(liquid_pairs) if WHALE_LSR_ENABLED else 0
+                summary["whale_lsr_shift_alerts"] = _run_timed_strategy(
+                    "whale_lsr_shift", check_whale_lsr_shift, liquid_pairs
+                ) if WHALE_LSR_ENABLED else 0
 
                 # 6k. Personal position tracker — check user's own open positions
                 check_user_position_reversals()
@@ -11173,7 +11386,12 @@ def run_checks():
                         len(refresh_pool),
                     )
                     try:
-                        refresh_weekly_monthly_highs(refresh_pool)
+                        refresh_weekly_monthly_highs(refresh_pool, deadline=_deadline)
+                        if time.time() > _deadline:
+                            logger.warning(
+                                "Cycle deadline reached after weekly/monthly refresh — aborting remaining work"
+                            )
+                            return
                     except Exception as e:
                         logger.error("Weekly/monthly refresh failed: %s", e)
                         summary["errors"].append(f"WM refresh: {e}")
@@ -11183,7 +11401,10 @@ def run_checks():
                         # 4h per-symbol cooldown prevents duplicates with the
                         # pre-refresh pass above.
                         try:
-                            summary["vol_surge_alerts"] += check_volume_surge_crsi(tickers)
+                            summary["vol_surge_alerts"] += _run_timed_strategy(
+                                "volume_surge_crsi_post_refresh",
+                                check_volume_surge_crsi, tickers,
+                            )
                         except Exception as e:
                             logger.error("Post-refresh volume-surge scan failed: %s", e)
                             summary["errors"].append(f"vol_surge rescan: {e}")
@@ -11191,14 +11412,22 @@ def run_checks():
                 if needs_ema:
                     logger.info("Refreshing EMA-200 (4h) for %d liquid pairs...", len(liquid_pairs))
                     try:
-                        refresh_ema200_4h([s for s, _ in liquid_pairs])
+                        refresh_ema200_4h([s for s, _ in liquid_pairs], deadline=_deadline)
+                        if time.time() > _deadline:
+                            logger.warning(
+                                "Cycle deadline reached after EMA refresh — aborting remaining work"
+                            )
+                            return
                     except Exception as e:
                         logger.error("EMA-200 refresh failed: %s", e)
                         summary["errors"].append(f"EMA refresh: {e}")
 
                 # 8. Detect 7d / 30d high breaks
                 if tickers:
-                    weekly_alerts, monthly_alerts = check_weekly_monthly_highs(tickers, liquid_vol_map)
+                    weekly_alerts, monthly_alerts = _run_timed_strategy(
+                        "weekly_monthly_highs",
+                        check_weekly_monthly_highs, tickers, liquid_vol_map,
+                    )
                     summary["weekly_highs"] = len(weekly_alerts)
                     summary["monthly_highs"] = len(monthly_alerts)
 
@@ -15094,6 +15323,7 @@ def run_checks():  # type: ignore[no-redef]
         _original_run_checks()
     finally:
         _run_checks_lock.release()
+        _clear_cycle_context()
 
 
 # Restore last-known-good Binance host from disk so the first cycle after a

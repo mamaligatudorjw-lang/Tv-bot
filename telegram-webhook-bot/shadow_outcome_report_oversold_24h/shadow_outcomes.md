@@ -2,6 +2,7 @@
 
 Fixed window: **24h** after entry; source candles: **Gate.io futures 15m**.
 Strategy: **oversold_24h**. Signals with valid entry/SL/TP are included according to the selected shadow/live scope.
+These outcomes are measured from the recorded `entry_price`. They do not necessarily equal the price a human could see when acting on the Telegram alert if a polling cycle was delayed; snapshot-to-delivery price risk is a separate measurement.
 For the oversold live audit, non-shadow rows are intentionally included; this report does not place orders or change bot state.
 Unresolved means neither barrier was touched before the window ended; it is not counted as a win or loss.
 If a candle touches both barriers, the result is `ambiguous` because OHLC cannot establish intrabar order.

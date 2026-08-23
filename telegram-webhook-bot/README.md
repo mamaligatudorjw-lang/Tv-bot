@@ -1,6 +1,10 @@
 # Binance Monitor → Telegram Bot
 
-Polls Binance every 5 minutes and sends Telegram alerts for four signal types across all USDT spot pairs.
+Polls the Gate.io Futures market every 5 minutes and sends Telegram alerts for the configured signal types across USDT perpetual pairs.
+
+## Price timing and outcome reports
+
+Outcome reports classify the result from the recorded `entry_price`, which is the bot's paper-entry basis. During a delayed polling cycle, that recorded basis may differ from the price a human could see when acting on the Telegram alert. Snapshot-to-delivery price risk is measured separately by the polling telemetry and is not retroactively applied to historical outcomes.
 
 ## Alerts
 
