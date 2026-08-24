@@ -8496,19 +8496,25 @@ def check_rsi_and_spikes(
     now = time.time()
     volume_map = dict(symbols_volumes)
 
-    def fetch(symbol):
-        rsi = get_klines_rsi(symbol)
-        spike, pct = get_5m_signals(symbol)
-        return symbol, rsi, spike, pct
-
-    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    # RSI (1h) and spike/momentum (5m) are independent requests.  Keeping them
+    # in one worker made every symbol wait for both requests serially, doubling
+    # the network latency of this stage without changing its result.
+    ex = ThreadPoolExecutor(max_workers=MAX_WORKERS * 2)
     futures = {}
+    partials: dict[str, dict[str, object]] = {}
     try:
-        futures = {ex.submit(fetch, s): s for s, _ in symbols_volumes}
+        for symbol, _ in symbols_volumes:
+            futures[ex.submit(get_klines_rsi, symbol)] = (symbol, "rsi")
+            futures[ex.submit(get_5m_signals, symbol)] = (symbol, "signals")
         try:
             wait_timeout = max(0.0, deadline - time.time()) if deadline is not None else None
             for future in as_completed(futures, timeout=wait_timeout):
-                symbol, rsi, spike_ratio, pct_15m = future.result()
+                symbol, kind = futures[future]
+                partials.setdefault(symbol, {})[kind] = future.result()
+                if "rsi" not in partials[symbol] or "signals" not in partials[symbol]:
+                    continue
+                rsi = partials[symbol]["rsi"]
+                spike_ratio, pct_15m = partials[symbol]["signals"]
                 started = time.time()
                 vol = volume_map[symbol]
                 if rsi is not None:
@@ -8730,6 +8736,60 @@ def check_overheated_oversold(
     os_peers.sort(key=lambda x: x[1])                  # strongest dump first
     # ────────────────────────────────────────────────────────────────────────
 
+    # Duration filters are read-only and independent per symbol.  Fetch them
+    # ahead of the ordered decision loop so the network wait does not serialize
+    # hundreds of symbols.  The loop below still evaluates and records signals
+    # in the original ticker order.
+    duration_ohlcv: dict[str, list] = {}
+    duration_closes: dict[str, list[float] | None] = {}
+    duration_jobs: dict = {}
+    duration_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    try:
+        for _sym, _t in tickers.items():
+            _rsi = rsi_map.get(_sym)
+            if _rsi is None:
+                continue
+            try:
+                _pct = float(_t["priceChangePercent"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            _oh_t = _vol_threshold(_sym, OVERHEATED_24H_PCT, 2.5)
+            _os_t = _vol_threshold(_sym, OVERSOLD_24H_PCT, 2.5)
+            if _pct >= _oh_t and (
+                _rsi >= OVERHEATED_EARLY_RSI_MIN
+            ):
+                duration_jobs[duration_ex.submit(
+                    _fetch_1h_ohlcv, _sym, OVERHEATED_DISPLAY_HISTORY
+                )] = (_sym, "ohlcv")
+            elif _pct <= _os_t and _rsi <= RSI_OVERSOLD:
+                with state_lock:
+                    _last_os = state["last_oversold_alerted"].get(_sym, 0)
+                if now - _last_os >= OVERSOLD_COOLDOWN:
+                    duration_jobs[duration_ex.submit(
+                        _fetch_1h_closes, _sym, OVERHEATED_DURATION_WINDOW + 2
+                    )] = (_sym, "closes")
+        try:
+            _duration_timeout = (
+                max(0.0, deadline - time.time()) if deadline is not None else None
+            )
+            for _future in as_completed(duration_jobs, timeout=_duration_timeout):
+                _sym, _kind = duration_jobs[_future]
+                _value = _future.result()
+                if _kind == "ohlcv":
+                    duration_ohlcv[_sym] = _value or []
+                else:
+                    duration_closes[_sym] = _value
+        except FuturesTimeoutError:
+            logger.warning(
+                "Polling deadline reached in overheated duration prefetch; "
+                "kept %d/%d results",
+                len(duration_ohlcv) + len(duration_closes), len(duration_jobs),
+            )
+    finally:
+        for _future in duration_jobs:
+            _future.cancel()
+        duration_ex.shutdown(wait=False, cancel_futures=True)
+
     for symbol, t in tickers.items():
         # Network-heavy work below is intentionally sequential because the
         # strategy shares several rate-limited helpers.  Do not let one slow
@@ -8833,7 +8893,11 @@ def check_overheated_oversold(
 
             # Duration filter: require sustained hourly uptrend, not a single-candle spike.
             # Uses _count_up_in_window (X-of-Y, gaps allowed — NOT consecutive streak).
-            _oh_1h_candles = _fetch_1h_ohlcv(symbol, limit=OVERHEATED_DISPLAY_HISTORY)
+            _oh_1h_candles = duration_ohlcv.get(symbol)
+            if _oh_1h_candles is None:
+                _oh_1h_candles = _fetch_1h_ohlcv(
+                    symbol, limit=OVERHEATED_DISPLAY_HISTORY
+                )
             _oh_1h_raw    = (
                 [float(candle[4]) for candle in _oh_1h_candles]
                 if _oh_1h_candles else None
@@ -9037,7 +9101,11 @@ def check_overheated_oversold(
                 continue  # uptrend confirmation: price must be above EMA-200
 
             # Duration filter (= overheated_24h: ≥8/12 hourly candles up)
-            _oe_1h_candles = _fetch_1h_ohlcv(symbol, limit=OVERHEATED_DISPLAY_HISTORY)
+            _oe_1h_candles = duration_ohlcv.get(symbol)
+            if _oe_1h_candles is None:
+                _oe_1h_candles = _fetch_1h_ohlcv(
+                    symbol, limit=OVERHEATED_DISPLAY_HISTORY
+                )
             _oe_1h_raw   = (
                 [float(candle[4]) for candle in _oe_1h_candles]
                 if _oe_1h_candles else None
@@ -9232,7 +9300,11 @@ def check_overheated_oversold(
                 # Mirrors the overheated_24h filter: require ≥ OVERHEATED_DURATION_MIN_DOWN
                 # of the last OVERHEATED_DURATION_WINDOW hourly candles closed DOWN.
                 # X-of-Y count (gaps allowed — NOT consecutive streak).
-                _os_1h_raw     = _fetch_1h_closes(symbol, limit=OVERHEATED_DURATION_WINDOW + 2)
+                _os_1h_raw = duration_closes.get(symbol)
+                if _os_1h_raw is None:
+                    _os_1h_raw = _fetch_1h_closes(
+                        symbol, limit=OVERHEATED_DURATION_WINDOW + 2
+                    )
                 # _fetch_1h_closes already drops the live candle; do NOT slice again.
                 # None = insufficient data → skip filter (don't block signal).
                 _os_down_count = None
