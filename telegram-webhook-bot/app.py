@@ -7862,14 +7862,19 @@ def check_high_rejection_short(tickers: dict[str, dict]) -> int:
                     last_alerted = state["last_high_rejection_alerted"].get(symbol, 0)
                 if now - last_alerted >= HIGH_REJECTION_COOLDOWN:
                     prefetch_jobs[prefetch_ex.submit(
-                        _gateio_klines, symbol, "15m", candle_limit
+                        _prefetch_job, _gateio_klines, symbol, "15m", candle_limit
                     )] = symbol
         except (ValueError, KeyError, TypeError):
             continue
     try:
         for future in as_completed(prefetch_jobs, timeout=15.0):
             try:
-                candles_by_symbol[prefetch_jobs[future]] = future.result() or []
+                symbol = prefetch_jobs[future]
+                payload = future.result()
+                if _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "high_rejection_short"
+                ) and payload["error"] is None:
+                    candles_by_symbol[symbol] = payload["value"] or []
             except Exception:
                 candles_by_symbol[prefetch_jobs[future]] = []
     except FuturesTimeoutError:
@@ -9033,7 +9038,7 @@ def check_overheated_oversold(
                 _rsi >= OVERHEATED_EARLY_RSI_MIN
             ):
                 duration_jobs[duration_ex.submit(
-                    _fetch_1h_ohlcv, _sym, OVERHEATED_DISPLAY_HISTORY
+                    _prefetch_job, _fetch_1h_ohlcv, _sym, OVERHEATED_DISPLAY_HISTORY
                 )] = (_sym, "ohlcv")
                 duration_prefetch_symbols[_sym] = "ohlcv"
             elif _pct <= _os_t and _rsi <= RSI_OVERSOLD:
@@ -9041,7 +9046,8 @@ def check_overheated_oversold(
                     _last_os = state["last_oversold_alerted"].get(_sym, 0)
                 if now - _last_os >= OVERSOLD_COOLDOWN:
                     duration_jobs[duration_ex.submit(
-                        _fetch_1h_closes, _sym, OVERHEATED_DURATION_WINDOW + 2
+                        _prefetch_job, _fetch_1h_closes, _sym,
+                        OVERHEATED_DURATION_WINDOW + 2
                     )] = (_sym, "closes")
                     duration_prefetch_symbols[_sym] = "closes"
         try:
@@ -9052,7 +9058,14 @@ def check_overheated_oversold(
             _duration_timeout = min(20.0, _remaining) if _remaining is not None else 20.0
             for _future in as_completed(duration_jobs, timeout=_duration_timeout):
                 _sym, _kind = duration_jobs[_future]
-                _value = _future.result()
+                _payload = _future.result()
+                if not _prefetch_result_allowed(
+                    _sym, _payload["finished_ts"], "overheated_oversold"
+                ):
+                    continue
+                if _payload["error"] is not None:
+                    raise _payload["error"]
+                _value = _payload["value"]
                 if _kind == "ohlcv":
                     duration_ohlcv[_sym] = _value or []
                 else:
