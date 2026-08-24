@@ -35,6 +35,8 @@ class _CycleLogFilter(logging.Filter):
         "Demo ",
         "demo_positions",
         "alert_delivery",
+        "Telegram send",
+        "telegram delivery",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -45,6 +47,8 @@ class _CycleLogFilter(logging.Filter):
             cycle_id = getattr(_cycle_telemetry, "context", {}).get(
                 "cycle_id", "none"
             )
+            if cycle_id == "none":
+                return True
             record.msg = "cycle_id=%s " + str(record.msg)
             record.args = (cycle_id,) + (
                 record.args if isinstance(record.args, tuple) else (record.args,)
