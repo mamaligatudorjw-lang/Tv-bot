@@ -26,6 +26,35 @@ logger = logging.getLogger(__name__)
 _cycle_telemetry = threading.local()
 
 
+class _CycleLogFilter(logging.Filter):
+    """Attach cycle ownership to legacy side-effect/overheated log records."""
+
+    _MARKERS = (
+        "overheated_early",
+        "overheated_24h",
+        "Demo ",
+        "demo_positions",
+        "alert_delivery",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "cycle_id=" not in message and any(
+            marker in message for marker in self._MARKERS
+        ):
+            cycle_id = getattr(_cycle_telemetry, "context", {}).get(
+                "cycle_id", "none"
+            )
+            record.msg = "cycle_id=%s " + str(record.msg)
+            record.args = (cycle_id,) + (
+                record.args if isinstance(record.args, tuple) else (record.args,)
+            )
+        return True
+
+
+logger.addFilter(_CycleLogFilter())
+
+
 def _cycle_context() -> dict:
     return getattr(_cycle_telemetry, "context", {})
 
@@ -140,15 +169,31 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
 
     result = {}
     finished = threading.Event()
+    worker_state = {
+        "worker_id": f"{context.get('cycle_id', 'none')}:{strategy}:{int(started * 1000)}",
+        "cancel_requested": False,
+    }
 
     def _worker() -> None:
         # Thread-local cycle context is not inherited by daemon worker threads.
-        _cycle_telemetry.context = dict(context)
+        _cycle_telemetry.context = dict(context, worker_id=worker_state["worker_id"])
+        logger.info(
+            "polling_worker_enter cycle_id=%s strategy=%s worker_id=%s",
+            context.get("cycle_id", "none"), strategy, worker_state["worker_id"],
+        )
         try:
             result["value"] = fn(*args, **kwargs)
         except BaseException as exc:
             result["error"] = exc
         finally:
+            logger.info(
+                "polling_worker_exit cycle_id=%s strategy=%s worker_id=%s "
+                "finished=%s abandoned=%s cancel_requested=%s",
+                context.get("cycle_id", "none"), strategy,
+                worker_state["worker_id"], True,
+                worker_state["cancel_requested"],
+                worker_state["cancel_requested"],
+            )
             finished.set()
 
     worker = threading.Thread(
@@ -161,6 +206,20 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
         elapsed = time.time() - started
         _mark_cycle_deadline_abort(
             "strategy_timeout", strategy, include_stage=True
+        )
+        worker_state["cancel_requested"] = True
+        logger.warning(
+            "polling_worker_timeout cycle_id=%s strategy=%s worker_id=%s "
+            "elapsed=%.3fs timeout=%.3fs worker_alive=%s",
+            context.get("cycle_id", "none"), strategy,
+            worker_state["worker_id"], elapsed, timeout, worker.is_alive(),
+        )
+        logger.warning(
+            "polling_worker_cancel_requested cycle_id=%s strategy=%s "
+            "worker_id=%s cancellation=cooperative "
+            "worker_alive=%s",
+            context.get("cycle_id", "none"), strategy,
+            worker_state["worker_id"], worker.is_alive(),
         )
         logger.warning(
             "polling_strategy_timeout cycle_id=%s strategy=%s elapsed=%.3fs "
