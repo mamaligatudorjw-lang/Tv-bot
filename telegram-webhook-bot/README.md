@@ -6,6 +6,26 @@ Polls the Gate.io Futures market every 5 minutes and sends Telegram alerts for t
 
 Outcome reports classify the result from the recorded `entry_price`, which is the bot's paper-entry basis. During a delayed polling cycle, that recorded basis may differ from the price a human could see when acting on the Telegram alert. Snapshot-to-delivery price risk is measured separately by the polling telemetry and is not retroactively applied to historical outcomes.
 
+## Polling deadline
+
+The polling cycle has a 240-second operational ceiling. Strategy calls run in
+daemonized bounded workers using the remaining cycle budget, so a slow network
+request cannot keep the scheduler thread blocked past the deadline. A timed-out
+worker may finish its own HTTP client's bounded timeout in the background, but
+the cycle is released immediately and does not start later strategies.
+
+Deadline exits write one structured `Cycle aborted` line containing the cycle
+ID, duration, reason, stage, and ordered skipped-strategy list. Generate a
+warmed-cycle report with:
+
+```bash
+python3 polling_deadline_report.py --limit 15 --out polling_deadline_report
+```
+
+`overheated_early` and `overheated_24h` are branches nested inside the
+`overheated_oversold` strategy and are explicitly reported as nested rather
+than given misleading independent timings.
+
 ## Alerts
 
 | Signal | Trigger |

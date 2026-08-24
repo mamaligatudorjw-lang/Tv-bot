@@ -41,6 +41,65 @@ def _clear_cycle_context() -> None:
         del _cycle_telemetry.context
 
 
+class _CycleDeadlineExceeded(BaseException):
+    """Raised outside the worker when a strategy outlives the cycle budget."""
+
+    def __init__(self, strategy: str, timeout: float):
+        super().__init__(strategy, timeout)
+        self.strategy = strategy
+        self.timeout = timeout
+
+
+_POLLING_OPTIONAL_ORDER = (
+    "new_listings",
+    "high_24h",
+    "rsi_and_spikes",
+    "momentum",
+    "overheated_oversold",
+    "volume_surge_crsi",
+    "pump_24h_fade",
+    "breakdown_short",
+    "momentum_long",
+    "new_listing_pumps",
+    "listing_peak_short",
+    "intraday_streak",
+    "vwap_reversion",
+    "bollinger_squeeze",
+    "ema_crossover",
+    "high_rejection_short",
+    "low_rejection_long",
+    "range_breakout_long",
+    "whale_lsr_shift",
+    "user_position_reversals",
+)
+
+
+def _mark_cycle_deadline_abort(
+    reason: str, stage: str, *, include_stage: bool = False
+) -> None:
+    """Record one structured abort marker; the outer wrapper emits its summary."""
+    context = _cycle_context()
+    if context.get("deadline_abort"):
+        return
+    try:
+        idx = _POLLING_OPTIONAL_ORDER.index(stage)
+        skipped = list(_POLLING_OPTIONAL_ORDER[idx:] if include_stage
+                       else _POLLING_OPTIONAL_ORDER[idx + 1:])
+    except ValueError:
+        skipped = list(_POLLING_OPTIONAL_ORDER)
+    _set_cycle_context(
+        deadline_abort=True,
+        abort_reason=reason,
+        abort_stage=stage,
+        abort_ts=time.time(),
+        skipped_strategies=skipped,
+    )
+    logger.warning(
+        "Cycle deadline reached: cycle_id=%s stage=%s reason=%s skipped=%s",
+        context.get("cycle_id", "none"), stage, reason, ",".join(skipped),
+    )
+
+
 def _log_strategy_timing(strategy: str, started: float, finished: float) -> None:
     context = _cycle_context()
     logger.info(
@@ -67,10 +126,55 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
         "polling_strategy_enter cycle_id=%s strategy=%s entry_ts=%.3f",
         context.get("cycle_id", "none"), strategy, started,
     )
-    try:
-        return fn(*args, **kwargs)
-    finally:
-        _log_strategy_timing(strategy, started, time.time())
+    deadline = context.get("deadline")
+    if deadline is None:
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _log_strategy_timing(strategy, started, time.time())
+
+    timeout = max(0.0, float(deadline) - started)
+    if timeout <= 0:
+        _mark_cycle_deadline_abort("deadline_before_strategy", strategy)
+        raise _CycleDeadlineExceeded(strategy, timeout)
+
+    result = {}
+    finished = threading.Event()
+
+    def _worker() -> None:
+        # Thread-local cycle context is not inherited by daemon worker threads.
+        _cycle_telemetry.context = dict(context)
+        try:
+            result["value"] = fn(*args, **kwargs)
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            finished.set()
+
+    worker = threading.Thread(
+        target=_worker,
+        name=f"polling-{strategy}",
+        daemon=True,
+    )
+    worker.start()
+    if not finished.wait(timeout):
+        elapsed = time.time() - started
+        _mark_cycle_deadline_abort(
+            "strategy_timeout", strategy, include_stage=True
+        )
+        logger.warning(
+            "polling_strategy_timeout cycle_id=%s strategy=%s elapsed=%.3fs "
+            "timeout=%.3fs worker_alive=%s",
+            context.get("cycle_id", "none"), strategy, elapsed, timeout,
+            worker.is_alive(),
+        )
+        raise _CycleDeadlineExceeded(strategy, timeout)
+
+    finished_ts = time.time()
+    _log_strategy_timing(strategy, started, finished_ts)
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
 
 # Also write to a persistent file so we can debug even when terminal
 # output is not captured by the workflow log viewer.
@@ -8410,6 +8514,11 @@ def check_overheated_oversold(
     """
     if not tickers:
         return 0, 0, 0, 0, 0
+    logger.info(
+        "polling_strategy_nested cycle_id=%s parent=overheated_oversold "
+        "children=overheated_early,overheated_24h telemetry=nested",
+        _cycle_context().get("cycle_id", "none"),
+    )
     sent_oh, sent_os, ema_blocked_oh, reversal_blocked_oh, bear_long_blocked = 0, 0, 0, 0, 0
     now = time.time()
 
@@ -11112,9 +11221,11 @@ def run_checks():
     cycle_id = f"{os.getpid()}-{int(start * 1000)}"
     _set_cycle_context(cycle_id=cycle_id, cycle_started_ts=start)
     _deadline = start + _CYCLE_HARD_LIMIT
+    _set_cycle_context(deadline=_deadline)
 
     def _abort_if_deadline(stage: str) -> bool:
         if time.time() > _deadline:
+            _mark_cycle_deadline_abort("cycle_deadline_exceeded", stage)
             logger.warning(
                 "Cycle deadline exceeded after %s — skipping remaining optional strategies",
                 stage,
@@ -11151,6 +11262,7 @@ def run_checks():
         "whale_lsr_shift_alerts": 0,   # whale LSR flip alerts
         "errors": [],
     }
+    _set_cycle_context(summary=summary)
 
     try:
         # 1. Fetch all USDT pairs (crypto-only — strip synthetic equity/commodity)
@@ -11226,6 +11338,7 @@ def run_checks():
 
             # Deadline check after heavy fetches (pairs + tickers)
             if time.time() > _deadline:
+                _mark_cycle_deadline_abort("cycle_deadline_exceeded", "tickers_fetch")
                 logger.warning("Cycle deadline exceeded after tickers fetch — aborting early")
                 return
 
@@ -11257,6 +11370,7 @@ def run_checks():
 
                 # Deadline check after RSI/spikes (most expensive per-symbol pass)
                 if time.time() > _deadline:
+                    _mark_cycle_deadline_abort("cycle_deadline_exceeded", "rsi_and_spikes")
                     logger.warning("Cycle deadline exceeded after RSI/spikes — aborting early")
                     return
 
@@ -11281,6 +11395,7 @@ def run_checks():
                     summary.get("bear_downtrend_long_blocked", 0) + oh_bear_blocked
                 )
                 if time.time() > _deadline:
+                    _mark_cycle_deadline_abort("cycle_deadline_exceeded", "overheated_oversold")
                     logger.warning(
                         "Cycle deadline exceeded after overheated_oversold — "
                         "skipping remaining optional strategies"
@@ -11422,6 +11537,7 @@ def run_checks():
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
                 if time.time() > _deadline:
+                    _mark_cycle_deadline_abort("cycle_deadline_exceeded", "weekly_ema_refresh")
                     logger.warning("Cycle deadline exceeded before weekly/EMA refresh — aborting early")
                     return
 
@@ -11448,6 +11564,9 @@ def run_checks():
                     try:
                         refresh_weekly_monthly_highs(refresh_pool, deadline=_deadline)
                         if time.time() > _deadline:
+                            _mark_cycle_deadline_abort(
+                                "cycle_deadline_exceeded", "weekly_monthly_refresh"
+                            )
                             logger.warning(
                                 "Cycle deadline reached after weekly/monthly refresh — aborting remaining work"
                             )
@@ -11474,6 +11593,7 @@ def run_checks():
                     try:
                         refresh_ema200_4h([s for s, _ in liquid_pairs], deadline=_deadline)
                         if time.time() > _deadline:
+                            _mark_cycle_deadline_abort("cycle_deadline_exceeded", "ema200_refresh")
                             logger.warning(
                                 "Cycle deadline reached after EMA refresh — aborting remaining work"
                             )
@@ -15381,7 +15501,36 @@ def run_checks():  # type: ignore[no-redef]
         return
     try:
         _original_run_checks()
+    except _CycleDeadlineExceeded:
+        # The worker is daemonized and may finish its current HTTP timeout in
+        # the background, but it must never hold the polling scheduler open.
+        pass
     finally:
+        context = _cycle_context()
+        if context.get("deadline_abort") and not context.get("abort_logged"):
+            finished = time.time()
+            started = float(context.get("cycle_started_ts", finished))
+            skipped = list(context.get("skipped_strategies", []))
+            reason = context.get("abort_reason", "cycle_deadline_exceeded")
+            summary = context.get("summary")
+            if isinstance(summary, dict):
+                summary["deadline_abort"] = True
+                summary["abort_reason"] = reason
+                summary["abort_stage"] = context.get("abort_stage")
+                summary["skipped_strategies"] = skipped
+                summary["elapsed_seconds"] = round(finished - started, 1)
+                with state_lock:
+                    state["last_run"] = time.strftime(
+                        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(finished)
+                    )
+                    state["last_run_summary"] = summary
+            logger.error(
+                "Cycle aborted cycle_id=%s duration=%.1fs reason=%s "
+                "stage=%s skipped_strategies=%s",
+                context.get("cycle_id", "none"), finished - started, reason,
+                context.get("abort_stage", "unknown"), ",".join(skipped),
+            )
+            _set_cycle_context(abort_logged=True)
         _run_checks_lock.release()
         _clear_cycle_context()
 
