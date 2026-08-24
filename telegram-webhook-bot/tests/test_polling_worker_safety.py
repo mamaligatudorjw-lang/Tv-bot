@@ -8,6 +8,7 @@ from app import (
     _begin_cycle,
     _clear_cycle_context,
     _cycle_side_effect_allowed,
+    _cycle_cancel_requested,
     _end_cycle,
     _run_timed_strategy,
     _set_cycle_context,
@@ -30,16 +31,25 @@ def test_timeout_blocks_late_side_effect_and_worker_exits_cooperatively():
         cancel_event=threading.Event(),
     )
     side_effects = []
+    worker_finished = threading.Event()
+    cancellation_seen = threading.Event()
 
     def slow_strategy():
-        time.sleep(0.06)
-        if _cycle_side_effect_allowed("test_write", symbol="TESTUSDT"):
-            side_effects.append("late-write")
+        try:
+            time.sleep(0.06)
+            if _cycle_cancel_requested():
+                cancellation_seen.set()
+            if _cycle_side_effect_allowed("test_write", symbol="TESTUSDT"):
+                side_effects.append("late-write")
+        finally:
+            worker_finished.set()
 
     try:
         with pytest.raises(_CycleDeadlineExceeded):
             _run_timed_strategy("test_timeout", slow_strategy)
         time.sleep(0.08)
+        assert cancellation_seen.is_set()
+        assert worker_finished.is_set()
         assert side_effects == []
     finally:
         _cleanup_cycle(cycle_id)
