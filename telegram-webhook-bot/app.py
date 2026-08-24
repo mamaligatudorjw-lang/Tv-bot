@@ -24,6 +24,64 @@ logger = logging.getLogger(__name__)
 # Per-polling-thread context used for performance telemetry and for measuring
 # how old the shared ticker snapshot was when an alert was delivered.
 _cycle_telemetry = threading.local()
+_cycle_control_lock = threading.RLock()
+_active_cycle_id: str | None = None
+_active_strategy_workers: set[str] = set()
+
+
+def _begin_cycle(cycle_id: str) -> threading.Event:
+    """Register the single current cycle and return its cancellation signal."""
+    global _active_cycle_id
+    cancel_event = threading.Event()
+    with _cycle_control_lock:
+        _active_cycle_id = cycle_id
+    return cancel_event
+
+
+def _end_cycle(cycle_id: str) -> None:
+    global _active_cycle_id
+    with _cycle_control_lock:
+        if _active_cycle_id == cycle_id:
+            _active_cycle_id = None
+
+
+def _cycle_side_effect_allowed(action: str, *, symbol: str | None = None) -> bool:
+    """Reject writes/delivery from an aborted or no-longer-owned cycle."""
+    context = _cycle_context()
+    cycle_id = context.get("cycle_id")
+    if not cycle_id:
+        return True
+    cancel_event = context.get("cancel_event")
+    with _cycle_control_lock:
+        allowed = (
+            _active_cycle_id == cycle_id
+            and not context.get("deadline_abort")
+            and not (cancel_event and cancel_event.is_set())
+        )
+    if not allowed:
+        logger.warning(
+            "polling_side_effect_blocked cycle_id=%s action=%s symbol=%s",
+            cycle_id, action, symbol or "-",
+        )
+    return allowed
+
+
+def _strategy_worker_acquire(strategy: str, worker_id: str) -> bool:
+    """Prevent a new cycle from running a strategy while its old worker lives."""
+    with _cycle_control_lock:
+        if strategy in _active_strategy_workers:
+            logger.warning(
+                "polling_strategy_overlap_blocked strategy=%s worker_id=%s",
+                strategy, worker_id,
+            )
+            return False
+        _active_strategy_workers.add(strategy)
+        return True
+
+
+def _strategy_worker_release(strategy: str) -> None:
+    with _cycle_control_lock:
+        _active_strategy_workers.discard(strategy)
 
 
 class _CycleLogFilter(logging.Filter):
@@ -74,6 +132,12 @@ def _clear_cycle_context() -> None:
         del _cycle_telemetry.context
 
 
+def _cycle_cancel_requested() -> bool:
+    context = _cycle_context()
+    cancel_event = context.get("cancel_event")
+    return bool(cancel_event and cancel_event.is_set())
+
+
 class _CycleDeadlineExceeded(BaseException):
     """Raised outside the worker when a strategy outlives the cycle budget."""
 
@@ -81,6 +145,10 @@ class _CycleDeadlineExceeded(BaseException):
         super().__init__(strategy, timeout)
         self.strategy = strategy
         self.timeout = timeout
+
+
+class _CycleWorkerCancelled(BaseException):
+    """Stop a timed worker at its next cooperative per-symbol checkpoint."""
 
 
 _POLLING_OPTIONAL_ORDER = (
@@ -150,6 +218,8 @@ def _log_symbol_timing(strategy: str, symbol: str, started: float, finished: flo
         context.get("cycle_id", "none"), strategy, symbol, started, finished,
         finished - started,
     )
+    if _cycle_cancel_requested():
+        raise _CycleWorkerCancelled()
 
 
 def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
@@ -177,10 +247,17 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
         "worker_id": f"{context.get('cycle_id', 'none')}:{strategy}:{int(started * 1000)}",
         "cancel_requested": False,
     }
+    if not _strategy_worker_acquire(strategy, worker_state["worker_id"]):
+        _mark_cycle_deadline_abort("strategy_overlap", strategy, include_stage=True)
+        raise _CycleDeadlineExceeded(strategy, 0.0)
 
     def _worker() -> None:
         # Thread-local cycle context is not inherited by daemon worker threads.
-        _cycle_telemetry.context = dict(context, worker_id=worker_state["worker_id"])
+        _cycle_telemetry.context = dict(
+            context,
+            worker_id=worker_state["worker_id"],
+            cancel_event=context.get("cancel_event"),
+        )
         logger.info(
             "polling_worker_enter cycle_id=%s strategy=%s worker_id=%s",
             context.get("cycle_id", "none"), strategy, worker_state["worker_id"],
@@ -198,6 +275,7 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
                 worker_state["cancel_requested"],
                 worker_state["cancel_requested"],
             )
+            _strategy_worker_release(strategy)
             finished.set()
 
     worker = threading.Thread(
@@ -211,6 +289,9 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
         _mark_cycle_deadline_abort(
             "strategy_timeout", strategy, include_stage=True
         )
+        cancel_event = context.get("cancel_event")
+        if cancel_event is not None:
+            cancel_event.set()
         worker_state["cancel_requested"] = True
         logger.warning(
             "polling_worker_timeout cycle_id=%s strategy=%s worker_id=%s "
@@ -1804,6 +1885,8 @@ def _demo_open_position(
     """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
     a real position as TOP for the /demo three-way comparison.
     When SHADOW_ONLY_MODE=True, shadow positions are sent to Telegram."""
+    if not _cycle_side_effect_allowed("demo_position", symbol=symbol):
+        return
     _validate_demo_price_basis(
         direction, entry_price, sl_price, tp_price, alert_type
     )
@@ -1819,6 +1902,8 @@ def _demo_open_position(
     try:
         with _db_lock:
             conn = _get_db()
+            if not _cycle_side_effect_allowed("demo_insert", symbol=symbol):
+                return
             # Skip if the same symbol+direction+alert_type is already open.
             # alert_type is included so each strategy holds its position independently;
             # one open ema_cross LONG does not block an overheated_24h LONG on the same coin.
@@ -1865,6 +1950,14 @@ def _demo_open_position(
                 logger.warning(
                     "Demo UNIQUE constraint blocked INSERT: %s %s/%s pid=%d ts=%d",
                     symbol, direction, alert_type or "?", _pid, _ts_recv,
+                )
+                return
+            if not _cycle_side_effect_allowed("demo_commit", symbol=symbol):
+                conn.execute("DELETE FROM demo_positions WHERE id=?", (_new_demo_id,))
+                conn.commit()
+                logger.warning(
+                    "Demo late insert rolled back: %s %s/%s id=%d",
+                    symbol, direction, alert_type or "?", _new_demo_id,
                 )
                 return
         logger.info(
@@ -1923,6 +2016,8 @@ def _demo_open_position(
                     _shadow_body = notify_body
                     if _shadow_conflict:
                         _shadow_body = f"{notify_body}\n{_shadow_conflict}"
+                    if not _cycle_side_effect_allowed("telegram_shadow", symbol=symbol):
+                        return
                     _delivery_ok = _telegram_send(
                         TELEGRAM_CHAT_ID,
                         f"🔬 SHADOW — не реальная позиция\n{_shadow_body}",
@@ -6050,6 +6145,8 @@ def send_alert_with_log(
     `delivered` is False for hidden/silenced/below-min-score suppressions and
     for Telegram send errors, so cooldowns stay live for retry.
     """
+    if not _cycle_side_effect_allowed("alert", symbol=symbol):
+        return (False, None)
     if is_hidden(alert_type, symbol):
         logger.info("Suppressed %s/%s (hidden by user prefs)", symbol, alert_type)
         return (False, None)
@@ -6140,12 +6237,16 @@ def send_alert_with_log(
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
         # consume cooldowns so we don't spam every cycle.
+        if not _cycle_side_effect_allowed("telegram_send", symbol=symbol):
+            return (False, None)
         ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
         return (ok, None)
     _cycle = _cycle_context()
     _snapshot_ts = _cycle.get("snapshot_ts")
     _snapshot_price = (_cycle.get("snapshot_prices") or {}).get(symbol)
     _alert_insert_ts = time.time()
+    if not _cycle_side_effect_allowed("alert_insert", symbol=symbol):
+        return (False, None)
     try:
         with _db_lock:
             conn = _get_db()
@@ -6215,6 +6316,14 @@ def send_alert_with_log(
     edge_label = _get_signal_edge_label(alert_type, recommendation)
     if edge_label:
         body_text = body_text + edge_label
+    if not _cycle_side_effect_allowed("telegram_send", symbol=symbol):
+        try:
+            with _db_lock:
+                _get_db().execute("DELETE FROM alerts WHERE id=?", (alert_id,))
+                _get_db().commit()
+        except Exception as _exc:
+            logger.warning("send_alert_with_log rollback suppressed error: %s", _exc)
+        return (False, None)
     if not _telegram_send(TELEGRAM_CHAT_ID, body_text, reply_markup=markup):
         # Rollback so cooldowns don't suppress retries
         try:
@@ -6996,8 +7105,9 @@ def check_intraday_streak(
                 factor_funding_pts=_fl_fpts_sl, factor_lsr_pts=_fl_lpts_sl,
             )
             if delivered:
-                with state_lock:
-                    state["last_streak_1h_alerted"][symbol] = now
+                if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                    with state_lock:
+                        state["last_streak_1h_alerted"][symbol] = now
                 logger.info(
                     "Streak1h LONG: %s streak=%dh gain=%.1f%% rsi=%s",
                     symbol, streak_up, streak_gain, rsi_str,
@@ -7083,8 +7193,9 @@ def check_intraday_streak(
                 factor_funding_pts=_fl_fpts_ss, factor_lsr_pts=_fl_lpts_ss,
             )
             if delivered:
-                with state_lock:
-                    state["last_streak_1h_alerted"][symbol] = now
+                if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                    with state_lock:
+                        state["last_streak_1h_alerted"][symbol] = now
                 logger.info(
                     "Streak1h SHORT: %s streak=%dh loss=%.1f%% rsi=%s",
                     symbol, streak_down, streak_loss, rsi_str,
@@ -7235,8 +7346,9 @@ def check_vwap_reversion(
             ),
         )
 
-        with state_lock:
-            state["last_vwap_rev_alerted"][symbol] = now
+        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+            with state_lock:
+                state["last_vwap_rev_alerted"][symbol] = now
 
         logger.info(
             "VWAP reversion shadow %s %s: dist=%.1f%% vwap=%.6g atr1h=%.6g sl=%.6g tp=%.6g",
@@ -7352,8 +7464,9 @@ def check_bollinger_squeeze(
             score=62,
         )
 
-        with state_lock:
-            state["last_bb_squeeze_alerted"][symbol] = now
+        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+            with state_lock:
+                state["last_bb_squeeze_alerted"][symbol] = now
 
         logger.info(
             "BB squeeze shadow %s %s: price=%.6g squeeze_width=%.2f%% sl=%.6g tp=%.6g",
@@ -7374,6 +7487,8 @@ def _register_cont_pending(
     Persists to DB so the window survives bot restarts.
     Covers alert_type in {'overheated_24h', 'ema_cross'}.
     """
+    if not _cycle_side_effect_allowed("continuation_pending", symbol=symbol):
+        return
     now = int(time.time())
     key = (symbol, alert_type)
     with _cont_lock:
@@ -7386,6 +7501,8 @@ def _register_cont_pending(
             "last_confirm_price": None,
         }
     try:
+        if not _cycle_side_effect_allowed("continuation_pending_db", symbol=symbol):
+            return
         with _db_lock:
             _get_db().execute(
                 "INSERT OR REPLACE INTO continuation_pending "
@@ -7503,8 +7620,9 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
         # Register for continuation confirmation (auto-watch for 4h)
         _register_cont_pending(symbol, "ema_cross", direction, price, atr_4h)
 
-        with state_lock:
-            state["last_ema_cross_alerted"][symbol] = now
+        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+            with state_lock:
+                state["last_ema_cross_alerted"][symbol] = now
 
         logger.info(
             "EMA cross shadow %s %s: price=%.6g gap=%.3f%% sl=%.6g tp=%.6g",
@@ -7638,8 +7756,9 @@ def check_high_rejection_short(tickers: dict[str, dict]) -> int:
             ),
         )
 
-        with state_lock:
-            state["last_high_rejection_alerted"][symbol] = now
+        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+            with state_lock:
+                state["last_high_rejection_alerted"][symbol] = now
 
         logger.info(
             "high_rejection SHORT shadow %s: range=%.1f%% dist_high=%.1f%% "
@@ -7774,8 +7893,9 @@ def check_low_rejection_long(tickers: dict[str, dict]) -> int:
             ),
         )
 
-        with state_lock:
-            state["last_low_rejection_alerted"][symbol] = now
+        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+            with state_lock:
+                state["last_low_rejection_alerted"][symbol] = now
 
         logger.info(
             "low_rejection LONG shadow %s: range=%.1f%% dist_low=%.1f%% "
@@ -7922,8 +8042,9 @@ def check_range_breakout_long(tickers: dict[str, dict]) -> int:
             ),
         )
 
-        with state_lock:
-            state["last_range_breakout_alerted"][symbol] = now
+        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+            with state_lock:
+                state["last_range_breakout_alerted"][symbol] = now
 
         logger.info(
             "range_breakout LONG shadow %s: seg=%dh width=%.1f%% drop=%.1f%% "
@@ -8024,8 +8145,9 @@ def check_whale_lsr_shift(liquid_pairs: list[tuple[str, float]]) -> int:
             symbol, "whale_lsr_shift", direction, price, body, score,
         )
         if delivered:
-            with state_lock:
-                state["last_lsr_shift_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_lsr_shift_alerted"][symbol] = now
             logger.info(
                 "WhaleLSR %s: %s lsr %.2f→%.2f delta %.2f",
                 direction, symbol, prev_lsr, current_lsr, delta,
@@ -8559,8 +8681,9 @@ def check_momentum(
         if not delivered:
             continue
 
-        with state_lock:
-            state["last_momentum_alerted"].setdefault(symbol, {})[threshold] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_momentum_alerted"].setdefault(symbol, {})[threshold] = now
         sent += 1
     return sent, ema_blocked
 
@@ -8852,8 +8975,9 @@ def check_overheated_oversold(
                         )
                     # Auto-register for continuation confirmation
                     _register_cont_pending(symbol, "overheated_24h", "LONG", price, atr)
-                    with state_lock:
-                        state["last_overheated_alerted"][symbol] = now
+                    if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                        with state_lock:
+                            state["last_overheated_alerted"][symbol] = now
                     sent_oh += 1
                     continue
 
@@ -8863,8 +8987,9 @@ def check_overheated_oversold(
                     factor_funding_pts=_fl_fpts_oh, factor_lsr_pts=_fl_lpts_oh,
                 )
                 if delivered:
-                    with state_lock:
-                        state["last_overheated_alerted"][symbol] = now
+                    if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                        with state_lock:
+                            state["last_overheated_alerted"][symbol] = now
                     sent_oh += 1
                     # Track real demo position so we can measure win-rate later
                     _dsl_oh, _dtp_oh = _compute_demo_sl_tp("LONG", price, atr)
@@ -9084,8 +9209,9 @@ def check_overheated_oversold(
                     score=_oe_score,
                     notify_body=_oe_body,
                 )
-                with state_lock:
-                    state["last_overheated_early_alerted"][symbol] = now
+                if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                    with state_lock:
+                        state["last_overheated_early_alerted"][symbol] = now
                 logger.info(
                     "overheated_early FINAL %s: reason=PASS pct24=+%.1f%% "
                     "rsi=%.1f btc_pct24=%s score_base=%d funding_pts=%d "
@@ -9279,8 +9405,9 @@ def check_overheated_oversold(
                     factor_funding_pts=_fl_fpts_os, factor_lsr_pts=_fl_lpts_os,
                 )
                 if delivered:
-                    with state_lock:
-                        state["last_oversold_alerted"][symbol] = now
+                    if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                        with state_lock:
+                            state["last_oversold_alerted"][symbol] = now
                     sent_os += 1
                     # Track real demo position (SL/TP already computed above for notification)
                     if _dsl_os and _dtp_os:
@@ -9419,8 +9546,9 @@ def check_breakdown_short(
             rsi=rsi, pct24=pct24,
         )
         if delivered:
-            with state_lock:
-                state["last_breakdown_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_breakdown_alerted"][symbol] = now
             logger.info(
                 "Breakdown SHORT alert sent: %s path=%s pct24=%.1f rsi=%.1f",
                 symbol, "B(oversold)" if path_b else "A(room)", pct24, rsi,
@@ -9551,8 +9679,9 @@ def check_momentum_long(
             symbol, "momentum_long", "SHORT", price, body, score,
         )
         if delivered:
-            with state_lock:
-                state["last_momentum_long_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_momentum_long_alerted"][symbol] = now
             logger.info("Momentum fade SHORT sent: %s pct24=%.1f rsi=%.1f", symbol, pct24, rsi)
             sent += 1
 
@@ -9670,8 +9799,9 @@ def check_new_listing_pumps(
             symbol, "new_listing_short", "SHORT", price, body, score,
         )
         if delivered:
-            with state_lock:
-                state["last_new_listing_short_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_new_listing_short_alerted"][symbol] = now
             logger.info(
                 "New-listing SHORT alert: %s listing=%.6g now=%.6g pump=+%.1f%% rsi=%.1f",
                 symbol, listing_price, price, pump_pct, rsi,
@@ -9782,8 +9912,9 @@ def check_volume_surge_crsi(tickers: dict[str, dict] | None) -> int:
         )
         delivered, _aid = send_alert_with_log(symbol, kind, rec, price, body, score)
         if delivered:
-            with state_lock:
-                state["last_vol_surge_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_vol_surge_alerted"][symbol] = now
             sent += 1
     return sent
 
@@ -9978,8 +10109,9 @@ def check_pump_24h_fade(
             )
             if not delivered:
                 continue
-            with state_lock:
-                state["last_pump_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_pump_alerted"][symbol] = now
             sent += 1
         else:
             # Shadow mode: log and record, don't send real Telegram alert
@@ -9987,8 +10119,9 @@ def check_pump_24h_fade(
                 "pump_24h_fade SHADOW: %s pct24=+%.1f%% rsi=%.1f score=%d",
                 symbol, pct24, rsi, score,
             )
-            with state_lock:
-                state["last_pump_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_pump_alerted"][symbol] = now
 
         _dsl_pf, _dtp_pf = _compute_pump_fade_sl_tp(entry_price, atr)
         if _dsl_pf and _dtp_pf:
@@ -10674,8 +10807,9 @@ def check_listing_dump_long(
             symbol, "listing_dump_long", "LONG", price, body, score,
         )
         if delivered:
-            with state_lock:
-                state["last_listing_dump_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_listing_dump_alerted"][symbol] = now
             logger.info(
                 "Listing-dump LONG: %s listing=%.6g peak=%.6g now=%.6g "
                 "dump=−%.1f%% rsi=%.1f",
@@ -10815,8 +10949,9 @@ def check_listing_peak_short(
                 tp_pct=NEW_LISTING_PEAK_TP_PCT,
                 timeout_hours=NEW_LISTING_PEAK_TIMEOUT_H,
             )
-            with state_lock:
-                state["last_listing_peak_alerted"][symbol] = now
+            if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+                with state_lock:
+                    state["last_listing_peak_alerted"][symbol] = now
             logger.info(
                 "Listing-peak SHORT: %s listing=%.6g pump=+%.1f%% "
                 "rsi=%.1f sl=%.0f%% tp=%.0f%% timeout=%.0fh",
@@ -11282,7 +11417,12 @@ def run_checks():
     logger.info("Starting Binance check cycle...")
     start = time.time()
     cycle_id = f"{os.getpid()}-{int(start * 1000)}"
-    _set_cycle_context(cycle_id=cycle_id, cycle_started_ts=start)
+    cancel_event = _begin_cycle(cycle_id)
+    _set_cycle_context(
+        cycle_id=cycle_id,
+        cycle_started_ts=start,
+        cancel_event=cancel_event,
+    )
     _deadline = start + _CYCLE_HARD_LIMIT
     _set_cycle_context(deadline=_deadline)
 
@@ -12277,9 +12417,10 @@ def run_checks():
                                 alert_type="confluence",
                                 score=_flip_score,
                             )
-                        with state_lock:
-                            for key, s in b["cooldowns"]:
-                                state[key][s] = now_ts
+                        if _cycle_side_effect_allowed("cooldown", symbol=sym):
+                            with state_lock:
+                                for key, s in b["cooldowns"]:
+                                    state[key][s] = now_ts
                     continue
 
                 # ── Confluence position cap (last gate before real signal) ──────
@@ -12384,9 +12525,10 @@ def run_checks():
                         _cf_opened_this_cycle += 1   # track against cap
 
                 # Mark cooldowns only for signals that actually contributed to a sent alert
-                with state_lock:
-                    for key, s in b["cooldowns"]:
-                        state[key][s] = now_ts
+                if _cycle_side_effect_allowed("cooldown", symbol=sym):
+                    with state_lock:
+                        for key, s in b["cooldowns"]:
+                            state[key][s] = now_ts
 
             if summary["single_signals_skipped"]:
                 logger.info(
@@ -15594,6 +15736,7 @@ def run_checks():  # type: ignore[no-redef]
                 context.get("abort_stage", "unknown"), ",".join(skipped),
             )
             _set_cycle_context(abort_logged=True)
+        _end_cycle(context.get("cycle_id", "none"))
         _run_checks_lock.release()
         _clear_cycle_context()
 
