@@ -1,0 +1,39 @@
+{
+  "method": "read-only mirrored-barrier reconstruction (corrected R accounting)",
+  "window_hours": 24,
+  "candle_interval": "15m",
+  "source": "Gate.io futures",
+  "note": "Barrier touch: candle high/low. Unresolved R: last close. TP-first=+2R, SL-first=-1R, ambiguous excluded from WR and avg R.",
+  "SHORT": {
+    "tested_direction": "LONG",
+    "n": 325,
+    "tp_first": 122,
+    "sl_first": 166,
+    "unresolved": 36,
+    "ambiguous": 1,
+    "reconciliation_sum": 325,
+    "resolved": 288,
+    "resolved_wr_pct": 42.36,
+    "avg_r": 0.2868,
+    "unresolved_avg_r": 0.4145,
+    "unresolved_r_min": -0.9244,
+    "unresolved_r_max": 1.4534,
+    "preliminary": false
+  },
+  "LONG": {
+    "tested_direction": "SHORT",
+    "n": 348,
+    "tp_first": 104,
+    "sl_first": 210,
+    "unresolved": 33,
+    "ambiguous": 1,
+    "reconciliation_sum": 348,
+    "resolved": 314,
+    "resolved_wr_pct": 33.12,
+    "avg_r": 0.0509,
+    "unresolved_avg_r": 0.5954,
+    "unresolved_r_min": -0.5683,
+    "unresolved_r_max": 1.668,
+    "preliminary": false
+  }
+}
