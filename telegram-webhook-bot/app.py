@@ -138,6 +138,43 @@ def _cycle_cancel_requested() -> bool:
     return bool(cancel_event and cancel_event.is_set())
 
 
+def _prefetch_job(fn, *args, **kwargs) -> dict:
+    """Run one prefetch call while preserving when its result became valid."""
+    try:
+        value = fn(*args, **kwargs)
+        return {"value": value, "finished_ts": time.time(), "error": None}
+    except Exception as exc:
+        return {"value": None, "finished_ts": time.time(), "error": exc}
+
+
+def _prefetch_result_allowed(
+    symbol: str, finished_ts: float, source: str
+) -> bool:
+    """Reject results produced after this cycle's deadline or cancellation."""
+    context = _cycle_context()
+    deadline = context.get("deadline")
+    reason = None
+    if deadline is not None and finished_ts > float(deadline):
+        reason = "finished_after_deadline"
+    elif context.get("deadline_abort") or _cycle_cancel_requested():
+        reason = "cycle_aborted"
+    if reason is None:
+        return True
+
+    counters = dict(context.get("prefetch_telemetry") or {})
+    counters["late" if reason == "finished_after_deadline" else "discarded"] = (
+        counters.get("late" if reason == "finished_after_deadline" else "discarded", 0) + 1
+    )
+    _set_cycle_context(prefetch_telemetry=counters)
+    logger.warning(
+        "prefetch_result_discarded cycle_id=%s source=%s symbol=%s "
+        "finished_ts=%.3f deadline=%s reason=%s",
+        context.get("cycle_id", "none"), source, symbol, finished_ts,
+        f"{float(deadline):.3f}" if deadline is not None else "none", reason,
+    )
+    return False
+
+
 class _CycleDeadlineExceeded(BaseException):
     """Raised outside the worker when a strategy outlives the cycle budget."""
 
@@ -7018,14 +7055,18 @@ def check_intraday_streak(
     closes_by_symbol = {}
     prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     prefetch_jobs = {
-        prefetch_ex.submit(_fetch_1h_closes, symbol, limit=14): symbol
+        prefetch_ex.submit(_prefetch_job, _fetch_1h_closes, symbol, limit=14): symbol
         for symbol in prefetch_symbols
     }
     try:
         for future in as_completed(prefetch_jobs, timeout=15.0):
             symbol = prefetch_jobs[future]
             try:
-                closes_by_symbol[symbol] = future.result() or []
+                payload = future.result()
+                if _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "intraday_streak"
+                ) and payload["error"] is None:
+                    closes_by_symbol[symbol] = payload["value"] or []
             except Exception:
                 closes_by_symbol[symbol] = []
     except FuturesTimeoutError:
@@ -7290,14 +7331,18 @@ def check_vwap_reversion(
     candles_by_symbol = {}
     prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     prefetch_jobs = {
-        prefetch_ex.submit(_fetch_1h_ohlcv, symbol, limit=25): symbol
+        prefetch_ex.submit(_prefetch_job, _fetch_1h_ohlcv, symbol, limit=25): symbol
         for symbol in prefetch_symbols
     }
     try:
         for future in as_completed(prefetch_jobs, timeout=15.0):
             symbol = prefetch_jobs[future]
             try:
-                candles_by_symbol[symbol] = future.result() or []
+                payload = future.result()
+                if _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "vwap_reversion"
+                ) and payload["error"] is None:
+                    candles_by_symbol[symbol] = payload["value"] or []
             except Exception:
                 candles_by_symbol[symbol] = []
     except FuturesTimeoutError:
@@ -7461,14 +7506,20 @@ def check_bollinger_squeeze(
                 last = state["last_bb_squeeze_alerted"].get(symbol, 0)
             if now - last >= BB_SQUEEZE_COOLDOWN:
                 prefetch_jobs[prefetch_ex.submit(
-                    _fetch_1h_ohlcv, symbol, limit=BB_SQUEEZE_PCT10_WIN + 3
+                    _prefetch_job, _fetch_1h_ohlcv, symbol,
+                    limit=BB_SQUEEZE_PCT10_WIN + 3
                 )] = symbol
         except (ValueError, KeyError, TypeError):
             continue
     try:
         for future in as_completed(prefetch_jobs, timeout=15.0):
             try:
-                candles_by_symbol[prefetch_jobs[future]] = future.result() or []
+                symbol = prefetch_jobs[future]
+                payload = future.result()
+                if _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "bollinger_squeeze"
+                ) and payload["error"] is None:
+                    candles_by_symbol[symbol] = payload["value"] or []
             except Exception:
                 candles_by_symbol[prefetch_jobs[future]] = []
     except FuturesTimeoutError:
@@ -7652,14 +7703,20 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
                 last = state["last_ema_cross_alerted"].get(symbol, 0)
             if now - last >= EMA_CROSS_COOLDOWN:
                 prefetch_jobs[prefetch_ex.submit(
-                    _fetch_4h_ohlcv, symbol, limit=EMA_CROSS_SLOW + 10
+                    _prefetch_job, _fetch_4h_ohlcv, symbol,
+                    limit=EMA_CROSS_SLOW + 10
                 )] = symbol
         except (ValueError, KeyError, TypeError):
             continue
     try:
         for future in as_completed(prefetch_jobs, timeout=15.0):
             try:
-                candles_by_symbol[prefetch_jobs[future]] = future.result() or []
+                symbol = prefetch_jobs[future]
+                payload = future.result()
+                if _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "ema_crossover"
+                ) and payload["error"] is None:
+                    candles_by_symbol[symbol] = payload["value"] or []
             except Exception:
                 candles_by_symbol[prefetch_jobs[future]] = []
     except FuturesTimeoutError:
@@ -7984,14 +8041,20 @@ def check_low_rejection_long(tickers: dict[str, dict]) -> int:
     candles_by_symbol = {}
     prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     prefetch_jobs = {
-        prefetch_ex.submit(_gateio_klines, symbol, "15m", candle_limit): symbol
+        prefetch_ex.submit(
+            _prefetch_job, _gateio_klines, symbol, "15m", candle_limit
+        ): symbol
         for symbol in prefetch_symbols
     }
     try:
         for future in as_completed(prefetch_jobs, timeout=15.0):
             symbol = prefetch_jobs[future]
             try:
-                candles_by_symbol[symbol] = future.result() or []
+                payload = future.result()
+                if _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "low_rejection_long"
+                ) and payload["error"] is None:
+                    candles_by_symbol[symbol] = payload["value"] or []
             except Exception:
                 candles_by_symbol[symbol] = []
     except FuturesTimeoutError:
