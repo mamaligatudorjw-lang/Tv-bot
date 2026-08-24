@@ -1,0 +1,196 @@
+{
+  "config": {
+    "strategy": "bb_squeeze",
+    "strategy_24h_threshold_pct": 15.0,
+    "strategy_rsi_min": 70.0,
+    "strategy_rsi_max": null,
+    "strategy_duration_window_hours": 12,
+    "strategy_duration_min_up": 0,
+    "window_hours": 24,
+    "candle_interval": "15m",
+    "opposite_window_minutes": 60,
+    "range_threshold_pct": 50.0,
+    "min_group_n_preliminary": 20,
+    "r_definition": "directional pnl divided by absolute entry-to-SL risk; TP=+2R target and SL=-1R where geometry is 2:1",
+    "same_candle_policy": "ambiguous, excluded from resolved win rate and avg R",
+    "fix_split_ts": 1787422679,
+    "fix_split_utc": "2026-08-22T18:17:59+00:00"
+  },
+  "coverage": {
+    "signals_loaded": 709,
+    "signals_reported": 709,
+    "signals_eligible_for_fixed_window_metrics": 673,
+    "symbols_loaded": 374,
+    "hourly_symbols_loaded": null,
+    "symbol_fetch_failures": {
+      "USELESSUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=USELESS_USDT&interval=15m&from=1787205355&to=1787378155",
+      "USTCUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=USTC_USDT&interval=15m&from=1787504428&to=1787598633",
+      "USUALUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=USUAL_USDT&interval=15m&from=1787410976&to=1787583776",
+      "USUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=US_USDT&interval=15m&from=1786724516&to=1787131578",
+      "UVXYUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=UVXY_USDT&interval=15m&from=1787379471&to=1787552271",
+      "VANAUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=VANA_USDT&interval=15m&from=1787072334&to=1787245134",
+      "VELVETUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=VELVET_USDT&interval=15m&from=1786597630&to=1787390432",
+      "VIRTUALUSDT": "429 Client Error: Too Many Requests for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=VIRTUAL_USDT&interval=15m&from=1786727089&to=1787550412"
+    },
+    "candle_interval": "15m",
+    "signal_min_utc": "2026-08-13T11:15:00+00:00",
+    "signal_max_utc": "2026-08-24T19:09:05+00:00",
+    "analysis_run_utc": "2026-08-24T19:10:54.395684+00:00",
+    "window_not_elapsed": 25,
+    "missing_price": 11,
+    "range_missing": 11,
+    "rsi_missing": 709,
+    "rsi_engine_snapshot": 0,
+    "rsi_reconstructed_legacy": 709,
+    "trend_delay_missing": 709,
+    "shadow_rows": 709,
+    "non_shadow_rows": 0,
+    "fix_split_ts": 1787422679,
+    "fix_split_utc": "2026-08-22T18:17:59+00:00",
+    "reported_by_fix_cohort": {
+      "pre_fix": 549,
+      "post_fix": 160
+    },
+    "eligible_by_fix_cohort": {
+      "pre_fix": 542,
+      "post_fix": 131
+    }
+  },
+  "overall": {
+    "n": 673,
+    "tp_first": 176,
+    "sl_first": 452,
+    "resolved": 628,
+    "unresolved": 43,
+    "ambiguous": 2,
+    "missing_price": 0,
+    "win_rate_resolved_pct": 28.03,
+    "avg_r": -0.1316,
+    "preliminary": false
+  },
+  "by_strategy": {
+    "bb_squeeze": {
+      "n": 673,
+      "tp_first": 176,
+      "sl_first": 452,
+      "resolved": 628,
+      "unresolved": 43,
+      "ambiguous": 2,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 28.03,
+      "avg_r": -0.1316,
+      "preliminary": false
+    }
+  },
+  "by_fix_cohort": {
+    "pre_fix": {
+      "n": 542,
+      "tp_first": 161,
+      "sl_first": 339,
+      "resolved": 500,
+      "unresolved": 40,
+      "ambiguous": 2,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 32.2,
+      "avg_r": -0.0095,
+      "preliminary": false
+    },
+    "post_fix": {
+      "n": 131,
+      "tp_first": 15,
+      "sl_first": 113,
+      "resolved": 128,
+      "unresolved": 3,
+      "ambiguous": 0,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 11.72,
+      "avg_r": -0.6348,
+      "preliminary": false
+    }
+  },
+  "short_only": {
+    "overall": {
+      "n": 325,
+      "tp_first": 69,
+      "sl_first": 236,
+      "resolved": 305,
+      "unresolved": 18,
+      "ambiguous": 2,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 22.62,
+      "avg_r": -0.296,
+      "preliminary": false
+    },
+    "opposite_within_60m": {
+      "no": {
+        "n": 322,
+        "tp_first": 69,
+        "sl_first": 234,
+        "resolved": 303,
+        "unresolved": 17,
+        "ambiguous": 2,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 22.77,
+        "avg_r": -0.2923,
+        "preliminary": false
+      },
+      "yes": {
+        "n": 3,
+        "tp_first": 0,
+        "sl_first": 2,
+        "resolved": 2,
+        "unresolved": 1,
+        "ambiguous": 0,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 0.0,
+        "avg_r": -0.6949,
+        "preliminary": true
+      }
+    },
+    "range_24h": {
+      "below_50%": {
+        "n": 325,
+        "tp_first": 69,
+        "sl_first": 236,
+        "resolved": 305,
+        "unresolved": 18,
+        "ambiguous": 2,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 22.62,
+        "avg_r": -0.296,
+        "preliminary": false
+      }
+    }
+  },
+  "long_only": {
+    "overall": {
+      "n": 348,
+      "tp_first": 107,
+      "sl_first": 216,
+      "resolved": 323,
+      "unresolved": 25,
+      "ambiguous": 0,
+      "missing_price": 0,
+      "win_rate_resolved_pct": 33.13,
+      "avg_r": 0.0211,
+      "preliminary": false
+    },
+    "rsi_1h": {},
+    "rsi_oversold": {},
+    "trend_delay": {
+      "no_consecutive_trend": {
+        "n": 348,
+        "tp_first": 107,
+        "sl_first": 216,
+        "resolved": 323,
+        "unresolved": 25,
+        "ambiguous": 0,
+        "missing_price": 0,
+        "win_rate_resolved_pct": 33.13,
+        "avg_r": 0.0211,
+        "preliminary": false
+      }
+    },
+    "sustainability_up_count_12": {}
+  }
+}
