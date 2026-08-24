@@ -16,6 +16,7 @@ from app import (
     _set_cycle_context,
     _strategy_worker_acquire,
     _strategy_worker_release,
+    check_low_rejection_long,
 )
 
 
@@ -102,3 +103,18 @@ def test_late_valid_prefetch_data_is_discarded_and_cannot_create_signal():
         assert _cycle_context()["prefetch_telemetry"]["late"] == 1
     finally:
         _cleanup_cycle(cycle_id)
+
+
+def test_missing_prefetch_data_cannot_create_signal(monkeypatch):
+    """An empty prefetch response follows the no-data path, not a signal path."""
+    monkeypatch.setattr("app._gateio_klines", lambda *args, **kwargs: [])
+    tickers = {
+        "NODATAUSDT": {
+            "quoteVolume": 1_000_000,
+            "highPrice": 120,
+            "lowPrice": 100,
+            "lastPrice": 104,
+        }
+    }
+
+    assert check_low_rejection_long(tickers) == 0
