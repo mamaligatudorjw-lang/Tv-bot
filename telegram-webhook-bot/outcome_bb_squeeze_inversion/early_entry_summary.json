@@ -1,0 +1,27 @@
+{
+  "variant": "former SHORT tested LONG; entry at breakout 1h candle open",
+  "n_input": 325,
+  "source": "Gate.io futures",
+  "outcome_candles": "15m",
+  "window_hours": 24,
+  "risk": "same absolute ATR-derived risk distance as original signal; mirrored levels; TP=+2R, SL=-1R",
+  "fetch_failures": {},
+  "metrics": {
+    "n": 325,
+    "tp_first": 33,
+    "sl_first": 274,
+    "unresolved": 18,
+    "ambiguous": 0,
+    "reconciliation_sum": 325,
+    "resolved": 307,
+    "resolved_wr_pct": 10.75,
+    "avg_r": -0.6207,
+    "preliminary": false
+  },
+  "entry_missing": 0,
+  "baseline": {
+    "wr_resolved_pct": 42.36,
+    "avg_r": 0.2868,
+    "entry": "breakout candle close"
+  }
+}
