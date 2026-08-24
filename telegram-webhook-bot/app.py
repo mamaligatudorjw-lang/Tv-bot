@@ -4281,6 +4281,8 @@ def _shadow_notif_allowed(notif_key: str) -> bool:
 
 def _shadow_strategy_telegram_allowed(alert_type: str | None) -> bool:
     """Return whether a shadow strategy may create a Telegram notification."""
+    if alert_type == BB_SQUEEZE_INVERTED_ALERT_TYPE:
+        return False
     if alert_type in ("ema_cross", "ema_cross_confirmed"):
         return EMA_CROSS_TELEGRAM_NOTIFICATIONS
     return True
@@ -5910,6 +5912,7 @@ BB_SQUEEZE_VOL_MULT     = 1.3     # breakout candle volume must be ≥1.3× 10-b
 BB_SQUEEZE_ATR_SL_MULT  = 1.0    # SL = 1.0 × 1h-ATR
 BB_SQUEEZE_ATR_TP_MULT  = 2.0    # TP dist = 2.0 × SL dist  (R:R 2:1)
 BB_SQUEEZE_COOLDOWN     = 28800   # 8h per symbol
+BB_SQUEEZE_INVERTED_ALERT_TYPE = "bb_squeeze_inverted_test"
 
 # --- EMA Crossover shadow (9/21, 4h timeframe, gap threshold) ---
 # 1h attempted but EMA(9/21) gaps max at 0.22% on 1h — threshold 0.3-0.5% unreachable.
@@ -7479,6 +7482,30 @@ def check_vwap_reversion(
     return sent
 
 
+def _open_inverted_bb_squeeze_shadow(
+    symbol: str,
+    entry_price: float,
+    original_sl_price: float,
+    original_tp_price: float,
+) -> None:
+    """Record the close-entry LONG counterfactual for a BB SHORT breakout.
+
+    This is telemetry only: its distinct alert type is explicitly blocked from
+    shadow Telegram delivery, and it never touches the BB cooldown or position
+    accounting. Swapping the original barriers mirrors the validated 2:1 test.
+    """
+    _demo_open_position(
+        symbol,
+        "LONG",
+        entry_price,
+        original_tp_price,
+        original_sl_price,
+        is_shadow=True,
+        shadow_reason="bb_squeeze_short_direction_inversion",
+        alert_type=BB_SQUEEZE_INVERTED_ALERT_TYPE,
+    )
+
+
 def check_bollinger_squeeze(
     tickers: dict[str, dict],
     rsi_map: dict[str, float],
@@ -7619,6 +7646,10 @@ def check_bollinger_squeeze(
             alert_type="bb_squeeze",
             score=62,
         )
+        if direction == "SHORT":
+            _open_inverted_bb_squeeze_shadow(
+                symbol, b_close, sl_price, tp_price
+            )
 
         if _cycle_side_effect_allowed("cooldown", symbol=symbol):
             with state_lock:
