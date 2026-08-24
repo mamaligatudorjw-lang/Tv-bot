@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 import threading
 import time
 
@@ -103,6 +104,36 @@ def test_late_valid_prefetch_data_is_discarded_and_cannot_create_signal():
         assert _cycle_context()["prefetch_telemetry"]["late"] == 1
     finally:
         _cleanup_cycle(cycle_id)
+
+
+def test_prefetch_future_finishing_after_budget_is_unreachable():
+    """A future that outlives collection is never consumed by this cycle."""
+    executor = ThreadPoolExecutor(max_workers=1)
+    collected = []
+    started = threading.Event()
+    finished = threading.Event()
+
+    def slow_prefetch():
+        started.set()
+        time.sleep(0.05)
+        finished.set()
+        return {"value": [["valid"]], "finished_ts": time.time(), "error": None}
+
+    future = executor.submit(slow_prefetch)
+    jobs = {future: "LATEUSDT"}
+    try:
+        assert started.wait(0.2)
+        with pytest.raises(FuturesTimeoutError):
+            for completed in as_completed(jobs, timeout=0.005):
+                collected.append(completed.result())
+
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        assert finished.wait(0.2)
+        assert future.done()
+        assert collected == []
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def test_missing_prefetch_data_cannot_create_signal(monkeypatch):

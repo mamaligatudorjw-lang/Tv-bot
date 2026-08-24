@@ -40,3 +40,16 @@ behavior.
 
 **How to apply:** Record worker provenance and exclude startup/mixed sessions
 before calculating pass rates or claiming statistical confirmation.
+
+Prefetch futures are intentionally single-cycle inputs: after the bounded
+`as_completed` window, pending futures are cancelled where possible and the
+executor is shut down without waiting. An already-running future may finish,
+but its result is not retained or consumed by this or a later cycle.
+
+**Why:** Waiting for per-symbol late-result telemetry would misclassify an
+unreachable future as a missing production event; safety comes from preventing
+the result from entering the signal pipeline.
+
+**How to apply:** Test both the late-valid discard path for results that are
+actually consumed after a hard deadline and the unreachable path for futures
+that finish after collection timeout.

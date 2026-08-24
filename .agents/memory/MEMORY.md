@@ -6,4 +6,4 @@
 - [Gate.io candle analysis](gateio-candle-analysis.md) — historical requests need chunking without limit and bounded concurrency to avoid false zero-coverage reports.
 - [Shadow cooldown persistence](shadow-cooldown-persistence.md) — per-symbol shadow cooldowns must restore after restart or Telegram signals can duplicate.
 - [Polling cycle log parsing](polling-cycle-log-parsing.md) — segment the append-only log by scheduler sessions before pairing cycle start and terminal lines.
-- [Bounded polling workers](bounded-polling-workers.md) — cycle deadlines need daemonized workers plus explicit abort telemetry; context is thread-local.
+- [Bounded polling workers](bounded-polling-workers.md) — cycle deadlines need abort telemetry; late prefetch futures are unreachable after collection timeout.

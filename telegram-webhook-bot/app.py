@@ -7075,6 +7075,10 @@ def check_intraday_streak(
             len(closes_by_symbol), len(prefetch_jobs),
         )
     finally:
+        # Futures that miss this bounded collection window are deliberately
+        # not retained or handed to a later cycle.  cancel() only prevents
+        # work that has not started; an already-running call may finish in
+        # the background, but nobody calls result() on it after this point.
         for future in prefetch_jobs:
             future.cancel()
         prefetch_ex.shutdown(wait=False, cancel_futures=True)
