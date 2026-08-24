@@ -1,0 +1,55 @@
+{
+  "method": "read-only mirrored-barrier reconstruction",
+  "window_hours": 24,
+  "candle_interval": "15m",
+  "source": "Gate.io futures",
+  "source_rows": 673,
+  "symbols": 370,
+  "fetch_failures": {},
+  "cohorts": {
+    "SHORT": {
+      "tested_direction": "LONG",
+      "metrics": {
+        "n": 325,
+        "tp_first": 122,
+        "sl_first": 166,
+        "unresolved": 36,
+        "ambiguous": 1,
+        "missing_price": 0,
+        "reconciliation_sum": 325,
+        "resolved": 288,
+        "resolved_wr_pct": 42.36,
+        "avg_r": -0.0897,
+        "preliminary": false
+      },
+      "outcome_counts": {
+        "unresolved": 36,
+        "sl_first": 166,
+        "tp_first": 122,
+        "ambiguous": 1
+      }
+    },
+    "LONG": {
+      "tested_direction": "SHORT",
+      "metrics": {
+        "n": 348,
+        "tp_first": 104,
+        "sl_first": 210,
+        "unresolved": 33,
+        "ambiguous": 1,
+        "missing_price": 0,
+        "reconciliation_sum": 348,
+        "resolved": 314,
+        "resolved_wr_pct": 33.12,
+        "avg_r": -0.2488,
+        "preliminary": false
+      },
+      "outcome_counts": {
+        "sl_first": 210,
+        "tp_first": 104,
+        "unresolved": 33,
+        "ambiguous": 1
+      }
+    }
+  }
+}
