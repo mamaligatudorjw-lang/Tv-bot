@@ -26,3 +26,17 @@ has started.
 
 **How to apply:** Set cancellation when the deadline expires, reject stale
 cycle writes/delivery, and release the strategy gate only when the worker exits.
+
+Production validation should treat a warmed-cycle sample as valid only when it
+comes from one uninterrupted worker/PID and one final code version; startup
+cycles and mixed-version history must be excluded. A repeated overlap abort on a
+slow strategy is also evidence that the overlap gate is protecting the next
+cycle, not merely a test-only condition.
+
+**Why:** A 10-cycle production sample showed the overlap guard blocking the
+same slow strategy in alternating cycles while all later target strategies
+still entered successfully; earlier mixed-PID reports had obscured this
+behavior.
+
+**How to apply:** Record worker provenance and exclude startup/mixed sessions
+before calculating pass rates or claiming statistical confirmation.
