@@ -7002,6 +7002,42 @@ def check_intraday_streak(
             logger.debug("check_intraday_streak suppressed error: %s", _exc)
             pass
 
+    prefetch_symbols = []
+    for symbol, t in tickers.items():
+        try:
+            if (
+                float(t["quoteVolume"]) >= MIN_VOLUME_USDT
+                and abs(float(t["priceChangePercent"])) >= STREAK_1H_PRE_FILTER
+            ):
+                with state_lock:
+                    last = state["last_streak_1h_alerted"].get(symbol, 0)
+                if now - last >= STREAK_1H_COOLDOWN:
+                    prefetch_symbols.append(symbol)
+        except (ValueError, KeyError, TypeError):
+            continue
+    closes_by_symbol = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    prefetch_jobs = {
+        prefetch_ex.submit(_fetch_1h_closes, symbol, limit=14): symbol
+        for symbol in prefetch_symbols
+    }
+    try:
+        for future in as_completed(prefetch_jobs, timeout=15.0):
+            symbol = prefetch_jobs[future]
+            try:
+                closes_by_symbol[symbol] = future.result() or []
+            except Exception:
+                closes_by_symbol[symbol] = []
+    except FuturesTimeoutError:
+        logger.warning(
+            "Intraday streak prefetch budget exhausted; kept %d/%d results",
+            len(closes_by_symbol), len(prefetch_jobs),
+        )
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
+
     for symbol, t in tickers.items():
         try:
             pct24   = float(t["priceChangePercent"])
@@ -7027,7 +7063,7 @@ def check_intraday_streak(
         rsi = rsi_map.get(symbol)
 
         # Fetch 1h candles
-        closes = _fetch_1h_closes(symbol, limit=14)
+        closes = closes_by_symbol.get(symbol, [])
         if not closes or len(closes) < STREAK_1H_MIN + 1:
             continue
 
@@ -7238,6 +7274,41 @@ def check_vwap_reversion(
         return 0
     sent = 0
     now = time.time()
+    prefetch_symbols = []
+    for symbol, t in tickers.items():
+        try:
+            if (
+                float(t["quoteVolume"]) >= MIN_VOLUME_USDT
+                and abs(float(t["priceChangePercent"])) >= STREAK_1H_PRE_FILTER
+            ):
+                with state_lock:
+                    last = state["last_vwap_rev_alerted"].get(symbol, 0)
+                if now - last >= VWAP_REVERSION_COOLDOWN:
+                    prefetch_symbols.append(symbol)
+        except (ValueError, KeyError, TypeError):
+            continue
+    candles_by_symbol = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    prefetch_jobs = {
+        prefetch_ex.submit(_fetch_1h_ohlcv, symbol, limit=25): symbol
+        for symbol in prefetch_symbols
+    }
+    try:
+        for future in as_completed(prefetch_jobs, timeout=15.0):
+            symbol = prefetch_jobs[future]
+            try:
+                candles_by_symbol[symbol] = future.result() or []
+            except Exception:
+                candles_by_symbol[symbol] = []
+    except FuturesTimeoutError:
+        logger.warning(
+            "VWAP reversion prefetch budget exhausted; kept %d/%d results",
+            len(candles_by_symbol), len(prefetch_jobs),
+        )
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
 
     for symbol, t in tickers.items():
         try:
@@ -7259,7 +7330,7 @@ def check_vwap_reversion(
             continue
 
         # Fetch full 1h OHLCV (need high/low/vol for VWAP; limit 25 = 24 completed candles)
-        candles = _fetch_1h_ohlcv(symbol, limit=25)
+        candles = candles_by_symbol.get(symbol, [])
         if not candles or len(candles) < STREAK_1H_MIN + 2:
             continue
 
@@ -7379,6 +7450,36 @@ def check_bollinger_squeeze(
         return 0
     sent = 0
     now = time.time()
+    candles_by_symbol = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    prefetch_jobs = {}
+    for symbol, t in tickers.items():
+        try:
+            if float(t["quoteVolume"]) < MIN_VOLUME_USDT:
+                continue
+            with state_lock:
+                last = state["last_bb_squeeze_alerted"].get(symbol, 0)
+            if now - last >= BB_SQUEEZE_COOLDOWN:
+                prefetch_jobs[prefetch_ex.submit(
+                    _fetch_1h_ohlcv, symbol, limit=BB_SQUEEZE_PCT10_WIN + 3
+                )] = symbol
+        except (ValueError, KeyError, TypeError):
+            continue
+    try:
+        for future in as_completed(prefetch_jobs, timeout=15.0):
+            try:
+                candles_by_symbol[prefetch_jobs[future]] = future.result() or []
+            except Exception:
+                candles_by_symbol[prefetch_jobs[future]] = []
+    except FuturesTimeoutError:
+        logger.warning(
+            "Bollinger squeeze prefetch budget exhausted; kept %d/%d results",
+            len(candles_by_symbol), len(prefetch_jobs),
+        )
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
 
     for symbol, t in tickers.items():
         try:
@@ -7397,7 +7498,7 @@ def check_bollinger_squeeze(
         if now - last < BB_SQUEEZE_COOLDOWN:
             continue
 
-        candles = _fetch_1h_ohlcv(symbol, limit=BB_SQUEEZE_PCT10_WIN + 3)
+        candles = candles_by_symbol.get(symbol, [])
         if not candles or len(candles) < BB_SQUEEZE_PERIOD + 10:
             continue
 
@@ -7540,6 +7641,36 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
         return 0
     sent = 0
     now = time.time()
+    candles_by_symbol = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    prefetch_jobs = {}
+    for symbol, t in tickers.items():
+        try:
+            if float(t["quoteVolume"]) < MIN_VOLUME_USDT:
+                continue
+            with state_lock:
+                last = state["last_ema_cross_alerted"].get(symbol, 0)
+            if now - last >= EMA_CROSS_COOLDOWN:
+                prefetch_jobs[prefetch_ex.submit(
+                    _fetch_4h_ohlcv, symbol, limit=EMA_CROSS_SLOW + 10
+                )] = symbol
+        except (ValueError, KeyError, TypeError):
+            continue
+    try:
+        for future in as_completed(prefetch_jobs, timeout=15.0):
+            try:
+                candles_by_symbol[prefetch_jobs[future]] = future.result() or []
+            except Exception:
+                candles_by_symbol[prefetch_jobs[future]] = []
+    except FuturesTimeoutError:
+        logger.warning(
+            "EMA crossover prefetch budget exhausted; kept %d/%d results",
+            len(candles_by_symbol), len(prefetch_jobs),
+        )
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
 
     for symbol, t in tickers.items():
         try:
@@ -7557,7 +7688,7 @@ def check_ema_crossover(tickers: dict[str, dict]) -> int:
         if now - last < EMA_CROSS_COOLDOWN:
             continue
 
-        candles = _fetch_4h_ohlcv(symbol, limit=EMA_CROSS_SLOW + 10)
+        candles = candles_by_symbol.get(symbol, [])
         if not candles or len(candles) < EMA_CROSS_SLOW + 3:
             continue
 
@@ -7656,6 +7787,43 @@ def check_high_rejection_short(tickers: dict[str, dict]) -> int:
     now = time.time()
     fresh_bars = int(HIGH_REJECTION_HIGH_AGE_H * 4)   # 15m candles in the fresh-high window
     candle_limit = max(fresh_bars + 2, 18)             # enough for window + vol avg + ATR
+    candles_by_symbol = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    prefetch_jobs = {}
+    for symbol, t in tickers.items():
+        try:
+            high_24h = float(t.get("highPrice") or 0)
+            low_24h = float(t.get("lowPrice") or 0)
+            price = float(t["lastPrice"])
+            if (
+                float(t["quoteVolume"]) >= MIN_VOLUME_USDT
+                and high_24h > 0 and low_24h > 0 and price > 0
+                and (high_24h - low_24h) / low_24h * 100.0 >= HIGH_REJECTION_RANGE_PCT
+                and (high_24h - price) / high_24h * 100.0 >= HIGH_REJECTION_DIST_FROM_HIGH
+            ):
+                with state_lock:
+                    last_alerted = state["last_high_rejection_alerted"].get(symbol, 0)
+                if now - last_alerted >= HIGH_REJECTION_COOLDOWN:
+                    prefetch_jobs[prefetch_ex.submit(
+                        _gateio_klines, symbol, "15m", candle_limit
+                    )] = symbol
+        except (ValueError, KeyError, TypeError):
+            continue
+    try:
+        for future in as_completed(prefetch_jobs, timeout=15.0):
+            try:
+                candles_by_symbol[prefetch_jobs[future]] = future.result() or []
+            except Exception:
+                candles_by_symbol[prefetch_jobs[future]] = []
+    except FuturesTimeoutError:
+        logger.warning(
+            "High rejection prefetch budget exhausted; kept %d/%d results",
+            len(candles_by_symbol), len(prefetch_jobs),
+        )
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
 
     for symbol, t in tickers.items():
         try:
@@ -7690,7 +7858,7 @@ def check_high_rejection_short(tickers: dict[str, dict]) -> int:
 
         # Fetch 15m candles for conditions 3, 4, 5 and ATR
         try:
-            candles = _gateio_klines(symbol, "15m", candle_limit)
+            candles = candles_by_symbol.get(symbol, [])
         except Exception as _exc:
             logger.debug("check_high_rejection_short klines %s: %s", symbol, _exc)
             continue
@@ -7793,6 +7961,48 @@ def check_low_rejection_long(tickers: dict[str, dict]) -> int:
     now = time.time()
     fresh_bars = int(LOW_REJECTION_LOW_AGE_H * 4)    # 15m candles in the fresh-low window
     candle_limit = max(fresh_bars + 2, 18)            # enough for window + vol avg + ATR
+    prefetch_symbols = []
+    for symbol, t in tickers.items():
+        try:
+            high_24h = float(t.get("highPrice") or 0)
+            low_24h = float(t.get("lowPrice") or 0)
+            price = float(t["lastPrice"])
+            if (
+                float(t["quoteVolume"]) >= MIN_VOLUME_USDT
+                and high_24h > 0
+                and low_24h > 0
+                and price > 0
+                and (high_24h - low_24h) / low_24h * 100.0 >= LOW_REJECTION_RANGE_PCT
+                and (price - low_24h) / low_24h * 100.0 >= LOW_REJECTION_DIST_FROM_LOW
+            ):
+                with state_lock:
+                    last_alerted = state["last_low_rejection_alerted"].get(symbol, 0)
+                if now - last_alerted >= LOW_REJECTION_COOLDOWN:
+                    prefetch_symbols.append(symbol)
+        except (ValueError, KeyError, TypeError):
+            continue
+    candles_by_symbol = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
+    prefetch_jobs = {
+        prefetch_ex.submit(_gateio_klines, symbol, "15m", candle_limit): symbol
+        for symbol in prefetch_symbols
+    }
+    try:
+        for future in as_completed(prefetch_jobs, timeout=15.0):
+            symbol = prefetch_jobs[future]
+            try:
+                candles_by_symbol[symbol] = future.result() or []
+            except Exception:
+                candles_by_symbol[symbol] = []
+    except FuturesTimeoutError:
+        logger.warning(
+            "Low rejection prefetch budget exhausted; kept %d/%d results",
+            len(candles_by_symbol), len(prefetch_jobs),
+        )
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
 
     for symbol, t in tickers.items():
         try:
@@ -7827,7 +8037,7 @@ def check_low_rejection_long(tickers: dict[str, dict]) -> int:
 
         # Fetch 15m candles for conditions 3, 4, 5 and ATR
         try:
-            candles = _gateio_klines(symbol, "15m", candle_limit)
+            candles = candles_by_symbol.get(symbol, [])
         except Exception as _exc:
             logger.debug("check_low_rejection_long klines %s: %s", symbol, _exc)
             continue
@@ -8743,6 +8953,7 @@ def check_overheated_oversold(
     duration_ohlcv: dict[str, list] = {}
     duration_closes: dict[str, list[float] | None] = {}
     duration_jobs: dict = {}
+    duration_prefetch_symbols: dict[str, str] = {}
     duration_ex = ThreadPoolExecutor(max_workers=MAX_WORKERS)
     try:
         for _sym, _t in tickers.items():
@@ -8761,6 +8972,7 @@ def check_overheated_oversold(
                 duration_jobs[duration_ex.submit(
                     _fetch_1h_ohlcv, _sym, OVERHEATED_DISPLAY_HISTORY
                 )] = (_sym, "ohlcv")
+                duration_prefetch_symbols[_sym] = "ohlcv"
             elif _pct <= _os_t and _rsi <= RSI_OVERSOLD:
                 with state_lock:
                     _last_os = state["last_oversold_alerted"].get(_sym, 0)
@@ -8768,10 +8980,13 @@ def check_overheated_oversold(
                     duration_jobs[duration_ex.submit(
                         _fetch_1h_closes, _sym, OVERHEATED_DURATION_WINDOW + 2
                     )] = (_sym, "closes")
+                    duration_prefetch_symbols[_sym] = "closes"
         try:
-            _duration_timeout = (
-                max(0.0, deadline - time.time()) if deadline is not None else None
-            )
+            # Prefetch is an optimization, never a second cycle-wide wait.
+            # Missing results are treated like the existing insufficient-data
+            # path below; they must not fall back to serial network calls.
+            _remaining = max(0.0, deadline - time.time()) if deadline is not None else None
+            _duration_timeout = min(20.0, _remaining) if _remaining is not None else 20.0
             for _future in as_completed(duration_jobs, timeout=_duration_timeout):
                 _sym, _kind = duration_jobs[_future]
                 _value = _future.result()
@@ -8781,14 +8996,28 @@ def check_overheated_oversold(
                     duration_closes[_sym] = _value
         except FuturesTimeoutError:
             logger.warning(
-                "Polling deadline reached in overheated duration prefetch; "
-                "kept %d/%d results",
+                "Overheated duration prefetch budget exhausted; kept %d/%d results",
                 len(duration_ohlcv) + len(duration_closes), len(duration_jobs),
             )
     finally:
         for _future in duration_jobs:
             _future.cancel()
         duration_ex.shutdown(wait=False, cancel_futures=True)
+    for _sym, _kind in duration_prefetch_symbols.items():
+        if _kind == "ohlcv":
+            duration_ohlcv.setdefault(_sym, [])
+        else:
+            duration_closes.setdefault(_sym, [])
+
+    def _ensure_atr(symbol: str, atr: float | None) -> float | None:
+        if atr is not None:
+            return atr
+        raw_atr = _fetch_4h_ohlcv(symbol, limit=30)
+        if raw_atr:
+            _, fresh_atr = _calc_vwap_atr1h(raw_atr)
+            if fresh_atr and fresh_atr > 0:
+                return fresh_atr
+        return None
 
     for symbol, t in tickers.items():
         # Network-heavy work below is intentionally sequential because the
@@ -8861,20 +9090,15 @@ def check_overheated_oversold(
             )
         with state_lock:
             atr = state["atr_4h"].get(symbol)
-        # Cold-cache fallback: if ATR is missing (e.g. after bot restart before the
-        # hourly refresh), make a direct 4h candle fetch so the first signals after
-        # restart get ATR-based SL/TP instead of the fixed-pct fallback.
-        if atr is None:
-            _raw_atr_cb = _fetch_4h_ohlcv(symbol, limit=30)
-            if _raw_atr_cb:
-                _, _fresh_atr = _calc_vwap_atr1h(_raw_atr_cb)
-                if _fresh_atr and _fresh_atr > 0:
-                    atr = _fresh_atr
 
         if (
             pct24 >= oh_threshold
             and RSI_OVERBOUGHT <= rsi < OVERHEATED_24H_RSI_CAP
         ):
+            # Cold-cache fallback is only needed for an actual signal branch;
+            # fetching ATR for every ticker made this strategy needlessly
+            # serialize hundreds of unrelated 4h requests.
+            atr = _ensure_atr(symbol, atr)
             if not OVERHEATED_ENABLED:
                 logger.info("overheated_24h SKIP %s: disabled", symbol)
                 continue  # OVERHEATED_ENABLED=False: overheated_24h заблокирован
@@ -9077,6 +9301,7 @@ def check_overheated_oversold(
 
         elif (pct24 >= oh_threshold
               and OVERHEATED_EARLY_RSI_MIN <= rsi < RSI_OVERBOUGHT):
+            atr = _ensure_atr(symbol, atr)
             # ── overheated_early: Ранний импульс LONG (RSI 55–70) ────────────
             # Shadow-only test vs overheated_24h.  The RSI range is earlier
             # (55–70 here vs ≥70 in parent) and the score floor is deliberately
@@ -9290,6 +9515,7 @@ def check_overheated_oversold(
                 )
 
         elif pct24 <= os_threshold and rsi <= RSI_OVERSOLD:
+            atr = _ensure_atr(symbol, atr)
             # LONG bounce: coin dumped hard AND RSI is deeply oversold →
             # extreme capitulation, high probability of reversal.  Enter LONG
             # to ride the bounce. Data: 48.9% WR in shadow, R:R 2.23.
