@@ -6,3 +6,17 @@ id = "4zl1HulGwtM_cyir2yqeM"
 uri = "file://exports/app.py.txt"
 type = "text"
 title = "app.py — полный код (2360 строк)"
+
+[[outputs]]
+id = "PAagJ-n9_aio-d_e4IjBG"
+uri = "file://telegram-webhook-bot/outcome_high_rejection_analysis/analysis.md"
+type = "text"
+title = "High rejection short analysis"
+description = "Read-only weekly, quartile, and TP-first versus SL-first condition reconciliation."
+
+[[outputs]]
+id = "ibEsl7v3pBZh7_HmigClv"
+uri = "file://telegram-webhook-bot/outcome_high_rejection_analysis/analysis.json"
+type = "unspecified"
+title = "High rejection analysis data"
+description = "Machine-readable coverage, cohort metrics, provenance, and condition comparisons."

@@ -1,0 +1,182 @@
+{
+  "coverage": {
+    "signals_loaded": 79,
+    "eligible": 71,
+    "outcomes": {
+      "n": 71,
+      "tp_first": 15,
+      "sl_first": 27,
+      "unresolved": 29,
+      "ambiguous": 0,
+      "resolved": 42,
+      "wr_resolved_pct": 35.71,
+      "meets_n20": true
+    },
+    "tp_first_n": 15,
+    "sl_first_n": 27,
+    "symbols_loaded": 66,
+    "candle_fetch_failures": {},
+    "runtime_log_matches": 79,
+    "runtime_log_values_are_rounded": true,
+    "rsi_is_active_gate": false,
+    "exact_condition_values_persisted_in_demo_positions": false
+  },
+  "weekly": {
+    "2026-W34": {
+      "n": 60,
+      "tp_first": 13,
+      "sl_first": 18,
+      "unresolved": 29,
+      "ambiguous": 0,
+      "resolved": 31,
+      "wr_resolved_pct": 41.94,
+      "meets_n20": true
+    },
+    "2026-W35": {
+      "n": 11,
+      "tp_first": 2,
+      "sl_first": 9,
+      "unresolved": 0,
+      "ambiguous": 0,
+      "resolved": 11,
+      "wr_resolved_pct": 18.18,
+      "meets_n20": false
+    }
+  },
+  "quartiles": {
+    "Q1": {
+      "n": 17,
+      "tp_first": 3,
+      "sl_first": 12,
+      "unresolved": 2,
+      "ambiguous": 0,
+      "resolved": 15,
+      "wr_resolved_pct": 20.0,
+      "meets_n20": false
+    },
+    "Q2": {
+      "n": 18,
+      "tp_first": 3,
+      "sl_first": 5,
+      "unresolved": 10,
+      "ambiguous": 0,
+      "resolved": 8,
+      "wr_resolved_pct": 37.5,
+      "meets_n20": false
+    },
+    "Q3": {
+      "n": 18,
+      "tp_first": 2,
+      "sl_first": 1,
+      "unresolved": 15,
+      "ambiguous": 0,
+      "resolved": 3,
+      "wr_resolved_pct": 66.67,
+      "meets_n20": false
+    },
+    "Q4": {
+      "n": 18,
+      "tp_first": 7,
+      "sl_first": 9,
+      "unresolved": 2,
+      "ambiguous": 0,
+      "resolved": 16,
+      "wr_resolved_pct": 43.75,
+      "meets_n20": false
+    }
+  },
+  "tp_vs_sl": {
+    "comparison_allowed_at_n20": false,
+    "fields": {
+      "range_pct_log": {
+        "tp_first": {
+          "n": 15,
+          "median": 43.6,
+          "mean": 41.686667,
+          "min": 21.6,
+          "max": 71.8
+        },
+        "sl_first": {
+          "n": 27,
+          "median": 30.9,
+          "mean": 55.662963,
+          "min": 20.1,
+          "max": 428.0
+        }
+      },
+      "dist_from_high_pct_log": {
+        "tp_first": {
+          "n": 15,
+          "median": 4.8,
+          "mean": 5.546667,
+          "min": 3.1,
+          "max": 12.7
+        },
+        "sl_first": {
+          "n": 27,
+          "median": 5.3,
+          "mean": 10.055556,
+          "min": 3.0,
+          "max": 77.4
+        }
+      },
+      "volume_ratio_log": {
+        "tp_first": {
+          "n": 15,
+          "median": 2.2,
+          "mean": 2.326667,
+          "min": 1.6,
+          "max": 4.1
+        },
+        "sl_first": {
+          "n": 27,
+          "median": 2.1,
+          "mean": 2.362963,
+          "min": 1.5,
+          "max": 7.1
+        }
+      },
+      "rsi_15m_reconstructed": {
+        "tp_first": {
+          "n": 15,
+          "median": 48.855989,
+          "mean": 52.917435,
+          "min": 25.084746,
+          "max": 81.074421
+        },
+        "sl_first": {
+          "n": 27,
+          "median": 52.542373,
+          "mean": 54.853081,
+          "min": 17.578125,
+          "max": 90.055468
+        }
+      },
+      "bearish_body_pct": {
+        "tp_first": {
+          "n": 15,
+          "median": 2.686081,
+          "mean": 4.316316,
+          "min": 0.165017,
+          "max": 12.149716
+        },
+        "sl_first": {
+          "n": 27,
+          "median": 2.174928,
+          "mean": 3.918004,
+          "min": 0.231029,
+          "max": 41.573372
+        }
+      }
+    }
+  },
+  "field_provenance": {
+    "range_pct_log": "runtime log, rounded to 0.1 percentage point",
+    "dist_from_high_pct_log": "runtime log, rounded to 0.1 percentage point",
+    "volume_ratio_log": "runtime log, rounded to 0.1x",
+    "rsi_15m_reconstructed": "reconstructed diagnostic; not an active gate",
+    "bearish_body_pct": "reconstructed from last completed 15m candle",
+    "candle_range_pct": "reconstructed from last completed 15m candle",
+    "reconstructed_range_and_dist": "15m candle proxy, not exact ticker snapshot"
+  }
+}
