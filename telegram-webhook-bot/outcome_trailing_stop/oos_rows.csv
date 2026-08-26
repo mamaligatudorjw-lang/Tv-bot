@@ -1,0 +1,3 @@
+id,strategy,symbol,direction,is_shadow,step_pct,range_pct,baseline_r,baseline_outcome,alt_r,alt_outcome,trail_ts,trail_price,coverage_error,ts_open_utc,ts_close_utc,delta_r
+4901,overheated_24h,BOBUSDT,LONG,1,8.0,23.90816071874219,-1.0,sl,-1.0,baseline_sl,,,,2026-08-26T06:11:22+00:00,2026-08-26T06:16:15+00:00,0.0
+4911,overheated_24h,BOBUSDT,LONG,1,8.0,29.648115797354624,2.0,tp,2.0,tp,1787727600,0.005043785714285715,,2026-08-26T06:50:12+00:00,2026-08-26T07:06:06+00:00,0.0
