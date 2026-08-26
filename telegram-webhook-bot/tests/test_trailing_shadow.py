@@ -13,6 +13,7 @@ from trailing_shadow import (
     generate_report,
     initialize_schema,
     load_open_trackers,
+    read_report_status,
     tracked_strategy,
 )
 
@@ -209,6 +210,13 @@ def test_report_is_insufficient_then_rolls_bootstrap(tmp_path):
     coverage = generate_report(tmp_path / "alerts.db", output)
 
     assert not coverage["all_strategies_ready"]
+    status = read_report_status(output)
+    assert status["minimum_pairs"] == MIN_FORWARD_PAIRS
+    assert all(
+        not strategy["ready_for_bootstrap"]
+        and strategy["n_pairs"] == MIN_FORWARD_PAIRS - 1
+        for strategy in status["strategies"]
+    )
     with (output / "paired_bootstrap.csv").open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert {row["status"] for row in rows} == {"insufficient"}
@@ -231,6 +239,13 @@ def test_report_is_insufficient_then_rolls_bootstrap(tmp_path):
     db.commit()
     ready = generate_report(tmp_path / "alerts.db", output)
     assert ready["all_strategies_ready"]
+    ready_status = read_report_status(output)
+    assert all(
+        strategy["ready_for_bootstrap"]
+        and strategy["n_pairs"] == MIN_FORWARD_PAIRS
+        and strategy["bootstrap"]["status"] == "ready"
+        for strategy in ready_status["strategies"]
+    )
 
     with (output / "paired_bootstrap.csv").open(newline="") as handle:
         ready_rows = list(csv.DictReader(handle))

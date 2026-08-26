@@ -19,6 +19,7 @@ from trailing_shadow import (
     create_tracker,
     initialize_schema as initialize_trailing_shadow_schema,
     load_open_trackers,
+    read_report_status as read_trailing_shadow_report_status,
     schedule_report as schedule_trailing_shadow_report,
 )
 
@@ -3060,6 +3061,69 @@ def check_demo_positions() -> None:
         schedule_trailing_shadow_report(HIT_RATE_DB_PATH)
 
 
+def handle_shadowtrail_command(chat_id: int) -> None:
+    """Show the latest forward-only trailing shadow sample and CI state."""
+    try:
+        report = read_trailing_shadow_report_status()
+    except FileNotFoundError:
+        _telegram_send(
+            chat_id,
+            "🧪 <b>Forward trailing shadow</b>\n"
+            "Отчёт ещё не создан — tracker-инструментирование запускается "
+            "только для новых позиций после freeze.",
+        )
+        return
+    except Exception as exc:
+        logger.warning("handle_shadowtrail_command failed: %s", exc)
+        _telegram_send(
+            chat_id,
+            "⚠️ Не удалось прочитать trailing-shadow отчёт. Попробуй позже.",
+        )
+        return
+
+    lines = [
+        "🧪 <b>Forward trailing shadow</b>",
+        f"Freeze: <code>{html.escape(report['freeze_utc'])}</code>",
+        f"Отчёт обновлён: <code>{html.escape(report['generated_utc'])}</code>",
+        "",
+    ]
+    for strategy in report["strategies"]:
+        name = strategy["strategy"]
+        label = (
+            "Перегрев 24ч"
+            if name == "overheated_24h"
+            else "EMA Cross confirmed"
+        )
+        n_pairs = strategy["n_pairs"]
+        minimum = strategy["minimum_pairs"]
+        if strategy["ready_for_bootstrap"]:
+            bootstrap = strategy["bootstrap"]
+            lines.append(
+                f"<b>{label}</b>\n"
+                f"  Пары: <b>{n_pairs}/{minimum}+</b> · ✅ CI готов\n"
+                f"  Параметры: step <b>{strategy['step_pct']}%</b>, "
+                f"activation <b>{html.escape(strategy['activation'])}</b>\n"
+                f"  Δ shadow − baseline: <b>{strategy['delta_avg_r']} R</b>\n"
+                f"  Paired bootstrap 95% CI: "
+                f"<b>[{bootstrap.get('mean_ci95_low', '')}, "
+                f"{bootstrap.get('mean_ci95_high', '')}] R</b>"
+            )
+        else:
+            lines.append(
+                f"<b>{label}</b>\n"
+                f"  Пары: <b>{n_pairs}/{minimum}</b> · "
+                "⏳ недостаточно данных, CI пока не рассчитывается\n"
+                f"  Параметры: step <b>{strategy['step_pct']}%</b>, "
+                f"activation <b>{html.escape(strategy['activation'])}</b>"
+            )
+        lines.append("")
+    lines.append(
+        "Shadow независим от production; параметры фиксированы, "
+        "переподбора нет."
+    )
+    _telegram_send(chat_id, "\n".join(lines))
+
+
 def handle_demo_command(chat_id: int) -> None:
     """Show paper-trading stats broken down by signal type, with TP/SL/PnL per position."""
     TYPE_LABELS: dict[str, str] = {
@@ -3809,6 +3873,7 @@ def _poll_telegram_commands() -> None:
         "/demo":        handle_demo_command,
         "/demo2":       handle_demo2_command,
         "/demoshadow":  handle_demoshadow_command,
+        "/shadowtrail": handle_shadowtrail_command,
         "/emacross":    handle_emacross_command,
         "/scorestats":     handle_scorestats_command,
         "/retroanalysis": lambda cid: threading.Thread(
@@ -13926,7 +13991,7 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Команды торговли:</b>\n"
         f"  /trade · /mytrades · /positions · /analyze · /ai\n\n"
         f"<b>Демо P&L:</b>\n"
-        f"  /demo\n\n"
+        f"  /demo · /demoshadow · /shadowtrail\n\n"
         f"<b>Личный трекер позиций:</b>\n"
         f"  /addpos SYMBOL LONG|SHORT — добавить позицию\n"
         f"  /mypos — список открытых позиций\n"

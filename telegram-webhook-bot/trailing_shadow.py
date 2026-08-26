@@ -591,6 +591,45 @@ def generate_report(
     return coverage
 
 
+def read_report_status(
+    output_dir: str | Path = REPORT_DIR,
+) -> dict[str, Any]:
+    """Read the latest persisted report for a read-only Telegram view."""
+    output = Path(output_dir)
+    coverage_path = output / "coverage.json"
+    summary_path = output / "forward_summary.csv"
+    bootstrap_path = output / "paired_bootstrap.csv"
+    if not coverage_path.exists() or not summary_path.exists() or not bootstrap_path.exists():
+        raise FileNotFoundError(
+            "forward trailing shadow report is not available yet"
+        )
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    with summary_path.open(newline="", encoding="utf-8") as handle:
+        summaries = list(csv.DictReader(handle))
+    with bootstrap_path.open(newline="", encoding="utf-8") as handle:
+        bootstrap = list(csv.DictReader(handle))
+    bootstrap_by_strategy = {
+        row["strategy"]: row for row in bootstrap
+    }
+    return {
+        "generated_utc": coverage.get("generated_utc", ""),
+        "freeze_utc": coverage.get("freeze_utc", ""),
+        "minimum_pairs": int(
+            coverage.get("minimum_forward_pairs_per_strategy", MIN_FORWARD_PAIRS)
+        ),
+        "strategies": [
+            {
+                **summary,
+                "n_pairs": int(summary["n_pairs"]),
+                "minimum_pairs": int(summary["minimum_pairs"]),
+                "ready_for_bootstrap": summary["ready_for_bootstrap"] == "True",
+                "bootstrap": bootstrap_by_strategy.get(summary["strategy"], {}),
+            }
+            for summary in summaries
+        ],
+    }
+
+
 def schedule_report(db_path: str | Path) -> bool:
     """Coalesce report jobs so rolling bootstrap never blocks position polling."""
     global _report_running
