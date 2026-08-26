@@ -1,0 +1,4 @@
+strategy,n_selection,n_path_baseline,coverage_excluded_n,selection_avg_r_table,selection_avg_r_recomputed,path_baseline_avg_r,observed_minus_path_avg_r,selection_total_r_recomputed,path_baseline_total_r,exit_vs_level_mismatch_n,tp_n,sl_n,observed_tp_avg_r,observed_sl_avg_r,level_tp_r,level_sl_r
+high_rejection_short,53,53,0,0.246461,0.246461,0.188679,0.057782,13.062459,10.0,27,21,32,2.491766,-1.227019,2.0,-1.0
+ema_cross,344,344,0,0.287268,0.287268,0.325581,-0.038313,98.820184,112.0,221,152,192,2.16207,-1.19695,2.0,-1.0
+overheated_24h,408,408,0,0.186497,0.186497,0.205392,-0.018895,76.090975,83.8,265,165,243,2.256863,-1.219306,1.980606,-1.0

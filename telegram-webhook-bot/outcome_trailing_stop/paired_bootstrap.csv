@@ -1,0 +1,6 @@
+strategy,best_step_pct,n,baseline_avg_r,alt_avg_r,diff_avg_r,mean_ci95_low,mean_ci95_high,mean_ci_excludes_zero,median_diff_r,median_ci95_low,median_ci95_high,median_ci_excludes_zero,positive_diff_n,negative_diff_n,zero_diff_n,bootstrap_iterations,bootstrap_seed
+overheated_24h,8.0,408,0.205392,0.318347,0.112954,0.033429,0.19387,True,0.0,0.0,0.0,False,97,24,287,20000,20260826
+ema_cross_confirmed,6.0,129,0.686047,0.845071,0.159025,0.020349,0.297777,True,0.0,0.0,0.0,False,40,8,81,20000,20260826
+overheated_early,8.0,175,0.337143,0.415212,0.078069,-0.073744,0.228698,False,0.0,0.0,0.0,False,60,17,98,20000,20260826
+ema_cross,5.0,344,0.325581,0.359218,0.033637,-0.058587,0.125416,False,0.0,0.0,0.0,False,97,32,215,20000,20260826
+overheated_confirmed,8.0,212,0.271226,0.313532,0.042305,-0.071253,0.155663,False,0.0,0.0,0.0,False,49,15,148,20000,20260826
