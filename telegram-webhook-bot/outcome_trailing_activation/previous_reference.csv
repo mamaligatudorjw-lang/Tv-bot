@@ -1,0 +1,10 @@
+strategy,previous_best_step_pct,previous_n,previous_baseline_2r_to_alt_loss_n
+bb_squeeze_inverted_test,6.0,25,0
+ema_cross,5.0,344,12
+ema_cross_confirmed,6.0,129,4
+high_rejection_short,3.0,53,1
+low_rejection_long,4.0,29,2
+overheated_24h,8.0,408,6
+overheated_confirmed,8.0,212,9
+overheated_early,8.0,175,11
+oversold_24h,10.0,478,11
