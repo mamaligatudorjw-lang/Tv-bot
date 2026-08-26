@@ -1,0 +1,27 @@
+{
+  "activation_thresholds_r": [
+    "any_profit",
+    0.3,
+    0.5,
+    0.75,
+    1.0
+  ],
+  "generated_utc": "2026-08-26T10:44:44.490954+00:00",
+  "path_interval": "5m",
+  "positions_from_previous_cohort": 1856,
+  "previous_grid_generated_utc": "2026-08-26T06:09:56.963415+00:00",
+  "rows_simulated": 64960,
+  "rows_with_coverage_error": 105,
+  "steps_pct": [
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    8.0,
+    10.0
+  ],
+  "symbol_fetch_failures": {},
+  "symbols_loaded": 403,
+  "symbols_requested": 403
+}

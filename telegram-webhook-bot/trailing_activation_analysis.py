@@ -257,6 +257,10 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             float(row["baseline_r"]) >= 2.0 and float(row["alt_r"]) < 0
             for row in items
         )
+        baseline_sl_to_alt_positive = sum(
+            row["baseline_outcome"] == "sl" and float(row["alt_r"]) > 0
+            for row in items
+        )
         output.append({
             "strategy": strategy,
             "activation_threshold": threshold,
@@ -281,6 +285,7 @@ def summarize(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 row["alt_outcome"] == "trail_stop" for row in items
             ),
             "baseline_2r_to_alt_loss_n": baseline_tp_to_alt_loss,
+            "baseline_sl_to_alt_positive_n": baseline_sl_to_alt_positive,
         })
     return output
 
@@ -318,6 +323,10 @@ def previous_reference(
                 float(row["baseline_r"]) >= 2.0 and float(row["alt_r"]) < 0
                 for row in items
             ),
+            "previous_baseline_sl_to_alt_positive_n": sum(
+                row["baseline_outcome"] == "sl" and float(row["alt_r"]) > 0
+                for row in items
+            ),
         })
     return output
 
@@ -350,8 +359,8 @@ def write_report(
         "",
         "## Summary",
         "",
-        "| Strategy | Activation | Step | n | Baseline total R | Alt total R | Δ total R | Baseline avg R | Alt avg R | Baseline WR | Alt WR | Activated | Trail exits | +2R baseline → alt loss |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | Activation | Step | n | Baseline total R | Alt total R | Δ total R | Baseline avg R | Alt avg R | Baseline WR | Alt WR | Activated | Trail exits | +2R baseline → alt loss | Baseline SL → alt positive |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in ordered:
         lines.append(
@@ -361,7 +370,8 @@ def write_report(
             f"{row['baseline_avg_r']} | {row['alt_avg_r']} | "
             f"{row['baseline_wr_pct']}% | {row['alt_wr_pct']}% | "
             f"{row['activated_n']} | {row['trail_exit_n']} | "
-            f"{row['baseline_2r_to_alt_loss_n']} |"
+            f"{row['baseline_2r_to_alt_loss_n']} | "
+            f"{row['baseline_sl_to_alt_positive_n']} |"
         )
     lines += [
         "",
@@ -370,14 +380,15 @@ def write_report(
         "The prior comparison count is computed from the saved 5m output at each "
         "strategy's prior best step. It is not reused as a new outcome.",
         "",
-        "| Strategy | Prior best step | n | Prior +2R baseline → alt loss |",
-        "|---|---:|---:|---:|",
+        "| Strategy | Prior best step | n | Prior +2R baseline → alt loss | Prior baseline SL → alt positive |",
+        "|---|---:|---:|---:|---:|",
     ]
     for row in previous:
         lines.append(
             f"| {row['strategy']} | {row['previous_best_step_pct']}% | "
             f"{row['previous_n']} | "
             f"{row['previous_baseline_2r_to_alt_loss_n']} |"
+            f" {row['previous_baseline_sl_to_alt_positive_n']} |"
         )
     lines += [
         "",
@@ -465,6 +476,10 @@ def main() -> int:
     write_csv(args.out / "activation_rows.csv", simulated)
     write_csv(args.out / "activation_summary.csv", summaries)
     write_csv(args.out / "previous_reference.csv", previous)
+    (args.out / "coverage.json").write_text(
+        json.dumps(coverage, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     write_report(args.out, summaries, previous, coverage)
     print(json.dumps({
         "positions": len(positions),
