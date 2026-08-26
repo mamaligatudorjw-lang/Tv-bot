@@ -14,6 +14,13 @@ import requests
 from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
+from trailing_shadow import (
+    advance_open_trackers,
+    create_tracker,
+    initialize_schema as initialize_trailing_shadow_schema,
+    load_open_trackers,
+    schedule_report as schedule_trailing_shadow_report,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1997,6 +2004,39 @@ def _demo_open_position(
                     symbol, direction, alert_type or "?", _new_demo_id,
                 )
                 return
+            try:
+                if create_tracker(
+                    conn,
+                    source_demo_id=int(_new_demo_id),
+                    ts_open=_ts_recv,
+                    symbol=symbol,
+                    direction=direction,
+                    alert_type=alert_type or "",
+                    source_is_shadow=is_shadow,
+                    entry_price=entry_price,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                ):
+                    conn.commit()
+                    logger.info(
+                        "Trailing shadow tracker opened: source_id=%d %s %s/%s "
+                        "step=%.1f%% activation=%s",
+                        _new_demo_id,
+                        symbol,
+                        direction,
+                        alert_type,
+                        8.0 if alert_type == "overheated_24h" else 6.0,
+                        "+0.5R" if alert_type == "overheated_24h" else "any_profit",
+                    )
+            except Exception as _shadow_exc:
+                # The source position is already committed. Telemetry failure
+                # must not roll back or alter production/demo execution.
+                conn.rollback()
+                logger.warning(
+                    "Trailing shadow tracker open failed source_id=%d: %s",
+                    _new_demo_id,
+                    _shadow_exc,
+                )
         logger.info(
             "Demo %s: %s %s/%s entry=%.6g sl=%.6g tp=%.6g pid=%d ts=%d",
             "shadow" if is_shadow else "pos",
@@ -2880,14 +2920,17 @@ def check_demo_positions() -> None:
                 "is_shadow, COALESCE(shadow_reason,''), COALESCE(alert_type,'') "
                 "FROM demo_positions WHERE status='open'"
             ).fetchall()
+            trailing_trackers = load_open_trackers(conn)
     except Exception as exc:
         logger.warning("check_demo_positions DB read: %s", exc)
         return
 
-    if not rows:
+    if not rows and not trailing_trackers:
         return
 
-    symbols = list({r[1] for r in rows})
+    symbols = list({r[1] for r in rows} | {
+        str(tracker["symbol"]) for tracker in trailing_trackers
+    })
     prices: dict[str, float] = {}
     candles_1m: dict[str, tuple[float, float]] = {}   # symbol → (c_low, c_high)
 
@@ -2943,6 +2986,20 @@ def check_demo_positions() -> None:
         _t_prices - _t0,
     )
     now_ts = int(time.time())
+    trailing_resolved = 0
+    if trailing_trackers:
+        try:
+            with _db_lock:
+                conn = _get_db()
+                trailing_resolved = advance_open_trackers(
+                    conn, trailing_trackers, prices, now_ts
+                )
+                conn.commit()
+        except Exception as _shadow_exc:
+            logger.warning(
+                "check_demo_positions trailing shadow update: %s", _shadow_exc
+            )
+    source_resolved = False
     for row_id, symbol, direction, entry, sl, tp, is_shadow_pos, shadow_reason_pos, alert_type_pos in rows:
         price = prices.get(symbol)
         if price is None:
@@ -2986,6 +3043,7 @@ def check_demo_positions() -> None:
                     (status, now_ts, exit_price, pnl_usd, wick_close, exit_method, row_id),
                 )
                 conn.commit()
+            source_resolved = True
             logger.info(
                 "Demo %s pos %d %s %s: %s exit=%.6g pnl=$%.2f%s",
                 "shadow" if is_shadow_pos else "real",
@@ -2998,6 +3056,8 @@ def check_demo_positions() -> None:
 
         # Shadow exit notifications intentionally omitted:
         # results are reviewed via /demo and /demoshadow commands.
+    if trailing_resolved or source_resolved:
+        schedule_trailing_shadow_report(HIT_RATE_DB_PATH)
 
 
 def handle_demo_command(chat_id: int) -> None:
@@ -5079,6 +5139,7 @@ def _get_db() -> sqlite3.Connection:
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_demo_open_one_per_strategy "
             "ON demo_positions(symbol, direction, is_shadow, alert_type) WHERE status='open'"
         )
+        initialize_trailing_shadow_schema(_db_conn)
         # Migrate: is_top flag for existing installs
         try:
             _db_conn.execute(
@@ -16211,6 +16272,11 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_demo_positions, "interval", seconds=30, id="demo_check",
+)
+scheduler.add_job(
+    lambda: schedule_trailing_shadow_report(HIT_RATE_DB_PATH),
+    "interval", minutes=5, id="trailing_shadow_report",
+    next_run_time=__import__("datetime").datetime.utcnow(),
 )
 scheduler.add_job(
     _refresh_price_cache, "interval", seconds=10, id="price_cache_refresh",

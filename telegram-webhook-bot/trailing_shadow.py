@@ -133,7 +133,7 @@ def create_tracker(
     if not tracked_strategy(alert_type, ts_open):
         return False
     config = TRAILING_SHADOW_CONFIGS[alert_type]
-    connection.execute(
+    cursor = connection.execute(
         """
         INSERT OR IGNORE INTO trailing_shadow_positions (
             source_demo_id, ts_open, symbol, direction, strategy,
