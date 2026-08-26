@@ -1,0 +1,18 @@
+strategy,n_resolved,tp,sl,wr_pct,avg_r_observed,selected,selection_rule
+ema_cross_confirmed,129,73,56,56.5891,0.685878,yes,n_resolved>=20 and avg_r_observed>0
+bb_squeeze_inverted_test,25,20,5,80.0,0.411079,yes,n_resolved>=20 and avg_r_observed>0
+overheated_early,175,78,97,44.5714,0.407935,yes,n_resolved>=20 and avg_r_observed>0
+pump_fade_confirmed,18,8,10,44.4444,0.347763,no,n_resolved>=20 and avg_r_observed>0
+ema_cross,344,152,192,44.186,0.287268,yes,n_resolved>=20 and avg_r_observed>0
+overheated_confirmed,212,91,121,42.9245,0.273369,yes,n_resolved>=20 and avg_r_observed>0
+high_rejection_short,53,21,32,39.6226,0.246461,yes,n_resolved>=20 and avg_r_observed>0
+overheated_24h,408,165,243,40.4412,0.186497,yes,n_resolved>=20 and avg_r_observed>0
+oversold_24h,481,192,289,39.9168,0.125798,yes,n_resolved>=20 and avg_r_observed>0
+low_rejection_long,29,11,18,37.931,0.085233,yes,n_resolved>=20 and avg_r_observed>0
+liq_reversal,4,2,2,50.0,-0.020004,no,n_resolved>=20 and avg_r_observed>0
+pump_24h_fade,97,31,66,31.9588,-0.061084,no,n_resolved>=20 and avg_r_observed>0
+vwap_reversion,9,3,6,33.3333,-0.095579,no,n_resolved>=20 and avg_r_observed>0
+confluence,494,150,344,30.3644,-0.137075,no,n_resolved>=20 and avg_r_observed>0
+bb_squeeze,807,231,576,28.6245,-0.25411,no,n_resolved>=20 and avg_r_observed>0
+range_breakout_long,8,2,6,25.0,-0.275808,no,n_resolved>=20 and avg_r_observed>0
+streak_1h,13,2,11,15.3846,-0.609887,no,n_resolved>=20 and avg_r_observed>0

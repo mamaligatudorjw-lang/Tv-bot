@@ -1,0 +1,35 @@
+{
+  "generated_utc": "2026-08-26T06:09:56.963415+00:00",
+  "path_candle_interval": "5m",
+  "range_candle_interval": "5m",
+  "range_missing_rows": 21,
+  "range_q33_pct": 17.897688414717543,
+  "range_q67_pct": 28.663199755276857,
+  "resolved_rows_all_strategies": 3306,
+  "rows_simulated": 12992,
+  "rows_with_path_coverage_error": 21,
+  "selected_resolved_rows": 1856,
+  "selected_strategies": [
+    "bb_squeeze_inverted_test",
+    "ema_cross",
+    "ema_cross_confirmed",
+    "high_rejection_short",
+    "low_rejection_long",
+    "overheated_24h",
+    "overheated_confirmed",
+    "overheated_early",
+    "oversold_24h"
+  ],
+  "steps_pct": [
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    8.0,
+    10.0
+  ],
+  "symbol_fetch_failures": {},
+  "symbols_loaded": 403,
+  "symbols_requested": 403
+}
