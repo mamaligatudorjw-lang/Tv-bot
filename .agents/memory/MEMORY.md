@@ -9,3 +9,4 @@
 - [Bounded polling workers](bounded-polling-workers.md) — cycle deadlines need abort telemetry; late prefetch futures are unreachable after collection timeout.
 - [Gate.io 1m history coverage](gateio-1m-history.md) — older contracts may reject historical 1m candles; validate coverage before using 1m path simulations.
 - [Trailing OOS discipline](trailing-oos-discipline.md) — a time slice is not truly unseen if the original grid used the full history; use post-cutoff entries and label tiny samples insufficient.
+- [BTC regime outcome analysis](trend-regime-analysis.md) — compare resolved outcomes by completed BTC 4h close vs EMA50; keep empty regimes and small cohorts explicit.
