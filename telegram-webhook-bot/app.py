@@ -5008,7 +5008,7 @@ def _format_btc_4h_regime_label(snapshot: dict) -> str:
     stale = " · ⚠️ ДАННЫЕ УСТАРЕЛИ" if snapshot.get("stale") else ""
     return (
         f"📚 BTC 4h: <b>{regime}</b>{values} · свеча закрыта {candle_at}"
-        f" · срез {_format_utc_snapshot(fetched_at)}{stale}"
+        f" · срез {fetched_at}{stale}"
     )
 
 

@@ -1,4 +1,5 @@
 import app
+import sqlite3
 
 
 def _snapshot(**overrides):
@@ -114,3 +115,65 @@ def test_enrichment_helper_combines_live_and_historical_context(monkeypatch):
     assert label.count("\n") == 1
     assert "BTC 4h: <b>BULL</b>" in label
     assert "n=268" in label
+
+
+def test_send_alert_with_log_appends_context_to_common_alert_path(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts INTEGER, symbol TEXT, alert_type TEXT, recommendation TEXT,
+            price_at_alert REAL, score INTEGER,
+            factor_funding_pts INTEGER, factor_lsr_pts INTEGER,
+            snapshot_ts REAL, snapshot_price REAL,
+            delivery_ts REAL, snapshot_age_sec REAL, snapshot_gap_pct REAL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE TABLE demo_positions (symbol TEXT, status TEXT, is_shadow INTEGER)"
+    )
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    monkeypatch.setattr(
+        app, "_cycle_side_effect_allowed", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(app, "is_hidden", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(app, "SHADOW_ONLY_MODE", False)
+    monkeypatch.setattr(app, "ALERT_TYPE_SHADOW_ONLY", {})
+    monkeypatch.setattr(app, "MIN_SCORE_LONG_BY_TYPE", {"bb_squeeze": 0})
+    monkeypatch.setattr(app, "MAX_SCORE_LONG_BY_TYPE", {})
+    monkeypatch.setattr(
+        app,
+        "_get_btc_regime_enrichment_label",
+        lambda *_args: "📚 BTC 4h: BULL\n📊 History: n=268",
+    )
+    monkeypatch.setattr(app, "get_regime_label", lambda *_args: (True, ""))
+    monkeypatch.setattr(app, "_coin_trend_label", lambda *_args: "")
+    monkeypatch.setattr(app, "_get_signal_edge_label", lambda *_args: None)
+    monkeypatch.setattr(app, "_build_alert_buttons", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(app, "_get_current_price", lambda *_args: 100.0)
+    monkeypatch.setattr(app, "_auto_start_monitor", lambda *_args: None)
+    sent = []
+    monkeypatch.setattr(
+        app,
+        "_telegram_send",
+        lambda _chat_id, text, **_kwargs: sent.append(text) or True,
+    )
+
+    delivered, alert_id = app.send_alert_with_log(
+        "AAAUSDT",
+        "bb_squeeze",
+        "LONG",
+        100.0,
+        "signal body",
+        score=60,
+    )
+
+    assert delivered is True
+    assert alert_id == 1
+    assert len(sent) == 1
+    assert "signal body" in sent[0]
+    assert "📚 BTC 4h: BULL" in sent[0]
+    assert "n=268" in sent[0]
+    conn.close()
