@@ -1,0 +1,3435 @@
+{
+  "config": {
+    "strategies": [
+      "ema_cross_confirmed",
+      "overheated_early",
+      "ema_cross",
+      "overheated_confirmed"
+    ],
+    "scope": "resolved shadow demo_positions only",
+    "outcomes": "recorded demo_positions status tp/sl",
+    "r_definition": "directional exit-vs-entry divided by absolute entry-to-SL risk",
+    "minimum_group_n": 20,
+    "read_only": true,
+    "in_sample_rule_warning": "Any candidate is selected and evaluated on the same history; it is not forward evidence."
+  },
+  "coverage": {
+    "rows_loaded": 955,
+    "log_exists": true,
+    "log_event_keys": 845,
+    "log_matches": 904,
+    "log_match_rate_pct": 94.66,
+    "last_signal_ts": 1787850073,
+    "last_signal_utc": "2026-08-27T17:01:13+00:00"
+  },
+  "feature_provenance": {
+    "risk_pct": {
+      "label": "SL distance from entry (%)",
+      "provenance": "exact_persisted_derived",
+      "description": "abs(entry_price - sl_price) / entry_price"
+    },
+    "reward_pct": {
+      "label": "TP distance from entry (%)",
+      "provenance": "exact_persisted_derived",
+      "description": "abs(tp_price - entry_price) / entry_price"
+    },
+    "reward_risk": {
+      "label": "TP/SL distance ratio",
+      "provenance": "exact_persisted_derived",
+      "description": "reward_pct / risk_pct"
+    },
+    "entry_vs_signal_pct": {
+      "label": "Directional entry move from signal (%)",
+      "provenance": "exact_persisted_derived",
+      "description": "direction-adjusted entry_price vs signal_price"
+    },
+    "ema_gap_pct_log": {
+      "label": "EMA cross gap (%)",
+      "provenance": "runtime_log_rounded",
+      "description": "EMA(9)-EMA(21) gap emitted by the signal path"
+    },
+    "overheated_pct24_log": {
+      "label": "Overheated 24h move (%)",
+      "provenance": "runtime_log_rounded",
+      "description": "pct24 emitted by the overheated early signal path"
+    },
+    "overheated_rsi_log": {
+      "label": "Overheated RSI",
+      "provenance": "runtime_log_rounded",
+      "description": "RSI emitted by the overheated early signal path"
+    },
+    "confirmation_volume_ratio_log": {
+      "label": "Confirmation volume ratio (x)",
+      "provenance": "runtime_log_rounded",
+      "description": "completed-candle volume / 10-bar average"
+    },
+    "confirmation_number_log": {
+      "label": "Confirmation number",
+      "provenance": "runtime_log_exact_integer",
+      "description": "confirmation count emitted by continuation telemetry"
+    },
+    "confirmation_age_min_log": {
+      "label": "Confirmation age (minutes)",
+      "provenance": "runtime_log_exact_integer",
+      "description": "age of the parent signal at confirmation"
+    }
+  },
+  "strategies": {
+    "ema_cross_confirmed": {
+      "overall": {
+        "metrics": {
+          "n": 144,
+          "tp": 78,
+          "sl": 66,
+          "resolved_wr_pct": 54.17,
+          "avg_r": 0.611192,
+          "sample_status": "ready"
+        },
+        "tp_first": 78,
+        "sl_first": 66,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 78,
+              "mean": 3.975867,
+              "median": 2.823402,
+              "stdev": 3.372277,
+              "min": 0.819708,
+              "max": 20.972005
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 7.831362,
+              "median": 6.563771,
+              "stdev": 6.257938,
+              "min": 1.839626,
+              "max": 45.712202
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -3.740369,
+            "cliffs_delta_tp_higher": -0.590909,
+            "bootstrap_95ci": [
+              -0.733877,
+              -0.433566
+            ],
+            "permutation_p_two_sided": 0.001248
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 78,
+              "mean": 7.83593,
+              "median": 5.646803,
+              "stdev": 6.688657,
+              "min": 1.639417,
+              "max": 41.944009
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 15.498546,
+              "median": 13.127541,
+              "stdev": 12.641787,
+              "min": 1.839626,
+              "max": 91.424405
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -7.480738,
+            "cliffs_delta_tp_higher": -0.565268,
+            "bootstrap_95ci": [
+              -0.712121,
+              -0.405594
+            ],
+            "permutation_p_two_sided": 0.001248
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 78,
+              "mean": 1.980769,
+              "median": 2.0,
+              "stdev": 0.125933,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 1.954545,
+              "median": 2.0,
+              "stdev": 0.209895,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.070707,
+            "bootstrap_95ci": [
+              -0.012432,
+              0.163364
+            ],
+            "permutation_p_two_sided": 0.128589
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 78,
+              "mean": 0.119639,
+              "median": 0.0,
+              "stdev": 0.717778,
+              "min": 0.0,
+              "max": 5.651341
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 0.428693,
+              "median": 0.0,
+              "stdev": 2.001242,
+              "min": -0.83634,
+              "max": 15.743138
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.13986,
+            "bootstrap_95ci": [
+              -0.257576,
+              -0.036519
+            ],
+            "permutation_p_two_sided": 0.009988
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 78,
+              "mean": 3.212821,
+              "median": 2.75,
+              "stdev": 1.558417,
+              "min": 1.5,
+              "max": 7.7
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 2.915152,
+              "median": 2.35,
+              "stdev": 1.537855,
+              "min": 1.5,
+              "max": 6.9
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.4,
+            "cliffs_delta_tp_higher": 0.167249,
+            "bootstrap_95ci": [
+              -0.013403,
+              0.356643
+            ],
+            "permutation_p_two_sided": 0.093633
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 78,
+              "mean": 1.038462,
+              "median": 1.0,
+              "stdev": 0.251866,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 1.090909,
+              "median": 1.0,
+              "stdev": 0.41979,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.020396,
+            "bootstrap_95ci": [
+              -0.090909,
+              0.038462
+            ],
+            "permutation_p_two_sided": 0.458177
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 78,
+              "mean": 56.038462,
+              "median": 44.0,
+              "stdev": 61.648868,
+              "min": 0.0,
+              "max": 231.0
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 79.181818,
+              "median": 58.5,
+              "stdev": 76.856692,
+              "min": 0.0,
+              "max": 239.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -14.5,
+            "cliffs_delta_tp_higher": -0.163559,
+            "bootstrap_95ci": [
+              -0.350427,
+              0.027389
+            ],
+            "permutation_p_two_sided": 0.099875
+          }
+        ],
+        "candidate": {
+          "feature": "risk_pct",
+          "label": "SL distance from entry (%)",
+          "provenance": "exact_persisted_derived",
+          "rule": "SL distance from entry (%) ≤ 3.40695 predicts TP",
+          "threshold": 3.406949,
+          "operator": "lte",
+          "criterion": {
+            "minimum_group_n": 20,
+            "minimum_abs_cliffs_delta": 0.33,
+            "maximum_permutation_p": 0.05,
+            "bootstrap_95ci_excludes_zero": true,
+            "minimum_balanced_accuracy": 0.6,
+            "minimum_feature_coverage_per_outcome": 0.8
+          },
+          "feature_effect": {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 78,
+              "mean": 3.975867,
+              "median": 2.823402,
+              "stdev": 3.372277,
+              "min": 0.819708,
+              "max": 20.972005
+            },
+            "sl_first": {
+              "n": 66,
+              "mean": 7.831362,
+              "median": 6.563771,
+              "stdev": 6.257938,
+              "min": 1.839626,
+              "max": 45.712202
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -3.740369,
+            "cliffs_delta_tp_higher": -0.590909,
+            "bootstrap_95ci": [
+              -0.733877,
+              -0.433566
+            ],
+            "permutation_p_two_sided": 0.001248
+          },
+          "classification_in_sample": {
+            "tp_pred_tp": 50,
+            "tp_pred_sl": 28,
+            "sl_pred_tp": 9,
+            "sl_pred_sl": 57,
+            "used_n": 144,
+            "accuracy": 0.743056,
+            "balanced_accuracy": 0.752331,
+            "precision_tp": 0.847458,
+            "precision_sl": 0.670588
+          }
+        }
+      },
+      "LONG": {
+        "metrics": {
+          "n": 94,
+          "tp": 67,
+          "sl": 27,
+          "resolved_wr_pct": 71.28,
+          "avg_r": 1.180178,
+          "sample_status": "ready"
+        },
+        "tp_first": 67,
+        "sl_first": 27,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 67,
+              "mean": 3.825304,
+              "median": 2.722323,
+              "stdev": 3.423315,
+              "min": 0.819708,
+              "max": 20.972005
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 4.850675,
+              "median": 4.309894,
+              "stdev": 2.204363,
+              "min": 1.839626,
+              "max": 11.290457
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.587571,
+            "cliffs_delta_tp_higher": -0.425097,
+            "bootstrap_95ci": [
+              -0.618574,
+              -0.208402
+            ],
+            "permutation_p_two_sided": 0.004994
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 67,
+              "mean": 7.515793,
+              "median": 5.444646,
+              "stdev": 6.776082,
+              "min": 1.639417,
+              "max": 41.944009
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 9.300027,
+              "median": 8.212771,
+              "stdev": 4.721035,
+              "min": 1.839626,
+              "max": 22.580915
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -2.768125,
+            "cliffs_delta_tp_higher": -0.355445,
+            "bootstrap_95ci": [
+              -0.569928,
+              -0.103372
+            ],
+            "permutation_p_two_sided": 0.008739
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 67,
+              "mean": 1.977612,
+              "median": 2.0,
+              "stdev": 0.135759,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 1.888889,
+              "median": 2.0,
+              "stdev": 0.320256,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.155334,
+            "bootstrap_95ci": [
+              0.00995,
+              0.315644
+            ],
+            "permutation_p_two_sided": 0.033708
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 67,
+              "mean": 0.139281,
+              "median": 0.0,
+              "stdev": 0.773495,
+              "min": 0.0,
+              "max": 5.651341
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 0.112393,
+              "median": 0.0,
+              "stdev": 0.484806,
+              "min": 0.0,
+              "max": 2.478448
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.027087,
+            "bootstrap_95ci": [
+              -0.148148,
+              0.059701
+            ],
+            "permutation_p_two_sided": 0.561798
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 67,
+              "mean": 3.279104,
+              "median": 2.8,
+              "stdev": 1.604023,
+              "min": 1.5,
+              "max": 7.7
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 2.592593,
+              "median": 2.1,
+              "stdev": 1.227858,
+              "min": 1.5,
+              "max": 6.6
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.7,
+            "cliffs_delta_tp_higher": 0.291321,
+            "bootstrap_95ci": [
+              0.031509,
+              0.541183
+            ],
+            "permutation_p_two_sided": 0.022472
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 67,
+              "mean": 1.044776,
+              "median": 1.0,
+              "stdev": 0.271519,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 1.222222,
+              "median": 1.0,
+              "stdev": 0.640513,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.082919,
+            "bootstrap_95ci": [
+              -0.218353,
+              0.029851
+            ],
+            "permutation_p_two_sided": 0.071161
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 67,
+              "mean": 54.522388,
+              "median": 48.0,
+              "stdev": 60.090679,
+              "min": 0.0,
+              "max": 220.0
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 107.777778,
+              "median": 113.0,
+              "stdev": 76.887697,
+              "min": 0.0,
+              "max": 221.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -65.0,
+            "cliffs_delta_tp_higher": -0.405196,
+            "bootstrap_95ci": [
+              -0.640685,
+              -0.167496
+            ],
+            "permutation_p_two_sided": 0.001248
+          }
+        ],
+        "candidate": {
+          "feature": "risk_pct",
+          "label": "SL distance from entry (%)",
+          "provenance": "exact_persisted_derived",
+          "rule": "SL distance from entry (%) ≤ 3.55255 predicts TP",
+          "threshold": 3.552554,
+          "operator": "lte",
+          "criterion": {
+            "minimum_group_n": 20,
+            "minimum_abs_cliffs_delta": 0.33,
+            "maximum_permutation_p": 0.05,
+            "bootstrap_95ci_excludes_zero": true,
+            "minimum_balanced_accuracy": 0.6,
+            "minimum_feature_coverage_per_outcome": 0.8
+          },
+          "feature_effect": {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 67,
+              "mean": 3.825304,
+              "median": 2.722323,
+              "stdev": 3.423315,
+              "min": 0.819708,
+              "max": 20.972005
+            },
+            "sl_first": {
+              "n": 27,
+              "mean": 4.850675,
+              "median": 4.309894,
+              "stdev": 2.204363,
+              "min": 1.839626,
+              "max": 11.290457
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.587571,
+            "cliffs_delta_tp_higher": -0.425097,
+            "bootstrap_95ci": [
+              -0.618574,
+              -0.208402
+            ],
+            "permutation_p_two_sided": 0.004994
+          },
+          "classification_in_sample": {
+            "tp_pred_tp": 47,
+            "tp_pred_sl": 20,
+            "sl_pred_tp": 6,
+            "sl_pred_sl": 21,
+            "used_n": 94,
+            "accuracy": 0.723404,
+            "balanced_accuracy": 0.739635,
+            "precision_tp": 0.886792,
+            "precision_sl": 0.512195
+          }
+        }
+      },
+      "SHORT": {
+        "metrics": {
+          "n": 50,
+          "tp": 11,
+          "sl": 39,
+          "resolved_wr_pct": 22.0,
+          "avg_r": -0.458501,
+          "sample_status": "ready"
+        },
+        "tp_first": 11,
+        "sl_first": 39,
+        "comparison_allowed": false,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 11,
+              "mean": 4.89293,
+              "median": 4.157505,
+              "stdev": 3.023808,
+              "min": 2.5,
+              "max": 11.712878
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 9.894914,
+              "median": 8.585756,
+              "stdev": 7.278707,
+              "min": 2.798856,
+              "max": 45.712202
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": -4.428251,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 11,
+              "mean": 9.785859,
+              "median": 8.315009,
+              "stdev": 6.047615,
+              "min": 5.0,
+              "max": 23.425757
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 19.789827,
+              "median": 17.171512,
+              "stdev": 14.557414,
+              "min": 5.597713,
+              "max": 91.424405
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": -8.856503,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 11,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 11,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 0.647669,
+              "median": 0.0,
+              "stdev": 2.563102,
+              "min": -0.83634,
+              "max": 15.743138
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 11,
+              "mean": 2.809091,
+              "median": 2.4,
+              "stdev": 1.22919,
+              "min": 1.5,
+              "max": 5.8
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 3.138462,
+              "median": 2.6,
+              "stdev": 1.699631,
+              "min": 1.5,
+              "max": 6.9
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": -0.2,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 11,
+              "mean": 1.0,
+              "median": 1.0,
+              "stdev": 0.0,
+              "min": 1.0,
+              "max": 1.0
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 1.0,
+              "median": 1.0,
+              "stdev": 0.0,
+              "min": 1.0,
+              "max": 1.0
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 11,
+              "mean": 65.272727,
+              "median": 29.0,
+              "stdev": 72.961758,
+              "min": 0.0,
+              "max": 231.0
+            },
+            "sl_first": {
+              "n": 39,
+              "mean": 59.384615,
+              "median": 43.0,
+              "stdev": 71.245172,
+              "min": 0.0,
+              "max": 239.0
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": -14.0,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null
+      }
+    },
+    "overheated_early": {
+      "overall": {
+        "metrics": {
+          "n": 202,
+          "tp": 91,
+          "sl": 111,
+          "resolved_wr_pct": 45.05,
+          "avg_r": 0.414757,
+          "sample_status": "ready"
+        },
+        "tp_first": 91,
+        "sl_first": 111,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 91,
+              "mean": 6.220115,
+              "median": 4.845358,
+              "stdev": 4.208779,
+              "min": 1.740656,
+              "max": 25.114625
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 6.555299,
+              "median": 5.728073,
+              "stdev": 3.50022,
+              "min": 2.5,
+              "max": 25.063884
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.882715,
+            "cliffs_delta_tp_higher": -0.145035,
+            "bootstrap_95ci": [
+              -0.302643,
+              0.021879
+            ],
+            "permutation_p_two_sided": 0.089888
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 91,
+              "mean": 12.440231,
+              "median": 9.690716,
+              "stdev": 8.417557,
+              "min": 3.481312,
+              "max": 50.229249
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 13.110598,
+              "median": 11.456146,
+              "stdev": 7.00044,
+              "min": 5.0,
+              "max": 50.127768
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.76543,
+            "cliffs_delta_tp_higher": -0.145035,
+            "bootstrap_95ci": [
+              -0.299871,
+              0.020493
+            ],
+            "permutation_p_two_sided": 0.087391
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 91,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.076824,
+            "bootstrap_95ci": [
+              -0.06039,
+              0.221661
+            ],
+            "permutation_p_two_sided": 0.29588
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 91,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.0,
+            "bootstrap_95ci": [
+              0.0,
+              0.0
+            ],
+            "permutation_p_two_sided": 1.0
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 59,
+              "mean": 21.669492,
+              "median": 18.5,
+              "stdev": 9.164385,
+              "min": 15.1,
+              "max": 57.4
+            },
+            "sl_first": {
+              "n": 92,
+              "mean": 23.726087,
+              "median": 18.4,
+              "stdev": 14.854339,
+              "min": 15.0,
+              "max": 111.2
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.1,
+            "cliffs_delta_tp_higher": -0.03353,
+            "bootstrap_95ci": [
+              -0.219602,
+              0.148674
+            ],
+            "permutation_p_two_sided": 0.72035
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 59,
+              "mean": 64.501695,
+              "median": 66.0,
+              "stdev": 4.289341,
+              "min": 55.2,
+              "max": 69.8
+            },
+            "sl_first": {
+              "n": 92,
+              "mean": 65.105435,
+              "median": 66.75,
+              "stdev": 4.27994,
+              "min": 55.6,
+              "max": 70.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.75,
+            "cliffs_delta_tp_higher": -0.10888,
+            "bootstrap_95ci": [
+              -0.299005,
+              0.08972
+            ],
+            "permutation_p_two_sided": 0.265918
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null
+      },
+      "LONG": {
+        "metrics": {
+          "n": 202,
+          "tp": 91,
+          "sl": 111,
+          "resolved_wr_pct": 45.05,
+          "avg_r": 0.414757,
+          "sample_status": "ready"
+        },
+        "tp_first": 91,
+        "sl_first": 111,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 91,
+              "mean": 6.220115,
+              "median": 4.845358,
+              "stdev": 4.208779,
+              "min": 1.740656,
+              "max": 25.114625
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 6.555299,
+              "median": 5.728073,
+              "stdev": 3.50022,
+              "min": 2.5,
+              "max": 25.063884
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.882715,
+            "cliffs_delta_tp_higher": -0.145035,
+            "bootstrap_95ci": [
+              -0.301455,
+              0.003663
+            ],
+            "permutation_p_two_sided": 0.076155
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 91,
+              "mean": 12.440231,
+              "median": 9.690716,
+              "stdev": 8.417557,
+              "min": 3.481312,
+              "max": 50.229249
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 13.110598,
+              "median": 11.456146,
+              "stdev": 7.00044,
+              "min": 5.0,
+              "max": 50.127768
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.76543,
+            "cliffs_delta_tp_higher": -0.145035,
+            "bootstrap_95ci": [
+              -0.313929,
+              0.027819
+            ],
+            "permutation_p_two_sided": 0.073658
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 91,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.076824,
+            "bootstrap_95ci": [
+              -0.070785,
+              0.216315
+            ],
+            "permutation_p_two_sided": 0.287141
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 91,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.0,
+            "bootstrap_95ci": [
+              0.0,
+              0.0
+            ],
+            "permutation_p_two_sided": 1.0
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 59,
+              "mean": 21.669492,
+              "median": 18.5,
+              "stdev": 9.164385,
+              "min": 15.1,
+              "max": 57.4
+            },
+            "sl_first": {
+              "n": 92,
+              "mean": 23.726087,
+              "median": 18.4,
+              "stdev": 14.854339,
+              "min": 15.0,
+              "max": 111.2
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.1,
+            "cliffs_delta_tp_higher": -0.03353,
+            "bootstrap_95ci": [
+              -0.221629,
+              0.149779
+            ],
+            "permutation_p_two_sided": 0.745318
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 59,
+              "mean": 64.501695,
+              "median": 66.0,
+              "stdev": 4.289341,
+              "min": 55.2,
+              "max": 69.8
+            },
+            "sl_first": {
+              "n": 92,
+              "mean": 65.105435,
+              "median": 66.75,
+              "stdev": 4.27994,
+              "min": 55.6,
+              "max": 70.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.75,
+            "cliffs_delta_tp_higher": -0.10888,
+            "bootstrap_95ci": [
+              -0.278556,
+              0.074982
+            ],
+            "permutation_p_two_sided": 0.247191
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null
+      }
+    },
+    "ema_cross": {
+      "overall": {
+        "metrics": {
+          "n": 387,
+          "tp": 166,
+          "sl": 221,
+          "resolved_wr_pct": 42.89,
+          "avg_r": 0.244131,
+          "sample_status": "ready"
+        },
+        "tp_first": 166,
+        "sl_first": 221,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 166,
+              "mean": 3.519302,
+              "median": 2.692303,
+              "stdev": 2.834568,
+              "min": 0.551289,
+              "max": 20.832706
+            },
+            "sl_first": {
+              "n": 221,
+              "mean": 4.148605,
+              "median": 3.501769,
+              "stdev": 2.640187,
+              "min": 0.658367,
+              "max": 23.130178
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.809466,
+            "cliffs_delta_tp_higher": -0.231423,
+            "bootstrap_95ci": [
+              -0.342965,
+              -0.114649
+            ],
+            "permutation_p_two_sided": 0.001248
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 166,
+              "mean": 7.038604,
+              "median": 5.384606,
+              "stdev": 5.669135,
+              "min": 1.102578,
+              "max": 41.665412
+            },
+            "sl_first": {
+              "n": 221,
+              "mean": 8.29721,
+              "median": 7.003538,
+              "stdev": 5.280375,
+              "min": 1.316733,
+              "max": 46.260356
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.618932,
+            "cliffs_delta_tp_higher": -0.231423,
+            "bootstrap_95ci": [
+              -0.348798,
+              -0.114158
+            ],
+            "permutation_p_two_sided": 0.001248
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 166,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 221,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.046067,
+            "bootstrap_95ci": [
+              -0.152047,
+              0.073434
+            ],
+            "permutation_p_two_sided": 0.425718
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 166,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "sl_first": {
+              "n": 221,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.0,
+            "bootstrap_95ci": [
+              0.0,
+              0.0
+            ],
+            "permutation_p_two_sided": 1.0
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 166,
+              "mean": 0.436392,
+              "median": 0.3115,
+              "stdev": 0.431296,
+              "min": 0.151,
+              "max": 3.996
+            },
+            "sl_first": {
+              "n": 221,
+              "mean": 0.445683,
+              "median": 0.336,
+              "stdev": 0.360319,
+              "min": 0.151,
+              "max": 2.769
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.0245,
+            "cliffs_delta_tp_higher": -0.058442,
+            "bootstrap_95ci": [
+              -0.167203,
+              0.054026
+            ],
+            "permutation_p_two_sided": 0.329588
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null
+      },
+      "LONG": {
+        "metrics": {
+          "n": 226,
+          "tp": 116,
+          "sl": 110,
+          "resolved_wr_pct": 51.33,
+          "avg_r": 0.526564,
+          "sample_status": "ready"
+        },
+        "tp_first": 116,
+        "sl_first": 110,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 116,
+              "mean": 3.181294,
+              "median": 2.331132,
+              "stdev": 2.84224,
+              "min": 0.551289,
+              "max": 20.832706
+            },
+            "sl_first": {
+              "n": 110,
+              "mean": 3.50586,
+              "median": 3.066972,
+              "stdev": 2.097728,
+              "min": 0.658367,
+              "max": 14.268944
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.73584,
+            "cliffs_delta_tp_higher": -0.221787,
+            "bootstrap_95ci": [
+              -0.364734,
+              -0.077116
+            ],
+            "permutation_p_two_sided": 0.004994
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 116,
+              "mean": 6.362588,
+              "median": 4.662264,
+              "stdev": 5.68448,
+              "min": 1.102578,
+              "max": 41.665412
+            },
+            "sl_first": {
+              "n": 110,
+              "mean": 7.011721,
+              "median": 6.133943,
+              "stdev": 4.195456,
+              "min": 1.316733,
+              "max": 28.537888
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.471679,
+            "cliffs_delta_tp_higher": -0.221787,
+            "bootstrap_95ci": [
+              -0.372257,
+              -0.073824
+            ],
+            "permutation_p_two_sided": 0.004994
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 116,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 110,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.024765,
+            "bootstrap_95ci": [
+              -0.160031,
+              0.121708
+            ],
+            "permutation_p_two_sided": 0.751561
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 116,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "sl_first": {
+              "n": 110,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.0,
+            "bootstrap_95ci": [
+              0.0,
+              0.0
+            ],
+            "permutation_p_two_sided": 1.0
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 116,
+              "mean": 0.380216,
+              "median": 0.271,
+              "stdev": 0.274383,
+              "min": 0.151,
+              "max": 1.333
+            },
+            "sl_first": {
+              "n": 110,
+              "mean": 0.466318,
+              "median": 0.3645,
+              "stdev": 0.366467,
+              "min": 0.151,
+              "max": 2.226
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.0935,
+            "cliffs_delta_tp_higher": -0.160423,
+            "bootstrap_95ci": [
+              -0.31058,
+              -0.01152
+            ],
+            "permutation_p_two_sided": 0.036205
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null
+      },
+      "SHORT": {
+        "metrics": {
+          "n": 161,
+          "tp": 50,
+          "sl": 111,
+          "resolved_wr_pct": 31.06,
+          "avg_r": -0.152328,
+          "sample_status": "ready"
+        },
+        "tp_first": 50,
+        "sl_first": 111,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 50,
+              "mean": 4.303481,
+              "median": 3.774023,
+              "stdev": 2.683016,
+              "min": 0.953778,
+              "max": 13.988079
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 4.785559,
+              "median": 4.434431,
+              "stdev": 2.959426,
+              "min": 1.168137,
+              "max": 23.130178
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.660408,
+            "cliffs_delta_tp_higher": -0.123604,
+            "bootstrap_95ci": [
+              -0.317838,
+              0.08036
+            ],
+            "permutation_p_two_sided": 0.227216
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 50,
+              "mean": 8.606962,
+              "median": 7.548047,
+              "stdev": 5.366033,
+              "min": 1.907557,
+              "max": 27.976158
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 9.571119,
+              "median": 8.868861,
+              "stdev": 5.918852,
+              "min": 2.336274,
+              "max": 46.260356
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -1.320814,
+            "cliffs_delta_tp_higher": -0.123604,
+            "bootstrap_95ci": [
+              -0.313514,
+              0.072072
+            ],
+            "permutation_p_two_sided": 0.223471
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 50,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 2.0,
+              "median": 2.0,
+              "stdev": 0.0,
+              "min": 2.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.069189,
+            "bootstrap_95ci": [
+              -0.254054,
+              0.14
+            ],
+            "permutation_p_two_sided": 0.40824
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 50,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 0.0,
+              "median": 0.0,
+              "stdev": 0.0,
+              "min": 0.0,
+              "max": 0.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.0,
+            "bootstrap_95ci": [
+              0.0,
+              0.0
+            ],
+            "permutation_p_two_sided": 1.0
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 50,
+              "mean": 0.56672,
+              "median": 0.4,
+              "stdev": 0.651834,
+              "min": 0.154,
+              "max": 3.996
+            },
+            "sl_first": {
+              "n": 111,
+              "mean": 0.425234,
+              "median": 0.32,
+              "stdev": 0.35459,
+              "min": 0.151,
+              "max": 2.769
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.08,
+            "cliffs_delta_tp_higher": 0.142342,
+            "bootstrap_95ci": [
+              -0.055856,
+              0.338378
+            ],
+            "permutation_p_two_sided": 0.13608
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null
+      }
+    },
+    "overheated_confirmed": {
+      "overall": {
+        "metrics": {
+          "n": 222,
+          "tp": 95,
+          "sl": 127,
+          "resolved_wr_pct": 42.79,
+          "avg_r": 0.277542,
+          "sample_status": "ready"
+        },
+        "tp_first": 95,
+        "sl_first": 127,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 95,
+              "mean": 5.01542,
+              "median": 3.818297,
+              "stdev": 3.424903,
+              "min": 1.740656,
+              "max": 23.973986
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 5.730673,
+              "median": 3.947208,
+              "stdev": 4.203185,
+              "min": 1.900944,
+              "max": 26.5936
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.128911,
+            "cliffs_delta_tp_higher": -0.101368,
+            "bootstrap_95ci": [
+              -0.254538,
+              0.052466
+            ],
+            "permutation_p_two_sided": 0.220974
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 95,
+              "mean": 9.83491,
+              "median": 7.325997,
+              "stdev": 6.871389,
+              "min": 2.857919,
+              "max": 47.947972
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 11.122902,
+              "median": 7.82718,
+              "stdev": 8.485268,
+              "min": 3.229505,
+              "max": 53.187201
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.501183,
+            "cliffs_delta_tp_higher": -0.074513,
+            "bootstrap_95ci": [
+              -0.235475,
+              0.071695
+            ],
+            "permutation_p_two_sided": 0.333333
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 95,
+              "mean": 1.957895,
+              "median": 2.0,
+              "stdev": 0.17356,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 1.929134,
+              "median": 2.0,
+              "stdev": 0.206294,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.049316,
+            "bootstrap_95ci": [
+              -0.04683,
+              0.137754
+            ],
+            "permutation_p_two_sided": 0.299625
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 95,
+              "mean": 0.673409,
+              "median": 0.0,
+              "stdev": 4.302937,
+              "min": -0.07851,
+              "max": 37.888199
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 1.391818,
+              "median": 0.0,
+              "stdev": 5.35116,
+              "min": -1.688127,
+              "max": 41.715084
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.050145,
+            "bootstrap_95ci": [
+              -0.136096,
+              0.042354
+            ],
+            "permutation_p_two_sided": 0.287141
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 95,
+              "mean": 2.433684,
+              "median": 2.1,
+              "stdev": 1.17343,
+              "min": 1.5,
+              "max": 7.8
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 2.782677,
+              "median": 2.2,
+              "stdev": 1.379044,
+              "min": 1.5,
+              "max": 8.2
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.1,
+            "cliffs_delta_tp_higher": -0.162868,
+            "bootstrap_95ci": [
+              -0.311894,
+              -0.007542
+            ],
+            "permutation_p_two_sided": 0.032459
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 95,
+              "mean": 1.084211,
+              "median": 1.0,
+              "stdev": 0.347121,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 1.141732,
+              "median": 1.0,
+              "stdev": 0.412588,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.053958,
+            "bootstrap_95ci": [
+              -0.124575,
+              0.018566
+            ],
+            "permutation_p_two_sided": 0.235955
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 95,
+              "mean": 40.368421,
+              "median": 12.0,
+              "stdev": 55.210054,
+              "min": 0.0,
+              "max": 213.0
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 46.086614,
+              "median": 16.0,
+              "stdev": 61.945576,
+              "min": 0.0,
+              "max": 225.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -4.0,
+            "cliffs_delta_tp_higher": -8.3e-05,
+            "bootstrap_95ci": [
+              -0.150767,
+              0.153751
+            ],
+            "permutation_p_two_sided": 1.0
+          }
+        ],
+        "candidate": null
+      },
+      "LONG": {
+        "metrics": {
+          "n": 222,
+          "tp": 95,
+          "sl": 127,
+          "resolved_wr_pct": 42.79,
+          "avg_r": 0.277542,
+          "sample_status": "ready"
+        },
+        "tp_first": 95,
+        "sl_first": 127,
+        "comparison_allowed": true,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 95,
+              "mean": 5.01542,
+              "median": 3.818297,
+              "stdev": 3.424903,
+              "min": 1.740656,
+              "max": 23.973986
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 5.730673,
+              "median": 3.947208,
+              "stdev": 4.203185,
+              "min": 1.900944,
+              "max": 26.5936
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.128911,
+            "cliffs_delta_tp_higher": -0.101368,
+            "bootstrap_95ci": [
+              -0.23879,
+              0.061749
+            ],
+            "permutation_p_two_sided": 0.200999
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 95,
+              "mean": 9.83491,
+              "median": 7.325997,
+              "stdev": 6.871389,
+              "min": 2.857919,
+              "max": 47.947972
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 11.122902,
+              "median": 7.82718,
+              "stdev": 8.485268,
+              "min": 3.229505,
+              "max": 53.187201
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.501183,
+            "cliffs_delta_tp_higher": -0.074513,
+            "bootstrap_95ci": [
+              -0.233983,
+              0.066888
+            ],
+            "permutation_p_two_sided": 0.357054
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 95,
+              "mean": 1.957895,
+              "median": 2.0,
+              "stdev": 0.17356,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 1.929134,
+              "median": 2.0,
+              "stdev": 0.206294,
+              "min": 1.0,
+              "max": 2.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": 0.049316,
+            "bootstrap_95ci": [
+              -0.042685,
+              0.134687
+            ],
+            "permutation_p_two_sided": 0.338327
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 95,
+              "mean": 0.673409,
+              "median": 0.0,
+              "stdev": 4.302937,
+              "min": -0.07851,
+              "max": 37.888199
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 1.391818,
+              "median": 0.0,
+              "stdev": 5.35116,
+              "min": -1.688127,
+              "max": 41.715084
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.050145,
+            "bootstrap_95ci": [
+              -0.143639,
+              0.041028
+            ],
+            "permutation_p_two_sided": 0.31211
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 95,
+              "mean": 2.433684,
+              "median": 2.1,
+              "stdev": 1.17343,
+              "min": 1.5,
+              "max": 7.8
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 2.782677,
+              "median": 2.2,
+              "stdev": 1.379044,
+              "min": 1.5,
+              "max": 8.2
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -0.1,
+            "cliffs_delta_tp_higher": -0.162868,
+            "bootstrap_95ci": [
+              -0.318608,
+              -0.003481
+            ],
+            "permutation_p_two_sided": 0.03995
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 95,
+              "mean": 1.084211,
+              "median": 1.0,
+              "stdev": 0.347121,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 1.141732,
+              "median": 1.0,
+              "stdev": 0.412588,
+              "min": 1.0,
+              "max": 3.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": 0.0,
+            "cliffs_delta_tp_higher": -0.053958,
+            "bootstrap_95ci": [
+              -0.132283,
+              0.022379
+            ],
+            "permutation_p_two_sided": 0.262172
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 95,
+              "mean": 40.368421,
+              "median": 12.0,
+              "stdev": 55.210054,
+              "min": 0.0,
+              "max": 213.0
+            },
+            "sl_first": {
+              "n": 127,
+              "mean": 46.086614,
+              "median": 16.0,
+              "stdev": 61.945576,
+              "min": 0.0,
+              "max": 225.0
+            },
+            "comparison_allowed": true,
+            "median_diff_tp_minus_sl": -4.0,
+            "cliffs_delta_tp_higher": -8.3e-05,
+            "bootstrap_95ci": [
+              -0.154579,
+              0.156983
+            ],
+            "permutation_p_two_sided": 1.0
+          }
+        ],
+        "candidate": null
+      }
+    }
+  }
+}
