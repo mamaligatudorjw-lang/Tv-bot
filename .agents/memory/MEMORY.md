@@ -10,3 +10,4 @@
 - [Gate.io 1m history coverage](gateio-1m-history.md) — older contracts may reject historical 1m candles; validate coverage before using 1m path simulations.
 - [Trailing OOS discipline](trailing-oos-discipline.md) — a time slice is not truly unseen if the original grid used the full history; use post-cutoff entries and label tiny samples insufficient.
 - [BTC regime outcome analysis](trend-regime-analysis.md) — compare resolved outcomes by completed BTC 4h close vs EMA50; keep empty regimes and small cohorts explicit.
+- [Telegram notification allowlist](telegram-notification-allowlist.md) — delivery is filtered independently; signal, demo, shadow, and forward telemetry must keep running.

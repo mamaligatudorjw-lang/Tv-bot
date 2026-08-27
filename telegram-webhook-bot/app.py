@@ -961,11 +961,22 @@ LIQ_CACHE_TTL     = 300    # кэш ликвидаций (сек/пара)
 # Telegram helpers
 # ---------------------------------------------------------------------------
 
-def send_telegram(text: str) -> bool:
+def send_telegram(
+    text: str,
+    *,
+    alert_type: str | None = None,
+) -> bool:
     with state_lock:
         if state["silenced"]:
             logger.info("Alert suppressed (silenced): %s", text[:60])
             return False
+    if alert_type is not None and not _strategy_telegram_delivery_allowed(alert_type):
+        logger.info(
+            "Strategy notification suppressed by Telegram allowlist: %s/%s",
+            alert_type,
+            text[:60],
+        )
+        return False
     return _telegram_send(TELEGRAM_CHAT_ID, text)
 
 
@@ -2222,7 +2233,8 @@ def _liquidity_entry_trigger(symbol: str, direction: str, price: float,
                 f"🧲 <b>ЛИМИТКА {symbol} {direction}</b> @<b>${lp:,.6g}</b>\n"
                 f"Зона ликвидности: ${zone_price:,.6g}  (вес {zone_weight})\n"
                 f"🛑 SL: <b>${sl_price:,.6g}</b>  │  🎯 TP: <b>${tp_price:,.6g}</b>\n"
-                f"⏳ Отмена через {exp_h}ч"
+                f"⏳ Отмена через {exp_h}ч",
+                alert_type="liquidity_entry",
             )
             logger.info("Liquidity: limit placed %s %s @%.6g zone=%.6g w=%d",
                         symbol, direction, lp, zone_price, zone_weight)
@@ -2534,7 +2546,7 @@ def check_watchlist() -> None:
                     + f"\n\n{conds_lines}"
                     + (f"\n{_wl_conflict}" if _wl_conflict else "")
                 )
-                send_telegram(body)
+                send_telegram(body, alert_type=alert_type)
                 logger.info(
                     "Watchlist triggered: %s %s wl_id=%d price=%.6g",
                     symbol, direction, wl_id, last_close,
@@ -2624,7 +2636,8 @@ def check_entry_watch() -> None:
                 send_telegram(
                     f"🚫 <b>Точка входа отменена</b> — цена достигла SL {dir_emoji}\n"
                     f"<code>{symbol}</code> {direction} · {alert_type}\n"
-                    f"🛑 SL: <b>${sl_price:,.6g}</b>  │  Цена: <b>${last_close:,.6g}</b>"
+                    f"🛑 SL: <b>${sl_price:,.6g}</b>  │  Цена: <b>${last_close:,.6g}</b>",
+                    alert_type=alert_type,
                 )
                 logger.info(
                     "EntryWatch SL-cancelled: %s %s ew_id=%d sl=%.6g price=%.6g",
@@ -2699,7 +2712,8 @@ def check_entry_watch() -> None:
                     f"({'−' if direction == 'LONG' else '+'}{improvement:.2f}% к исходной)\n"
                     f"📌 Исходная цена: ${entry_price:,.6g}\n"
                     f"✅ Свеча закрылась в направлении сигнала\n"
-                    f"✅ Объём: ×{last_vol / avg_vol_10:.1f} от среднего"
+                    f"✅ Объём: ×{last_vol / avg_vol_10:.1f} от среднего",
+                    alert_type=alert_type,
                 )
                 logger.info(
                     "EntryWatch pullback confirmed: %s %s ew_id=%d "
@@ -2740,7 +2754,8 @@ def check_entry_watch() -> None:
                         f"🎯 <b>Цена уже идёт по сигналу</b> {dir_emoji}\n"
                         f"<code>{symbol}</code> · {alert_type}\n"
                         f"💲 Входи по исходной цене: <b>${entry_price:,.6g}</b>\n"
-                        f"📊 Текущая: ${last_close:,.6g}"
+                        f"📊 Текущая: ${last_close:,.6g}",
+                        alert_type=alert_type,
                     )
                     logger.info(
                         "EntryWatch immediate confirmed: %s %s ew_id=%d "
@@ -2797,7 +2812,8 @@ def check_liquidity_orders() -> None:
                         (now, oid))
                     _get_db().commit()
                 send_telegram(
-                    f"⏰ <b>Лимитка истекла</b>: {sym} {dr} @${lp:,.6g} — не исполнена за 4ч"
+                    f"⏰ <b>Лимитка истекла</b>: {sym} {dr} @${lp:,.6g} — не исполнена за 4ч",
+                    alert_type="liquidity_entry",
                 )
                 logger.info("Liquidity: expired %s %s id=%d", sym, dr, oid)
                 continue
@@ -2814,7 +2830,8 @@ def check_liquidity_orders() -> None:
                         _get_db().commit()
                     send_telegram(
                         f"🏃 <b>Движение без входа</b>: {sym} {dr}\n"
-                        f"Цена ушла к TP, лимитка @${lp:,.6g} не исполнена"
+                        f"Цена ушла к TP, лимитка @${lp:,.6g} не исполнена",
+                        alert_type="liquidity_entry",
                     )
                     logger.info("Liquidity: missed_move %s %s id=%d", sym, dr, oid)
                     continue
@@ -2871,7 +2888,8 @@ def check_liquidity_orders() -> None:
                 send_telegram(
                     f"✅ <b>Лимитка исполнена{wick_tag}</b>: {sym} {dr} "
                     f"@<b>${fill_price:,.6g}</b>\n"
-                    f"🛑 SL: ${sl:,.6g}  │  🎯 TP: ${tp:,.6g}"
+                    f"🛑 SL: ${sl:,.6g}  │  🎯 TP: ${tp:,.6g}",
+                    alert_type="liquidity_entry",
                 )
                 logger.info("Liquidity: filled%s %s %s @%.6g id=%d",
                             " (wick)" if wick_filled else "", sym, dr, fill_price, oid)
@@ -2951,7 +2969,8 @@ def check_liquidity_orders() -> None:
             wick_note  = " (wick)" if _exit_by_wick else ""
             send_telegram(
                 f"{r_icon}{wick_note} <b>Ликвидность {sym} {dr}</b>  "
-                f"${ep:,.6g} → ${exit_price:,.6g}  <b>{sign}${pnl_usd:.2f}</b>{saved_note}"
+                f"${ep:,.6g} → ${exit_price:,.6g}  <b>{sign}${pnl_usd:.2f}</b>{saved_note}",
+                alert_type="liquidity_entry",
             )
             logger.info("Liquidity: closed%s %s %s result=%s exit=%.6g pnl=%.2f id=%d",
                         " (wick)" if _exit_by_wick else "",
@@ -6645,14 +6664,16 @@ def send_alert_with_log(
     buttons referencing the new id. Honors hide-type/hide-symbol prefs,
     silenced state, and MIN_ALERT_SCORE.
 
-    Returns (delivered, alert_id). Callers should consume cooldowns whenever
-    `delivered` is True, regardless of whether `alert_id` is set (it may be
-    None when the row could not be logged but the message was still sent).
-    `delivered` is False for hidden/silenced/below-min-score suppressions and
-    for Telegram send errors, so cooldowns stay live for retry.
+    Returns (accepted, alert_id). Callers should consume cooldowns whenever
+    `accepted` is True, regardless of whether `alert_id` is set.  For a
+    strategy excluded by TELEGRAM_NOTIFICATION_STRATEGIES, `accepted` remains
+    True after the alert is logged so demo/forward tracking continues, while
+    no Telegram request is made.  The value is False for hidden/silenced/
+    below-min-score suppressions and Telegram send errors.
     """
     if not _cycle_side_effect_allowed("alert", symbol=symbol):
         return (False, None)
+    _telegram_delivery_allowed = _strategy_telegram_delivery_allowed(alert_type)
     if is_hidden(alert_type, symbol):
         logger.info("Suppressed %s/%s (hidden by user prefs)", symbol, alert_type)
         return (False, None)
@@ -6763,6 +6784,13 @@ def send_alert_with_log(
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
         # consume cooldowns so we don't spam every cycle.
+        if not _telegram_delivery_allowed:
+            logger.info(
+                "Strategy alert %s/%s suppressed by Telegram allowlist "
+                "(no valid price to log)",
+                symbol, alert_type,
+            )
+            return (True, None)
         if not _cycle_side_effect_allowed("telegram_send", symbol=symbol):
             return (False, None)
         ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
@@ -6793,6 +6821,25 @@ def send_alert_with_log(
         # so we don't repeatedly retry a broken DB path every cycle.
         ok = _telegram_send(TELEGRAM_CHAT_ID, body_text)
         return (ok, None)
+
+    if not _telegram_delivery_allowed:
+        # Keep the alert row and downstream signal handling intact, but do not
+        # send the entry, AI follow-up, or inline buttons to Telegram.
+        _record_telegram_delivery(
+            symbol=symbol,
+            alert_type=alert_type,
+            direction=recommendation,
+            delivered=False,
+            mode="strategy_allowlist",
+        )
+        if price is not None and price > 0:
+            _auto_start_monitor(alert_id, symbol, recommendation, float(price))
+        logger.info(
+            "Strategy alert %s/%s logged but Telegram delivery suppressed "
+            "by allowlist",
+            symbol, alert_type,
+        )
+        return (True, alert_id)
 
     # Derive SL for the entry-confirmation button when not supplied by caller.
     # Uses the same ATR-based formula as demo positions so the SL is consistent
@@ -8996,16 +9043,24 @@ def send_new_listing_alert(symbol: str, ticker: dict | None) -> None:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"⚡️ <b>ДЕЙСТВУЙ БЫСТРО — первые минуты самые важные!</b>"
     )
-    if send_telegram(body):
-        price_for_log: float | None = None
-        if ticker:
-            try:
-                price_for_log = float(ticker["lastPrice"])
-            except (ValueError, KeyError) as _exc:
-                logger.debug("send_new_listing_alert suppressed error: %s", _exc)
-                pass
-        log_alert(symbol, "new_listing", "SHORT", price_for_log)
-    logger.info("New-listing alert sent: %s", symbol)
+    _listing_delivery_ok = send_telegram(
+        body,
+        alert_type="new_listing_short",
+    )
+    price_for_log: float | None = None
+    if ticker:
+        try:
+            price_for_log = float(ticker["lastPrice"])
+        except (ValueError, KeyError) as _exc:
+            logger.debug("send_new_listing_alert suppressed error: %s", _exc)
+            pass
+    # Keep the signal history independent from the Telegram delivery filter.
+    log_alert(symbol, "new_listing", "SHORT", price_for_log)
+    logger.info(
+        "New-listing alert %s: %s",
+        "sent" if _listing_delivery_ok else "suppressed by allowlist",
+        symbol,
+    )
 
 
 def check_coingecko_new_coins() -> None:
@@ -13648,21 +13703,29 @@ def _ensure_entry_notified(
     entry: float,
     sl_price: float,
     tp_price: float,
-) -> None:
+) -> bool:
     """Before sending an exit notification, verify the entry alert was delivered.
     If alert_id is missing or not found in the alerts table (entry was lost due
     to a crash, Telegram failure, or silent drop), send a retroactive entry
-    message so the user always sees entry → exit in that order.
+    message so the user always sees entry → exit in that order.  Returns whether
+    the associated strategy is allowed to emit follow-up Telegram messages.
     """
     if alert_id:
         try:
             with _db_lock:
                 conn = _get_db()
                 row = conn.execute(
-                    "SELECT id FROM alerts WHERE id=?", (alert_id,)
+                    "SELECT id, alert_type FROM alerts WHERE id=?", (alert_id,)
                 ).fetchone()
             if row:
-                return  # Entry was properly logged and delivered
+                if not _strategy_telegram_delivery_allowed(row[1]):
+                    logger.info(
+                        "Exit notification suppressed by Telegram allowlist: "
+                        "alert_id=%d strategy=%s",
+                        alert_id, row[1],
+                    )
+                    return False
+                return True  # Entry was properly logged and delivered
         except Exception as exc:
             logger.warning("_ensure_entry_notified DB check failed: %s", exc)
 
@@ -13678,14 +13741,33 @@ def _ensure_entry_notified(
         f"🛡️ Стоп: <b>${sl_price:,.6g}</b>  •  🎯 Цель: <b>${tp_price:,.6g}</b>\n"
         f"<i>Это ретроактивное уведомление — позиция уже закрывается</i>"
     )
+    if alert_id:
+        try:
+            with _db_lock:
+                row = _get_db().execute(
+                    "SELECT alert_type FROM alerts WHERE id=?", (alert_id,)
+                ).fetchone()
+            if row and not _strategy_telegram_delivery_allowed(row[0]):
+                logger.info(
+                    "Retroactive entry notification suppressed by Telegram "
+                    "allowlist: alert_id=%d strategy=%s",
+                    alert_id, row[0],
+                )
+                return False
+        except Exception as exc:
+            logger.warning(
+                "_ensure_entry_notified strategy lookup failed: %s", exc
+            )
     try:
-        _telegram_send(TELEGRAM_CHAT_ID, body)
+        ok = _telegram_send(TELEGRAM_CHAT_ID, body)
         logger.info(
             "Retroactive entry notification sent: %s %s @ %.6g",
             direction, symbol, entry,
         )
+        return ok
     except Exception as exc:
         logger.warning("_ensure_entry_notified telegram send failed: %s", exc)
+        return False
 
 
 def _send_exit_notification(
@@ -13889,14 +13971,15 @@ class PositionMonitor(threading.Thread):
         # Guard: if the entry signal was never delivered (Telegram failure,
         # silent drop, or bot restart), send it now before the exit so the
         # user always sees entry → exit in order, never exit alone.
-        _ensure_entry_notified(
+        _entry_notification_allowed = _ensure_entry_notified(
             self.alert_id, self.symbol, self.direction,
             self.entry, self.sl_price, self.tp_price,
         )
-        _send_exit_notification(
-            self.symbol, self.direction, result,
-            self.entry, exit_price, elapsed,
-        )
+        if _entry_notification_allowed:
+            _send_exit_notification(
+                self.symbol, self.direction, result,
+                self.entry, exit_price, elapsed,
+            )
         # SL re-entry cooldown disabled — no block after SL hit
         with _monitors_lock:
             _active_monitors.pop(self.position_id, None)
@@ -14069,11 +14152,14 @@ def restore_position_monitors() -> None:
                     conn.commit()
             except Exception as exc:
                 logger.warning("restore timeout close failed: %s", exc)
-            _send_exit_notification(
-                symbol, direction, "TIMEOUT", entry, current, elapsed
-            )
+            if _ensure_entry_notified(
+                alert_id, symbol, direction, entry, sl_price, tp_price
+            ):
+                _send_exit_notification(
+                    symbol, direction, "TIMEOUT", entry, current, elapsed
+                )
             logger.info(
-                "Restored monitor id=%d expired — sent TIMEOUT (elapsed=%.0fs)",
+                "Restored monitor id=%d expired — timeout handled (elapsed=%.0fs)",
                 pos_id, elapsed,
             )
             continue

@@ -141,6 +141,7 @@ def test_send_alert_with_log_appends_context_to_common_alert_path(monkeypatch):
     monkeypatch.setattr(app, "is_hidden", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(app, "SHADOW_ONLY_MODE", False)
     monkeypatch.setattr(app, "ALERT_TYPE_SHADOW_ONLY", {})
+    monkeypatch.setattr(app, "TELEGRAM_NOTIFICATION_STRATEGIES", {"bb_squeeze"})
     monkeypatch.setattr(app, "MIN_SCORE_LONG_BY_TYPE", {"bb_squeeze": 0})
     monkeypatch.setattr(app, "MAX_SCORE_LONG_BY_TYPE", {})
     monkeypatch.setattr(
