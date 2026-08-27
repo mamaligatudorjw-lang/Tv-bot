@@ -2163,6 +2163,11 @@ def _demo_open_position(
                     _shadow_body = notify_body
                     if _shadow_conflict:
                         _shadow_body = f"{notify_body}\n{_shadow_conflict}"
+                    # Shadow strategy messages bypass send_alert_with_log, so
+                    # append the same informational context here as well.
+                    _shadow_body = _append_btc_regime_enrichment(
+                        _shadow_body, alert_type, direction
+                    )
                     if not _cycle_side_effect_allowed("telegram_shadow", symbol=symbol):
                         return
                     _delivery_ok = _telegram_send(
@@ -5294,6 +5299,28 @@ def _get_btc_regime_enrichment_label(
     )
 
 
+def _append_btc_regime_enrichment(
+    body_text: str, alert_type: str, recommendation: str
+) -> str:
+    """Append the optional BTC/history/trend context to any strategy message."""
+    try:
+        context_label = _get_btc_regime_enrichment_label(
+            alert_type, recommendation
+        )
+        return f"{body_text}\n{context_label}" if context_label else body_text
+    except Exception as context_exc:
+        logger.warning(
+            "BTC regime enrichment suppressed for %s/%s: %s",
+            alert_type, recommendation, context_exc,
+        )
+        return (
+            f"{body_text}\n"
+            "📚 BTC 4h: <b>Н/Д</b> · "
+            "📊 Исторический WR: <b>Н/Д</b> — контекст недоступен\n"
+            "📈 Тренд WR: <b>Н/Д</b> — контекст недоступен"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Recommendation engine
 # ---------------------------------------------------------------------------
@@ -6817,22 +6844,9 @@ def send_alert_with_log(
     # position sizing, SL/TP, or execution.  It is placed before the
     # price-invalid fast path so every directional alert gets the same
     # explicit fallback when live/report data is unavailable.
-    try:
-        _btc_context_label = _get_btc_regime_enrichment_label(
-            alert_type, recommendation
-        )
-        if _btc_context_label:
-            body_text = f"{body_text}\n{_btc_context_label}"
-    except Exception as _context_exc:
-        logger.warning(
-            "BTC regime enrichment suppressed for %s/%s: %s",
-            symbol, alert_type, _context_exc,
-        )
-        body_text = (
-            f"{body_text}\n"
-            "📚 BTC 4h: <b>Н/Д</b> · "
-            "📊 Исторический WR: <b>Н/Д</b> — контекст недоступен"
-        )
+    body_text = _append_btc_regime_enrichment(
+        body_text, alert_type, recommendation
+    )
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
         # consume cooldowns so we don't spam every cycle.

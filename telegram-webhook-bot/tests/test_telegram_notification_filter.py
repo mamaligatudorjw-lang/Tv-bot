@@ -159,3 +159,72 @@ def test_filtered_shadow_position_and_forward_tracker_still_run(monkeypatch):
     assert len(tracked) == 1
     assert tracked[0]["alert_type"] == "overheated_24h"
     assert sent == []
+
+
+def test_shadow_ema_cross_alert_includes_all_context_blocks(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE demo_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_open INTEGER, symbol TEXT, direction TEXT,
+            entry_price REAL, sl_price REAL, tp_price REAL,
+            size_usd REAL, status TEXT, is_shadow INTEGER,
+            shadow_reason TEXT, alert_type TEXT, is_top INTEGER,
+            repeat_num INTEGER, rsi_at_signal REAL, signal_price REAL
+        )
+        """
+    )
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    monkeypatch.setattr(
+        app, "_cycle_side_effect_allowed", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        app, "TELEGRAM_NOTIFICATION_STRATEGIES",
+        {"ema_cross", "ema_cross_confirmed"},
+    )
+    monkeypatch.setattr(app, "EMA_CROSS_TELEGRAM_NOTIFICATIONS", True)
+    monkeypatch.setattr(app, "_conflict_direction_line", lambda *_args: "")
+    monkeypatch.setattr(app, "create_tracker", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        app,
+        "track_forward_tp_vs_sl_position",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        app,
+        "_get_btc_regime_enrichment_label",
+        lambda *_args: (
+            "📚 BTC 4h: <b>BULL</b> · свеча закрыта\n"
+            "📊 История ema_cross/LONG/BULL: n=268 · WR=42.00% · avg R=+0.2500\n"
+            "📈 Тренд WR: 40.0% → 60.0%, +20.0 п.п."
+        ),
+    )
+    sent = []
+    monkeypatch.setattr(
+        app,
+        "_telegram_send",
+        lambda _chat_id, text, **_kwargs: sent.append(text) or True,
+    )
+
+    for index, alert_type in enumerate(
+        ("ema_cross", "ema_cross_confirmed"), start=1
+    ):
+        app._demo_open_position(
+            f"COIN{index}USDT",
+            "LONG",
+            100.0,
+            97.0,
+            106.0,
+            is_shadow=True,
+            alert_type=alert_type,
+            notify_body=f"📈 EMA Cross 4h shadow {alert_type}",
+        )
+
+    assert len(sent) == 2
+    for text in sent:
+        assert text.startswith("🔬 SHADOW — не реальная позиция\n")
+        assert "📚 BTC 4h: <b>BULL</b>" in text
+        assert "📊 История" in text
+        assert "📈 Тренд WR: 40.0% → 60.0%" in text
+    conn.close()
