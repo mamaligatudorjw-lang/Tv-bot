@@ -5,7 +5,7 @@ import html
 import base64
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import sqlite3
 import threading
@@ -4888,6 +4888,247 @@ def get_regime_label(alert_type: str, recommendation: str) -> tuple[bool, str]:
 
 
 # ---------------------------------------------------------------------------
+# Informational BTC 4h regime + historical regime statistics
+# ---------------------------------------------------------------------------
+
+_BTC_4H_INTERVAL_SEC = 4 * 60 * 60
+_BTC_4H_EMA_PERIOD = 50
+_BTC_4H_CONTEXT_TTL = 15 * 60
+_REGIME_STATS_MAX_AGE = 48 * 60 * 60
+_REGIME_STATS_CACHE_TTL = 5 * 60
+_REGIME_STATS_PATH = os.path.join(
+    os.path.dirname(__file__), "trend_regime_analysis", "report.json"
+)
+_btc_4h_context_lock = threading.Lock()
+_btc_4h_context_cache: dict | None = None
+_regime_stats_lock = threading.Lock()
+_regime_stats_cache: dict | None = None
+
+
+def _format_utc_snapshot(ts: float | int | None) -> str:
+    if ts is None:
+        return "н/д"
+    try:
+        return datetime.fromtimestamp(float(ts), timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "н/д"
+
+
+def _get_btc_4h_regime_snapshot() -> dict:
+    """Read the current completed BTC 4h regime for informational display only.
+
+    This deliberately has no effect on signal eligibility or score.  A failed
+    refresh can expose the previous value, but marks it stale explicitly.
+    """
+    global _btc_4h_context_cache
+    now = time.time()
+    with _btc_4h_context_lock:
+        cached = dict(_btc_4h_context_cache or {})
+    if cached and now - float(cached.get("fetched_ts", 0)) < _BTC_4H_CONTEXT_TTL:
+        return cached
+
+    try:
+        raw = _gateio_klines("BTCUSDT", "4h", 100)
+        completed: dict[int, float] = {}
+        for candle in raw:
+            candle_ts = int(candle[0])
+            close = float(candle[4])
+            if close > 0 and candle_ts + _BTC_4H_INTERVAL_SEC <= now:
+                completed[candle_ts] = close
+        completed_items = sorted(completed.items())
+        if len(completed_items) < _BTC_4H_EMA_PERIOD:
+            raise ValueError(
+                f"only {len(completed_items)} completed BTC 4h candles; "
+                f"{_BTC_4H_EMA_PERIOD} required"
+            )
+
+        closes = [close for _, close in completed_items]
+        ema50 = _calculate_ema(closes, _BTC_4H_EMA_PERIOD)
+        if ema50 is None or not math.isfinite(ema50):
+            raise ValueError("BTC 4h EMA50 is unavailable")
+        candle_ts, close = completed_items[-1]
+        if close > ema50:
+            regime = "bull"
+        elif close < ema50:
+            regime = "bear"
+        else:
+            regime = "unknown"
+        snapshot = {
+            "available": True,
+            "regime": regime,
+            "candle_ts": candle_ts,
+            "close": close,
+            "ema50": ema50,
+            "fetched_ts": now,
+            "stale": False,
+            "error": "",
+        }
+        with _btc_4h_context_lock:
+            _btc_4h_context_cache = dict(snapshot)
+        return snapshot
+    except Exception as exc:
+        logger.warning("BTC 4h regime enrichment failed: %s", exc)
+        if cached:
+            cached["stale"] = True
+            cached["error"] = f"{type(exc).__name__}: {exc}"
+            return cached
+        return {
+            "available": False,
+            "regime": "unknown",
+            "candle_ts": None,
+            "close": None,
+            "ema50": None,
+            "fetched_ts": now,
+            "stale": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _format_btc_4h_regime_label(snapshot: dict) -> str:
+    """Format live regime data, never hiding stale/unavailable state."""
+    if not snapshot.get("available"):
+        return (
+            "📚 BTC 4h: <b>Н/Д</b> — нет подтверждённых данных "
+            "(EMA50/завершённая свеча недоступны)"
+        )
+    regime = str(snapshot.get("regime") or "unknown").upper()
+    candle_at = _format_utc_snapshot(
+        (snapshot.get("candle_ts") or 0) + _BTC_4H_INTERVAL_SEC
+    )
+    fetched_at = _format_utc_snapshot(snapshot.get("fetched_ts"))
+    close = snapshot.get("close")
+    ema50 = snapshot.get("ema50")
+    values = (
+        f" · close {float(close):.6g} vs EMA50 {float(ema50):.6g}"
+        if close is not None and ema50 is not None
+        else ""
+    )
+    stale = " · ⚠️ ДАННЫЕ УСТАРЕЛИ" if snapshot.get("stale") else ""
+    return (
+        f"📚 BTC 4h: <b>{regime}</b>{values} · свеча закрыта {candle_at}"
+        f" · срез {_format_utc_snapshot(fetched_at)}{stale}"
+    )
+
+
+def _load_regime_stats_report() -> dict:
+    """Load the offline report with freshness validation and a short cache."""
+    global _regime_stats_cache
+    now = time.time()
+    with _regime_stats_lock:
+        cached = dict(_regime_stats_cache or {})
+    if cached and now - float(cached.get("loaded_ts", 0)) < _REGIME_STATS_CACHE_TTL:
+        return cached
+
+    try:
+        with open(_REGIME_STATS_PATH, encoding="utf-8") as handle:
+            report = json.load(handle)
+        coverage = report.get("coverage") or {}
+        analysis_run = coverage.get("analysis_run_utc")
+        if not analysis_run:
+            raise ValueError("report has no analysis timestamp")
+        analysis_dt = datetime.fromisoformat(str(analysis_run).replace("Z", "+00:00"))
+        if analysis_dt.tzinfo is None:
+            analysis_dt = analysis_dt.replace(tzinfo=timezone.utc)
+        analysis_ts = analysis_dt.timestamp()
+        summary_index: dict[tuple[str, str, str], dict] = {}
+        for row in report.get("summary") or []:
+            if row.get("scope") != "strategy":
+                continue
+            key = (
+                str(row.get("strategy") or ""),
+                str(row.get("direction") or ""),
+                str(row.get("trend_regime") or ""),
+            )
+            summary_index[key] = row
+        result = {
+            "status": "stale"
+            if now - analysis_ts > _REGIME_STATS_MAX_AGE
+            else "ready",
+            "analysis_ts": analysis_ts,
+            "summary_index": summary_index,
+            "loaded_ts": now,
+            "error": "",
+        }
+        with _regime_stats_lock:
+            _regime_stats_cache = dict(result)
+        return result
+    except Exception as exc:
+        logger.warning("regime stats enrichment failed: %s", exc)
+        result = {
+            "status": "unavailable",
+            "analysis_ts": None,
+            "summary_index": {},
+            "loaded_ts": now,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        with _regime_stats_lock:
+            _regime_stats_cache = dict(result)
+        return result
+
+
+def _format_regime_stats_label(
+    alert_type: str, recommendation: str, snapshot: dict, report: dict
+) -> str:
+    """Format strategy/direction/current-regime stats without inventing values."""
+    regime = str(snapshot.get("regime") or "unknown")
+    if regime not in ("bull", "bear"):
+        return (
+            "📊 Исторический WR: <b>Н/Д</b> — текущий BTC 4h режим "
+            "не определён"
+        )
+    report_status = report.get("status")
+    if report_status == "stale":
+        return (
+            "📊 Исторический WR: <b>Н/Д</b> — отчёт устарел "
+            f"(срез {_format_utc_snapshot(report.get('analysis_ts'))})"
+        )
+    if report_status != "ready":
+        return (
+            "📊 Исторический WR: <b>Н/Д</b> — отчёт недоступен "
+            "(статистика не загружена)"
+        )
+
+    key = (str(alert_type), str(recommendation), regime)
+    row = (report.get("summary_index") or {}).get(key)
+    if not row:
+        return (
+            f"📊 Исторический WR: <b>Н/Д</b> — нет resolved-статистики "
+            f"для {alert_type}/{recommendation}/{regime.upper()}"
+        )
+    n = int(row.get("n") or 0)
+    wr = row.get("resolved_wr_pct")
+    avg_r = row.get("avg_r")
+    wr_text = f"{float(wr):.2f}%" if wr is not None else "—"
+    avg_r_text = f"{float(avg_r):+.4f}" if avg_r is not None else "—"
+    sample = (
+        "ready"
+        if n >= 20 and row.get("sample_status") == "ready"
+        else f"⚠️ INSUFFICIENT (<20; n={n})"
+    )
+    return (
+        f"📊 История {alert_type}/{recommendation}/{regime.upper()}: "
+        f"n={n} · WR={wr_text} · avg R={avg_r_text} · {sample}"
+        f" · срез {_format_utc_snapshot(report.get('analysis_ts'))}"
+    )
+
+
+def _get_btc_regime_enrichment_label(
+    alert_type: str, recommendation: str
+) -> str:
+    """Build optional informational context; never blocks a valid alert."""
+    snapshot = _get_btc_4h_regime_snapshot()
+    report = _load_regime_stats_report()
+    return "\n".join(
+        (
+            _format_btc_4h_regime_label(snapshot),
+            _format_regime_stats_label(alert_type, recommendation, snapshot, report),
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
 # Recommendation engine
 # ---------------------------------------------------------------------------
 
@@ -6400,6 +6641,26 @@ def send_alert_with_log(
     # treat them as a separate, higher-conviction stream.
     if score is not None and score >= TOP_SIGNAL_SCORE:
         body_text = "🏆 <b>ТОП СИГНАЛ</b>\n" + body_text
+    # Optional informational context: this never changes eligibility, score,
+    # position sizing, SL/TP, or execution.  It is placed before the
+    # price-invalid fast path so every directional alert gets the same
+    # explicit fallback when live/report data is unavailable.
+    try:
+        _btc_context_label = _get_btc_regime_enrichment_label(
+            alert_type, recommendation
+        )
+        if _btc_context_label:
+            body_text = f"{body_text}\n{_btc_context_label}"
+    except Exception as _context_exc:
+        logger.warning(
+            "BTC regime enrichment suppressed for %s/%s: %s",
+            symbol, alert_type, _context_exc,
+        )
+        body_text = (
+            f"{body_text}\n"
+            "📚 BTC 4h: <b>Н/Д</b> · "
+            "📊 Исторический WR: <b>Н/Д</b> — контекст недоступен"
+        )
     if price is None or price <= 0:
         # Cannot log without price; send without buttons. If it goes through,
         # consume cooldowns so we don't spam every cycle.
