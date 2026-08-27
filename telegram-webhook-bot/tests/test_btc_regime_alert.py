@@ -89,6 +89,7 @@ def test_small_stats_label_is_marked_insufficient():
     assert "n=10" in label
     assert "WR=10.00%" in label
     assert "avg R=-0.8000" in label
+    assert "недостаточно данных" in label
     assert "INSUFFICIENT (<20; n=10)" in label
 
 
@@ -109,12 +110,66 @@ def test_missing_stats_and_stale_report_are_not_fabricated():
 def test_enrichment_helper_combines_live_and_historical_context(monkeypatch):
     monkeypatch.setattr(app, "_get_btc_4h_regime_snapshot", lambda: _snapshot())
     monkeypatch.setattr(app, "_load_regime_stats_report", lambda: _report())
+    monkeypatch.setattr(
+        app,
+        "_get_strategy_wr_trend_label",
+        lambda *_args: "📈 Тренд WR: недостаточно данных для тренда",
+    )
 
     label = app._get_btc_regime_enrichment_label("bb_squeeze", "SHORT")
 
-    assert label.count("\n") == 1
+    assert label.count("\n") == 2
     assert "BTC 4h: <b>BULL</b>" in label
     assert "n=268" in label
+    assert "недостаточно данных для тренда" in label
+
+
+def _trend_db(statuses):
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE demo_positions (
+            id INTEGER PRIMARY KEY,
+            alert_type TEXT,
+            direction TEXT,
+            status TEXT,
+            ts_close INTEGER
+        )
+        """
+    )
+    for index, status in enumerate(statuses, start=1):
+        conn.execute(
+            "INSERT INTO demo_positions "
+            "(id, alert_type, direction, status, ts_close) VALUES (?, ?, ?, ?, ?)",
+            (index, "ema_cross", "LONG", status, index),
+        )
+    conn.commit()
+    return conn
+
+
+def test_wr_trend_uses_previous_and_latest_resolved_windows(monkeypatch):
+    # Oldest 20: 8 TP (40%); newest 20: 12 TP (60%).
+    conn = _trend_db(["tp"] * 8 + ["sl"] * 12 + ["tp"] * 12 + ["sl"] * 8)
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+
+    label = app._get_strategy_wr_trend_label("ema_cross", "LONG")
+
+    assert "WR: 40.0% → 60.0%" in label
+    assert "+20.0 п.п. за последние 20 сделок" in label
+    assert "resolved demo_positions" in label
+    conn.close()
+
+
+def test_wr_trend_is_explicitly_insufficient_below_40_resolved(monkeypatch):
+    conn = _trend_db(["tp"] * 19 + ["sl"] * 20)
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+
+    label = app._get_strategy_wr_trend_label("ema_cross", "LONG")
+
+    assert "недостаточно данных для тренда" in label
+    assert "resolved n=39" in label
+    assert "п.п." not in label
+    conn.close()
 
 
 def test_send_alert_with_log_appends_context_to_common_alert_path(monkeypatch):

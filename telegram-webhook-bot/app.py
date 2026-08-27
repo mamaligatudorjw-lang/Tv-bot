@@ -5219,12 +5219,63 @@ def _format_regime_stats_label(
     sample = (
         "ready"
         if n >= 20 and row.get("sample_status") == "ready"
-        else f"⚠️ INSUFFICIENT (<20; n={n})"
+        else f"⚠️ недостаточно данных — INSUFFICIENT (<20; n={n})"
     )
     return (
         f"📊 История {alert_type}/{recommendation}/{regime.upper()}: "
         f"n={n} · WR={wr_text} · avg R={avg_r_text} · {sample}"
         f" · срез {_format_utc_snapshot(report.get('analysis_ts'))}"
+    )
+
+
+def _get_strategy_wr_trend_label(
+    alert_type: str, recommendation: str
+) -> str:
+    """Compare the latest 20 resolved trades with the preceding 20.
+
+    This is deliberately read-only and uses the same strategy/direction keys
+    as the historical regime cohort.  A trend is shown only when both complete
+    20-trade windows exist; no arrow or implied direction is emitted for a
+    smaller sample.
+    """
+    try:
+        with _db_lock:
+            rows = _get_db().execute(
+                "SELECT status FROM demo_positions "
+                "WHERE alert_type=? AND direction=? "
+                "AND status IN ('tp', 'sl') "
+                "AND ts_close IS NOT NULL "
+                "ORDER BY ts_close DESC, id DESC "
+                "LIMIT 40",
+                (str(alert_type), str(recommendation)),
+            ).fetchall()
+    except Exception as exc:
+        logger.warning(
+            "strategy WR trend lookup failed for %s/%s: %s",
+            alert_type, recommendation, exc,
+        )
+        return (
+            "📈 Тренд WR: <b>Н/Д</b> — resolved-статистика "
+            "недоступна"
+        )
+
+    resolved_n = len(rows)
+    if resolved_n < 40:
+        return (
+            "📈 Тренд WR: <b>недостаточно данных для тренда</b> "
+            f"(resolved n={resolved_n}; нужно ≥40)"
+        )
+
+    latest = rows[:20]
+    previous = rows[20:40]
+    latest_wr = 100.0 * sum(row[0] == "tp" for row in latest) / 20.0
+    previous_wr = 100.0 * sum(row[0] == "tp" for row in previous) / 20.0
+    delta = latest_wr - previous_wr
+    delta_sign = "+" if delta >= 0 else ""
+    return (
+        f"📈 Тренд WR: {previous_wr:.1f}% → {latest_wr:.1f}%, "
+        f"{delta_sign}{delta:.1f} п.п. за последние 20 сделок "
+        "(предыдущие 20 → последние 20; resolved demo_positions)"
     )
 
 
@@ -5238,6 +5289,7 @@ def _get_btc_regime_enrichment_label(
         (
             _format_btc_4h_regime_label(snapshot),
             _format_regime_stats_label(alert_type, recommendation, snapshot, report),
+            _get_strategy_wr_trend_label(alert_type, recommendation),
         )
     )
 
