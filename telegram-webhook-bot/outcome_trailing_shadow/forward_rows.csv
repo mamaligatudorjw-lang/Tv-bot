@@ -1,0 +1,2 @@
+tracker_id,source_demo_id,ts_open_utc,source_ts_close_utc,shadow_ts_close_utc,symbol,strategy,direction,source_is_shadow,entry_price,initial_sl_price,tp_price,step_pct,activation_label,activated,shadow_outcome,shadow_exit_method,baseline_outcome,baseline_r,shadow_r,delta_r
+3,5095,2026-08-26T16:07:57+00:00,2026-08-27T11:35:58+00:00,2026-08-27T11:35:58+00:00,ONGUSDT,overheated_24h,LONG,1,0.15327,0.13617964285714285,0.18745071428571428,8.0,+0.5R,0,sl,live_price,sl,-2.03740622,-2.03740622,0.0
