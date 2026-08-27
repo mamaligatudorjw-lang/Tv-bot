@@ -1,0 +1,56 @@
+{
+  "experiment": {
+    "key": "ema_cross_confirmed_long_small_sl_v1",
+    "strategy": "ema_cross_confirmed",
+    "direction": "LONG",
+    "freeze_ts": 1787859600,
+    "freeze_utc": "2026-08-27T19:40:00+00:00",
+    "sl_threshold_pct": 3.55255,
+    "rule": "risk_pct <= 3.55255% predicts TP-first; risk_pct > 3.55255% is control",
+    "minimum_per_outcome_n": 20
+  },
+  "generated_ts": 1787859923,
+  "generated_utc": "2026-08-27T19:45:23+00:00",
+  "scope": "Only new is_shadow=1 ema_cross_confirmed LONG rows with ts_open >= frozen freeze_ts; historical Task #143 rows excluded.",
+  "baseline_no_rule": {
+    "n_total": 0,
+    "tp_first": 0,
+    "sl_first": 0,
+    "unresolved": 0,
+    "resolved_n": 0,
+    "resolved_wr_pct": null,
+    "avg_r": null
+  },
+  "candidate_small_sl": {
+    "n_total": 0,
+    "tp_first": 0,
+    "sl_first": 0,
+    "unresolved": 0,
+    "resolved_n": 0,
+    "resolved_wr_pct": null,
+    "avg_r": null,
+    "confusion": {
+      "predicted_tp_actual_tp": 0,
+      "predicted_tp_actual_sl": 0,
+      "predicted_sl_actual_tp": 0,
+      "predicted_sl_actual_sl": 0,
+      "resolved_n": 0,
+      "accuracy": null,
+      "precision_tp": null,
+      "precision_sl": null
+    }
+  },
+  "control_large_sl": {
+    "n_total": 0,
+    "tp_first": 0,
+    "sl_first": 0,
+    "unresolved": 0,
+    "resolved_n": 0,
+    "resolved_wr_pct": null,
+    "avg_r": null
+  },
+  "verdict": "insufficient",
+  "verdict_reason": "Wait for n≥20 TP-first and n≥20 SL-first in the forward sample.",
+  "verdict_is_allowed": false,
+  "rows": []
+}

@@ -22,6 +22,14 @@ from trailing_shadow import (
     read_report_status as read_trailing_shadow_report_status,
     schedule_report as schedule_trailing_shadow_report,
 )
+from forward_tp_vs_sl import (
+    FORWARD_SL_THRESHOLD_PCT,
+    classify_risk,
+    initialize_schema as initialize_forward_tp_vs_sl_schema,
+    sync_outcome as sync_forward_tp_vs_sl_outcome,
+    track_position as track_forward_tp_vs_sl_position,
+    write_report as write_forward_tp_vs_sl_report,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2038,6 +2046,45 @@ def _demo_open_position(
                     _new_demo_id,
                     _shadow_exc,
                 )
+            try:
+                _forward_risk_pct = (
+                    abs(float(entry_price) - float(sl_price))
+                    / float(entry_price)
+                    * 100.0
+                )
+                if track_forward_tp_vs_sl_position(
+                    conn,
+                    source_demo_id=int(_new_demo_id),
+                    ts_open=_ts_recv,
+                    symbol=symbol,
+                    direction=direction,
+                    alert_type=alert_type or "",
+                    is_shadow=is_shadow,
+                    entry_price=entry_price,
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                ):
+                    conn.commit()
+                    logger.info(
+                        "TP-vs-SL forward tracker opened: source_id=%d %s %s/%s "
+                        "risk=%.5f%% threshold=%.5f%% prediction=%s",
+                        _new_demo_id,
+                        symbol,
+                        direction,
+                        alert_type or "?",
+                        _forward_risk_pct,
+                        FORWARD_SL_THRESHOLD_PCT,
+                        classify_risk(_forward_risk_pct),
+                    )
+            except Exception as _forward_exc:
+                # Forward telemetry is fail-open: never alter the source
+                # position if the independent experiment cannot be updated.
+                conn.rollback()
+                logger.warning(
+                    "TP-vs-SL forward tracker open failed source_id=%d: %s",
+                    _new_demo_id,
+                    _forward_exc,
+                )
         logger.info(
             "Demo %s: %s %s/%s entry=%.6g sl=%.6g tp=%.6g pid=%d ts=%d",
             "shadow" if is_shadow else "pos",
@@ -3044,6 +3091,23 @@ def check_demo_positions() -> None:
                     (status, now_ts, exit_price, pnl_usd, wick_close, exit_method, row_id),
                 )
                 conn.commit()
+                try:
+                    sync_forward_tp_vs_sl_outcome(
+                        conn,
+                        source_demo_id=row_id,
+                        status=status,
+                        ts_close=now_ts,
+                        exit_price=exit_price,
+                    )
+                    conn.commit()
+                except Exception as _forward_exit_exc:
+                    # Forward telemetry is independent from the source outcome.
+                    conn.rollback()
+                    logger.warning(
+                        "TP-vs-SL forward tracker outcome failed source_id=%d: %s",
+                        row_id,
+                        _forward_exit_exc,
+                    )
             source_resolved = True
             logger.info(
                 "Demo %s pos %d %s %s: %s exit=%.6g pnl=$%.2f%s",
@@ -3059,6 +3123,14 @@ def check_demo_positions() -> None:
         # results are reviewed via /demo and /demoshadow commands.
     if trailing_resolved or source_resolved:
         schedule_trailing_shadow_report(HIT_RATE_DB_PATH)
+    if source_resolved:
+        try:
+            write_forward_tp_vs_sl_report(HIT_RATE_DB_PATH)
+        except Exception as _forward_report_exc:
+            logger.warning(
+                "TP-vs-SL forward report update failed: %s",
+                _forward_report_exc,
+            )
 
 
 def handle_shadowtrail_command(chat_id: int) -> None:
@@ -5512,6 +5584,10 @@ def _get_db() -> sqlite3.Connection:
         except sqlite3.OperationalError as _mig_rn:
             if "duplicate column" not in str(_mig_rn).lower():
                 raise
+        # Frozen, informational forward-shadow experiment.  This tracker only
+        # mirrors new ema_cross_confirmed LONG positions after its fixed
+        # boundary; it cannot affect the source demo position or signal path.
+        initialize_forward_tp_vs_sl_schema(_db_conn)
         _db_conn.commit()
         # Liquidity-entry strategy: parallel demo-only strategy
         _db_conn.execute("""
