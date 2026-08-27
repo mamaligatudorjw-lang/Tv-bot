@@ -911,6 +911,17 @@ ALERT_TYPE_SHADOW_ONLY: dict[str, bool] = {
     "low_rejection_long":   True,                        # управляется LOW_REJECTION_SHADOW_ONLY
     "range_breakout_long":  True,                        # управляется RANGE_BREAKOUT_SHADOW_ONLY
 }
+# Strategy alerts are still generated and persisted for every strategy.  This
+# allowlist controls only which strategy notifications reach Telegram; it can
+# also be overridden with a comma-separated environment value.
+TELEGRAM_NOTIFICATION_STRATEGIES: frozenset[str] = frozenset(
+    name.strip()
+    for name in os.environ.get(
+        "TELEGRAM_NOTIFICATION_STRATEGIES",
+        "ema_cross_confirmed,overheated_early,ema_cross,overheated_confirmed",
+    ).split(",")
+    if name.strip()
+)
 UPTREND_FLIP_INTERVAL     = "4h"        # таймфрейм для uptrend-флипа
 
 # --- Display leverage for ROI calculation in Telegram messages ---
@@ -4478,11 +4489,23 @@ def _shadow_notif_allowed(notif_key: str) -> bool:
 
 def _shadow_strategy_telegram_allowed(alert_type: str | None) -> bool:
     """Return whether a shadow strategy may create a Telegram notification."""
+    if not _strategy_telegram_delivery_allowed(alert_type):
+        return False
     if alert_type == BB_SQUEEZE_INVERTED_ALERT_TYPE:
         return False
     if alert_type in ("ema_cross", "ema_cross_confirmed"):
         return EMA_CROSS_TELEGRAM_NOTIFICATIONS
     return True
+
+
+def _strategy_telegram_delivery_allowed(alert_type: str | None) -> bool:
+    """Return whether a strategy alert is allowed to reach Telegram.
+
+    This is deliberately a delivery-layer check.  Signal generation, DB
+    logging, demo positions, and forward/shadow telemetry happen before or
+    independently of this decision.
+    """
+    return bool(alert_type and alert_type in TELEGRAM_NOTIFICATION_STRATEGIES)
 
 
 def _trend_warning_line(symbol: str, recommendation: str) -> str:
