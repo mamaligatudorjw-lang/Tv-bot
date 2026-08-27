@@ -210,6 +210,7 @@ def test_send_alert_with_log_appends_context_to_common_alert_path(monkeypatch):
     monkeypatch.setattr(app, "_build_alert_buttons", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(app, "_get_current_price", lambda *_args: 100.0)
     monkeypatch.setattr(app, "_auto_start_monitor", lambda *_args: None)
+    monkeypatch.setattr(app, "_GEMINI_AI_COMMENTARY", False)
     sent = []
     monkeypatch.setattr(
         app,

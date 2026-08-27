@@ -42,6 +42,7 @@ def _stub_common_alert_dependencies(monkeypatch, conn):
     monkeypatch.setattr(app, "_coin_trend_label", lambda *_args: "")
     monkeypatch.setattr(app, "_get_signal_edge_label", lambda *_args: "")
     monkeypatch.setattr(app, "_auto_start_monitor", lambda *_args: None)
+    monkeypatch.setattr(app, "_GEMINI_AI_COMMENTARY", False)
 
 
 def test_allowlisted_strategy_is_delivered_without_format_changes(monkeypatch):
