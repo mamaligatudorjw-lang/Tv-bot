@@ -15,8 +15,8 @@
   },
   "cutoff_ts": 1787917018,
   "cutoff_utc": "2026-08-28T11:36:58+00:00",
-  "generated_ts": 1787919579,
-  "generated_utc": "2026-08-28T12:19:39+00:00",
+  "generated_ts": 1787928959,
+  "generated_utc": "2026-08-28T14:55:59+00:00",
   "scope": "Resolved is_shadow=1 SHORT demo_positions with alert_type in ema_cross_confirmed/ema_cross and ts_open > cutoff.",
   "production_changes": false,
   "strategies": {
