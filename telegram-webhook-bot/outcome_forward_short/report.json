@@ -1,0 +1,59 @@
+{
+  "audit": {
+    "name": "forward_short_direction_audit",
+    "direction": "SHORT",
+    "strategies": [
+      "ema_cross_confirmed",
+      "ema_cross"
+    ],
+    "minimum_forward_resolved_n": 20,
+    "verdict_rule": "n<20 => INSUFFICIENT; n>=20 and unrounded avg R < 0 => CONFIRMED; > 0 => REFUTED; == 0 => AMBIGUOUS",
+    "in_sample_baselines": {
+      "ema_cross_confirmed": -0.410295,
+      "ema_cross": -0.178233
+    }
+  },
+  "cutoff_ts": 1787917018,
+  "cutoff_utc": "2026-08-28T11:36:58+00:00",
+  "generated_ts": 1787917050,
+  "generated_utc": "2026-08-28T11:37:30+00:00",
+  "scope": "Resolved is_shadow=1 SHORT demo_positions with alert_type in ema_cross_confirmed/ema_cross and ts_open > cutoff.",
+  "production_changes": false,
+  "strategies": {
+    "ema_cross_confirmed": {
+      "in_sample_avg_r": -0.410295,
+      "in_sample_avg_r_display": -0.41,
+      "forward": {
+        "total_n": 0,
+        "resolved_n": 0,
+        "tp": 0,
+        "sl": 0,
+        "unresolved_n": 0,
+        "resolved_wr_pct": null,
+        "avg_r": null,
+        "avg_r_unrounded": null
+      },
+      "delta_forward_minus_in_sample": null,
+      "verdict": "INSUFFICIENT",
+      "verdict_reason": "Requires at least 20 resolved forward SHORT trades; observed n=0."
+    },
+    "ema_cross": {
+      "in_sample_avg_r": -0.178233,
+      "in_sample_avg_r_display": -0.18,
+      "forward": {
+        "total_n": 0,
+        "resolved_n": 0,
+        "tp": 0,
+        "sl": 0,
+        "unresolved_n": 0,
+        "resolved_wr_pct": null,
+        "avg_r": null,
+        "avg_r_unrounded": null
+      },
+      "delta_forward_minus_in_sample": null,
+      "verdict": "INSUFFICIENT",
+      "verdict_reason": "Requires at least 20 resolved forward SHORT trades; observed n=0."
+    }
+  },
+  "rows": []
+}
