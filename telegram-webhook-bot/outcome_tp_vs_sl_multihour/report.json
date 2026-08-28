@@ -16,24 +16,24 @@
     "in_sample_rule_warning": "Any candidate is selected and evaluated on the same history; it is not forward evidence."
   },
   "coverage": {
-    "rows_loaded": 1597,
+    "rows_loaded": 1604,
     "log_exists": true,
-    "log_event_keys": 879,
-    "log_matches": 1200,
-    "log_match_rate_pct": 75.14,
-    "last_signal_ts": 1787900440,
-    "last_signal_utc": "2026-08-28T07:00:40+00:00",
+    "log_event_keys": 884,
+    "log_matches": 1207,
+    "log_match_rate_pct": 75.25,
+    "last_signal_ts": 1787904545,
+    "last_signal_utc": "2026-08-28T08:09:05+00:00",
     "historical_candles": {
       "status": "ok",
       "interval": "1h",
       "requested_start_ts": 1786512062,
-      "requested_end_ts": 1787900440,
+      "requested_end_ts": 1787904545,
       "requested_start_utc": "2026-08-12T05:21:02+00:00",
-      "requested_end_utc": "2026-08-28T07:00:40+00:00",
-      "symbols_requested": 389,
+      "requested_end_utc": "2026-08-28T08:09:05+00:00",
+      "symbols_requested": 390,
       "symbols_cached": 385,
-      "symbols_fetched": 4,
-      "symbols_with_history": 389,
+      "symbols_fetched": 5,
+      "symbols_with_history": 390,
       "symbols_failed": 0,
       "failed_symbols": {}
     }
@@ -158,8 +158,8 @@
   "feature_coverage": {
     "price_return_1h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -181,18 +181,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -208,8 +208,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -225,8 +225,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -234,8 +234,8 @@
     },
     "price_return_2h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -257,18 +257,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -284,8 +284,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -301,8 +301,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -310,8 +310,8 @@
     },
     "price_return_4h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -333,18 +333,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -360,8 +360,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -377,8 +377,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -386,8 +386,8 @@
     },
     "range_1h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -409,18 +409,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -436,8 +436,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -453,8 +453,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -462,8 +462,8 @@
     },
     "range_2h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -485,18 +485,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -512,8 +512,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -529,8 +529,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -538,8 +538,8 @@
     },
     "range_4h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -561,18 +561,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -588,8 +588,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -605,8 +605,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -614,8 +614,8 @@
     },
     "realized_vol_2h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -637,18 +637,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -664,8 +664,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -681,8 +681,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -690,8 +690,8 @@
     },
     "realized_vol_4h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -713,18 +713,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -740,8 +740,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -757,8 +757,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -766,8 +766,8 @@
     },
     "volume_ratio_1h_vs_24h": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -789,18 +789,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -816,8 +816,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -833,8 +833,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -842,8 +842,8 @@
     },
     "volume_change_1h_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1593,
+      "n": 1604,
+      "available_n": 1600,
       "coverage_pct": 99.75,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -865,18 +865,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -892,8 +892,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -909,17 +909,17 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 223,
-            "coverage_pct": 99.55
+            "n": 226,
+            "available_n": 225,
+            "coverage_pct": 99.56
           }
         }
       }
     },
     "volume_acceleration_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1593,
+      "n": 1604,
+      "available_n": 1600,
       "coverage_pct": 99.75,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -941,18 +941,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -968,8 +968,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -985,17 +985,17 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 223,
-            "coverage_pct": 99.55
+            "n": 226,
+            "available_n": 225,
+            "coverage_pct": 99.56
           }
         }
       }
     },
     "momentum_acceleration_pct": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1597,
+      "n": 1604,
+      "available_n": 1604,
       "coverage_pct": 100.0,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -1017,18 +1017,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 100,
+            "n": 103,
+            "available_n": 103,
             "coverage_pct": 100.0
           },
           "sl": {
-            "n": 122,
-            "available_n": 122,
+            "n": 123,
+            "available_n": 123,
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -1044,8 +1044,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -1061,8 +1061,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -1070,8 +1070,8 @@
     },
     "momentum_decay_ratio": {
       "provenance": "reconstructed_historical_gateio_1h",
-      "n": 1597,
-      "available_n": 1585,
+      "n": 1604,
+      "available_n": 1592,
       "coverage_pct": 99.25,
       "by_strategy_and_outcome": {
         "ema_cross_confirmed": {
@@ -1093,18 +1093,18 @@
         },
         "overheated_early": {
           "tp": {
-            "n": 100,
-            "available_n": 98,
-            "coverage_pct": 98.0
+            "n": 103,
+            "available_n": 101,
+            "coverage_pct": 98.06
           },
           "sl": {
-            "n": 122,
-            "available_n": 121,
-            "coverage_pct": 99.18
+            "n": 123,
+            "available_n": 122,
+            "coverage_pct": 99.19
           },
           "unresolved": {
-            "n": 29,
-            "available_n": 29,
+            "n": 28,
+            "available_n": 28,
             "coverage_pct": 100.0
           }
         },
@@ -1120,8 +1120,8 @@
             "coverage_pct": 99.58
           },
           "unresolved": {
-            "n": 63,
-            "available_n": 63,
+            "n": 65,
+            "available_n": 65,
             "coverage_pct": 100.0
           }
         },
@@ -1137,8 +1137,8 @@
             "coverage_pct": 100.0
           },
           "unresolved": {
-            "n": 224,
-            "available_n": 224,
+            "n": 226,
+            "available_n": 226,
             "coverage_pct": 100.0
           }
         }
@@ -1155,25 +1155,25 @@
       "ttl_expired": 198
     },
     "overheated_early": {
-      "total": 251,
-      "resolved": 222,
-      "tp": 100,
-      "sl": 122,
-      "open": 29
+      "total": 254,
+      "resolved": 226,
+      "tp": 103,
+      "sl": 123,
+      "open": 28
     },
     "ema_cross": {
-      "total": 473,
-      "resolved": 410,
+      "total": 475,
+      "resolved": 411,
       "tp": 170,
-      "sl": 240,
-      "open": 63
+      "sl": 241,
+      "open": 64
     },
     "overheated_confirmed": {
-      "total": 463,
+      "total": 465,
       "resolved": 239,
       "tp": 101,
       "sl": 138,
-      "open": 15,
+      "open": 17,
       "ttl_expired": 209
     }
   },
@@ -1950,6 +1950,8 @@
             "sl_recall": 0.859155
           }
         },
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": true,
           "baseline": {
@@ -2792,6 +2794,8 @@
             "sl_recall": 0.78125
           }
         },
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": true,
           "baseline": {
@@ -3576,6 +3580,8 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "INSUFFICIENT_TP_OR_SL",
+        "comparison_reason": "Requires TP>= 20 and SL>= 20; observed TP=12, SL=39.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
@@ -3626,17 +3632,17 @@
     "overheated_early": {
       "overall": {
         "metrics": {
-          "n": 222,
-          "total_n": 251,
-          "tp": 100,
-          "sl": 122,
-          "unresolved_n": 29,
-          "resolved_wr_pct": 45.05,
-          "avg_r": 0.407899,
+          "n": 226,
+          "total_n": 254,
+          "tp": 103,
+          "sl": 123,
+          "unresolved_n": 28,
+          "resolved_wr_pct": 45.58,
+          "avg_r": 0.421381,
           "sample_status": "ready"
         },
-        "tp_first": 100,
-        "sl_first": 122,
+        "tp_first": 103,
+        "sl_first": 123,
         "comparison_allowed": true,
         "feature_comparisons": [
           {
@@ -3645,29 +3651,29 @@
             "provenance": "exact_persisted_derived",
             "description": "abs(entry_price - sl_price) / entry_price",
             "tp_first": {
-              "n": 100,
-              "mean": 6.340442,
-              "median": 5.095295,
-              "stdev": 4.093388,
+              "n": 103,
+              "mean": 6.408088,
+              "median": 5.127949,
+              "stdev": 4.054392,
               "min": 1.740656,
               "max": 25.114625
             },
             "sl_first": {
-              "n": 122,
-              "mean": 6.72163,
-              "median": 5.83628,
-              "stdev": 3.55465,
+              "n": 123,
+              "mean": 6.70068,
+              "median": 5.772855,
+              "stdev": 3.547668,
               "min": 2.5,
               "max": 25.063884
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.740985,
-            "cliffs_delta_tp_higher": -0.137213,
+            "median_diff_tp_minus_sl": -0.644906,
+            "cliffs_delta_tp_higher": -0.113742,
             "bootstrap_95ci": [
-              -0.299672,
-              0.020328
+              -0.267503,
+              0.039545
             ],
-            "permutation_p_two_sided": 0.081149
+            "permutation_p_two_sided": 0.134831
           },
           {
             "feature": "reward_pct",
@@ -3675,29 +3681,29 @@
             "provenance": "exact_persisted_derived",
             "description": "abs(tp_price - entry_price) / entry_price",
             "tp_first": {
-              "n": 100,
-              "mean": 12.680884,
-              "median": 10.190589,
-              "stdev": 8.186776,
+              "n": 103,
+              "mean": 12.816177,
+              "median": 10.255898,
+              "stdev": 8.108783,
               "min": 3.481312,
               "max": 50.229249
             },
             "sl_first": {
-              "n": 122,
-              "mean": 13.44326,
-              "median": 11.67256,
-              "stdev": 7.1093,
+              "n": 123,
+              "mean": 13.401361,
+              "median": 11.54571,
+              "stdev": 7.095335,
               "min": 5.0,
               "max": 50.127768
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -1.481971,
-            "cliffs_delta_tp_higher": -0.137213,
+            "median_diff_tp_minus_sl": -1.289812,
+            "cliffs_delta_tp_higher": -0.113742,
             "bootstrap_95ci": [
-              -0.291803,
-              0.019508
+              -0.267503,
+              0.04365
             ],
-            "permutation_p_two_sided": 0.089888
+            "permutation_p_two_sided": 0.128589
           },
           {
             "feature": "reward_risk",
@@ -3705,7 +3711,7 @@
             "provenance": "exact_persisted_derived",
             "description": "reward_pct / risk_pct",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 2.0,
               "median": 2.0,
               "stdev": 0.0,
@@ -3713,7 +3719,7 @@
               "max": 2.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 2.0,
               "median": 2.0,
               "stdev": 0.0,
@@ -3722,12 +3728,12 @@
             },
             "comparison_allowed": true,
             "median_diff_tp_minus_sl": 0.0,
-            "cliffs_delta_tp_higher": 0.094262,
+            "cliffs_delta_tp_higher": 0.090615,
             "bootstrap_95ci": [
-              -0.037459,
-              0.231967
+              -0.031889,
+              0.229142
             ],
-            "permutation_p_two_sided": 0.179775
+            "permutation_p_two_sided": 0.187266
           },
           {
             "feature": "entry_vs_signal_pct",
@@ -3735,7 +3741,7 @@
             "provenance": "exact_persisted_derived",
             "description": "direction-adjusted entry_price vs signal_price",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -3743,7 +3749,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -3797,29 +3803,29 @@
             "provenance": "runtime_log_rounded",
             "description": "pct24 emitted by the overheated early signal path",
             "tp_first": {
-              "n": 68,
-              "mean": 21.527941,
-              "median": 18.2,
-              "stdev": 8.83262,
+              "n": 71,
+              "mean": 21.598592,
+              "median": 18.1,
+              "stdev": 8.830798,
               "min": 15.0,
               "max": 57.4
             },
             "sl_first": {
-              "n": 103,
-              "mean": 23.400971,
-              "median": 18.7,
-              "stdev": 14.144094,
+              "n": 104,
+              "mean": 23.352885,
+              "median": 18.55,
+              "stdev": 14.083806,
               "min": 15.0,
               "max": 111.2
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.5,
-            "cliffs_delta_tp_higher": -0.035979,
+            "median_diff_tp_minus_sl": -0.45,
+            "cliffs_delta_tp_higher": -0.029252,
             "bootstrap_95ci": [
-              -0.216019,
-              0.135351
+              -0.195558,
+              0.13922
             ],
-            "permutation_p_two_sided": 0.70412
+            "permutation_p_two_sided": 0.765293
           },
           {
             "feature": "overheated_rsi_log",
@@ -3827,29 +3833,29 @@
             "provenance": "runtime_log_rounded",
             "description": "RSI emitted by the overheated early signal path",
             "tp_first": {
-              "n": 68,
-              "mean": 64.872059,
+              "n": 71,
+              "mean": 64.874648,
               "median": 66.2,
-              "stdev": 4.264286,
+              "stdev": 4.204716,
               "min": 55.2,
               "max": 69.8
             },
             "sl_first": {
-              "n": 103,
-              "mean": 65.131068,
+              "n": 104,
+              "mean": 65.167308,
               "median": 66.8,
-              "stdev": 4.26741,
+              "stdev": 4.262695,
               "min": 55.6,
               "max": 70.0
             },
             "comparison_allowed": true,
             "median_diff_tp_minus_sl": -0.6,
-            "cliffs_delta_tp_higher": -0.057539,
+            "cliffs_delta_tp_higher": -0.067308,
             "bootstrap_95ci": [
-              -0.23972,
-              0.121645
+              -0.248781,
+              0.104957
             ],
-            "permutation_p_two_sided": 0.545568
+            "permutation_p_two_sided": 0.45568
           },
           {
             "feature": "confirmation_volume_ratio_log",
@@ -3953,7 +3959,7 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "direction-adjusted close-to-close return over the last completed 1h candle",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -3961,7 +3967,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -3983,29 +3989,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "direction-adjusted close-to-close return over the last two completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 0.003193,
-              "median": -0.147232,
-              "stdev": 3.966855,
+              "n": 103,
+              "mean": -0.046666,
+              "median": -0.152519,
+              "stdev": 3.951929,
               "min": -17.76688,
               "max": 13.786501
             },
             "sl_first": {
-              "n": 122,
-              "mean": 0.009016,
-              "median": -0.121996,
-              "stdev": 5.912706,
+              "n": 123,
+              "mean": 0.007403,
+              "median": -0.147984,
+              "stdev": 5.888451,
               "min": -12.10425,
               "max": 38.899431
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.025236,
-            "cliffs_delta_tp_higher": 0.057049,
+            "median_diff_tp_minus_sl": -0.004535,
+            "cliffs_delta_tp_higher": 0.048544,
             "bootstrap_95ci": [
-              -0.091475,
-              0.210492
+              -0.104428,
+              0.197253
             ],
-            "permutation_p_two_sided": 0.47191
+            "permutation_p_two_sided": 0.524345
           },
           {
             "feature": "price_return_4h_pct",
@@ -4013,29 +4019,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "direction-adjusted close-to-close return over the last four completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 1.876723,
-              "median": 0.632398,
-              "stdev": 6.50571,
+              "n": 103,
+              "mean": 1.911254,
+              "median": 0.7331,
+              "stdev": 6.518112,
               "min": -14.329385,
               "max": 36.781029
             },
             "sl_first": {
-              "n": 122,
-              "mean": 2.44868,
-              "median": 0.979038,
-              "stdev": 7.991713,
+              "n": 123,
+              "mean": 2.448349,
+              "median": 1.081499,
+              "stdev": 7.958894,
               "min": -13.89948,
               "max": 33.333333
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.34664,
-            "cliffs_delta_tp_higher": 0.015246,
+            "median_diff_tp_minus_sl": -0.348399,
+            "cliffs_delta_tp_higher": 0.013182,
             "bootstrap_95ci": [
-              -0.142951,
-              0.167623
+              -0.14421,
+              0.174284
             ],
-            "permutation_p_two_sided": 0.841448
+            "permutation_p_two_sided": 0.842697
           },
           {
             "feature": "range_1h_pct",
@@ -4043,29 +4049,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "high-low range of the last completed 1h candle divided by its low",
             "tp_first": {
-              "n": 100,
-              "mean": 5.772616,
-              "median": 3.16742,
-              "stdev": 7.01127,
+              "n": 103,
+              "mean": 5.778729,
+              "median": 3.299954,
+              "stdev": 6.908656,
               "min": 0.799479,
               "max": 36.728838
             },
             "sl_first": {
-              "n": 122,
-              "mean": 8.160292,
-              "median": 4.576808,
-              "stdev": 8.701197,
+              "n": 123,
+              "mean": 8.099192,
+              "median": 4.57331,
+              "stdev": 8.691918,
               "min": 0.054462,
               "max": 61.228407
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -1.409388,
-            "cliffs_delta_tp_higher": -0.25,
+            "median_diff_tp_minus_sl": -1.273356,
+            "cliffs_delta_tp_higher": -0.227248,
             "bootstrap_95ci": [
-              -0.395574,
-              -0.110164
+              -0.363328,
+              -0.068435
             ],
-            "permutation_p_two_sided": 0.002497
+            "permutation_p_two_sided": 0.006242
           },
           {
             "feature": "range_2h_pct",
@@ -4073,29 +4079,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "high-low range across the last two completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 8.665268,
-              "median": 4.838024,
-              "stdev": 9.593854,
+              "n": 103,
+              "mean": 8.739751,
+              "median": 4.894015,
+              "stdev": 9.517226,
               "min": 0.930839,
               "max": 51.744681
             },
             "sl_first": {
-              "n": 122,
-              "mean": 11.470745,
-              "median": 7.565434,
-              "stdev": 11.901175,
+              "n": 123,
+              "mean": 11.406831,
+              "median": 7.530187,
+              "stdev": 11.873477,
               "min": 0.699301,
               "max": 90.045249
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -2.72741,
-            "cliffs_delta_tp_higher": -0.221148,
+            "median_diff_tp_minus_sl": -2.636172,
+            "cliffs_delta_tp_higher": -0.204673,
             "bootstrap_95ci": [
-              -0.357869,
-              -0.070492
+              -0.337754,
+              -0.0577
             ],
-            "permutation_p_two_sided": 0.003745
+            "permutation_p_two_sided": 0.007491
           },
           {
             "feature": "range_4h_pct",
@@ -4103,29 +4109,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "high-low range across the last four completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 11.476188,
-              "median": 7.92783,
-              "stdev": 10.205629,
+              "n": 103,
+              "mean": 11.583905,
+              "median": 8.022839,
+              "stdev": 10.09736,
               "min": 1.934227,
               "max": 51.744681
             },
             "sl_first": {
-              "n": 122,
-              "mean": 16.446996,
-              "median": 11.434142,
-              "stdev": 15.239687,
+              "n": 123,
+              "mean": 16.38093,
+              "median": 11.364968,
+              "stdev": 15.194777,
               "min": 2.425813,
               "max": 90.045249
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -3.506312,
-            "cliffs_delta_tp_higher": -0.24,
+            "median_diff_tp_minus_sl": -3.342129,
+            "cliffs_delta_tp_higher": -0.225669,
             "bootstrap_95ci": [
-              -0.375738,
-              -0.079836
+              -0.357645,
+              -0.07175
             ],
-            "permutation_p_two_sided": 0.001248
+            "permutation_p_two_sided": 0.003745
           },
           {
             "feature": "realized_vol_2h_pct",
@@ -4133,7 +4139,7 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "population standard deviation of completed 1h log returns in the 2h window",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4141,7 +4147,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4163,29 +4169,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "population standard deviation of completed 1h log returns in the 4h window",
             "tp_first": {
-              "n": 100,
-              "mean": 2.933342,
-              "median": 1.976532,
-              "stdev": 2.896853,
+              "n": 103,
+              "mean": 3.003926,
+              "median": 1.993581,
+              "stdev": 2.938379,
               "min": 0.250534,
               "max": 16.065873
             },
             "sl_first": {
-              "n": 122,
-              "mean": 4.187948,
-              "median": 2.482079,
-              "stdev": 4.388969,
+              "n": 123,
+              "mean": 4.165738,
+              "median": 2.452926,
+              "stdev": 4.37788,
               "min": 0.154286,
               "max": 20.165582
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.505547,
-            "cliffs_delta_tp_higher": -0.155738,
+            "median_diff_tp_minus_sl": -0.459345,
+            "cliffs_delta_tp_higher": -0.136948,
             "bootstrap_95ci": [
-              -0.311967,
-              -0.014098
+              -0.291025,
+              0.022338
             ],
-            "permutation_p_two_sided": 0.046192
+            "permutation_p_two_sided": 0.099875
           },
           {
             "feature": "volume_ratio_1h_vs_24h",
@@ -4193,29 +4199,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "latest completed 1h volume divided by the mean of the preceding 24 completed 1h volumes",
             "tp_first": {
-              "n": 100,
-              "mean": 1.703575,
-              "median": 0.984628,
-              "stdev": 2.207701,
+              "n": 103,
+              "mean": 1.718186,
+              "median": 0.990096,
+              "stdev": 2.193057,
               "min": 0.066081,
               "max": 14.194482
             },
             "sl_first": {
-              "n": 122,
-              "mean": 3.092332,
-              "median": 1.402616,
-              "stdev": 4.784627,
+              "n": 123,
+              "mean": 3.07042,
+              "median": 1.399666,
+              "stdev": 4.77117,
               "min": 0.012574,
               "max": 31.947783
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.417988,
-            "cliffs_delta_tp_higher": -0.207213,
+            "median_diff_tp_minus_sl": -0.40957,
+            "cliffs_delta_tp_higher": -0.194254,
             "bootstrap_95ci": [
-              -0.34541,
-              -0.041639
+              -0.335228,
+              -0.040966
             ],
-            "permutation_p_two_sided": 0.007491
+            "permutation_p_two_sided": 0.011236
           },
           {
             "feature": "volume_change_1h_pct",
@@ -4223,29 +4229,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "latest completed 1h volume change versus the preceding completed 1h candle",
             "tp_first": {
-              "n": 100,
-              "mean": 27.325181,
-              "median": -10.485512,
-              "stdev": 118.535847,
+              "n": 103,
+              "mean": 26.453104,
+              "median": -9.670832,
+              "stdev": 117.205654,
               "min": -93.037339,
               "max": 674.503645
             },
             "sl_first": {
-              "n": 122,
-              "mean": 112.126152,
-              "median": -7.280389,
-              "stdev": 640.12503,
+              "n": 123,
+              "mean": 110.547528,
+              "median": -8.636364,
+              "stdev": 637.736534,
               "min": -98.174987,
               "max": 6823.508772
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -3.205123,
-            "cliffs_delta_tp_higher": -0.037377,
+            "median_diff_tp_minus_sl": -1.034468,
+            "cliffs_delta_tp_higher": -0.031494,
             "bootstrap_95ci": [
-              -0.192131,
-              0.121639
+              -0.177994,
+              0.124319
             ],
-            "permutation_p_two_sided": 0.644195
+            "permutation_p_two_sided": 0.675406
           },
           {
             "feature": "volume_acceleration_pct",
@@ -4253,29 +4259,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "change in volume growth rate across the last three completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": -62.245705,
-              "median": -27.534708,
-              "stdev": 342.411669,
+              "n": 103,
+              "mean": -60.346324,
+              "median": -26.996384,
+              "stdev": 337.91025,
               "min": -2049.849127,
               "max": 719.145342
             },
             "sl_first": {
-              "n": 122,
-              "mean": -257.074445,
-              "median": -5.633865,
-              "stdev": 1881.485924,
+              "n": 123,
+              "mean": -255.958407,
+              "median": -8.866406,
+              "stdev": 1873.79993,
               "min": -12629.453701,
               "max": 6854.081245
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -21.900843,
-            "cliffs_delta_tp_higher": -0.048361,
+            "median_diff_tp_minus_sl": -18.129978,
+            "cliffs_delta_tp_higher": -0.039387,
             "bootstrap_95ci": [
-              -0.200164,
-              0.109836
+              -0.192201,
+              0.134265
             ],
-            "permutation_p_two_sided": 0.569288
+            "permutation_p_two_sided": 0.60799
           },
           {
             "feature": "momentum_acceleration_pct",
@@ -4283,29 +4289,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "directional 1h return minus the average directional return per hour over 2h",
             "tp_first": {
-              "n": 100,
-              "mean": -0.001597,
-              "median": 0.073616,
-              "stdev": 1.983428,
+              "n": 103,
+              "mean": 0.023333,
+              "median": 0.076259,
+              "stdev": 1.975964,
               "min": -6.89325,
               "max": 8.88344
             },
             "sl_first": {
-              "n": 122,
-              "mean": -0.004508,
-              "median": 0.060998,
-              "stdev": 2.956353,
+              "n": 123,
+              "mean": -0.003701,
+              "median": 0.073992,
+              "stdev": 2.944225,
               "min": -19.449715,
               "max": 6.052125
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": 0.012618,
-            "cliffs_delta_tp_higher": -0.057049,
+            "median_diff_tp_minus_sl": 0.002267,
+            "cliffs_delta_tp_higher": -0.048544,
             "bootstrap_95ci": [
-              -0.208525,
-              0.103934
+              -0.18936,
+              0.114847
             ],
-            "permutation_p_two_sided": 0.508115
+            "permutation_p_two_sided": 0.518102
           },
           {
             "feature": "momentum_decay_ratio",
@@ -4313,7 +4319,7 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "absolute directional 1h return divided by absolute directional 4h return per hour",
             "tp_first": {
-              "n": 98,
+              "n": 101,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4321,7 +4327,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 121,
+              "n": 122,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4339,13 +4345,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 251,
-            "resolved": 222,
-            "unresolved": 29,
-            "average_signals_per_day": 22.8182,
+            "signals": 254,
+            "resolved": 226,
+            "unresolved": 28,
+            "average_signals_per_day": 23.0909,
             "max_signals_per_day": 54
           },
           "selected": {
@@ -4379,24 +4387,24 @@
             "2026-08-25": 11,
             "2026-08-26": 8,
             "2026-08-27": 37,
-            "2026-08-28": 12
+            "2026-08-28": 15
           },
           "precision_recall": null
         }
       },
       "LONG": {
         "metrics": {
-          "n": 222,
-          "total_n": 251,
-          "tp": 100,
-          "sl": 122,
-          "unresolved_n": 29,
-          "resolved_wr_pct": 45.05,
-          "avg_r": 0.407899,
+          "n": 226,
+          "total_n": 254,
+          "tp": 103,
+          "sl": 123,
+          "unresolved_n": 28,
+          "resolved_wr_pct": 45.58,
+          "avg_r": 0.421381,
           "sample_status": "ready"
         },
-        "tp_first": 100,
-        "sl_first": 122,
+        "tp_first": 103,
+        "sl_first": 123,
         "comparison_allowed": true,
         "feature_comparisons": [
           {
@@ -4405,29 +4413,29 @@
             "provenance": "exact_persisted_derived",
             "description": "abs(entry_price - sl_price) / entry_price",
             "tp_first": {
-              "n": 100,
-              "mean": 6.340442,
-              "median": 5.095295,
-              "stdev": 4.093388,
+              "n": 103,
+              "mean": 6.408088,
+              "median": 5.127949,
+              "stdev": 4.054392,
               "min": 1.740656,
               "max": 25.114625
             },
             "sl_first": {
-              "n": 122,
-              "mean": 6.72163,
-              "median": 5.83628,
-              "stdev": 3.55465,
+              "n": 123,
+              "mean": 6.70068,
+              "median": 5.772855,
+              "stdev": 3.547668,
               "min": 2.5,
               "max": 25.063884
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.740985,
-            "cliffs_delta_tp_higher": -0.137213,
+            "median_diff_tp_minus_sl": -0.644906,
+            "cliffs_delta_tp_higher": -0.113742,
             "bootstrap_95ci": [
-              -0.280328,
-              0.013443
+              -0.263083,
+              0.03181
             ],
-            "permutation_p_two_sided": 0.088639
+            "permutation_p_two_sided": 0.144819
           },
           {
             "feature": "reward_pct",
@@ -4435,29 +4443,29 @@
             "provenance": "exact_persisted_derived",
             "description": "abs(tp_price - entry_price) / entry_price",
             "tp_first": {
-              "n": 100,
-              "mean": 12.680884,
-              "median": 10.190589,
-              "stdev": 8.186776,
+              "n": 103,
+              "mean": 12.816177,
+              "median": 10.255898,
+              "stdev": 8.108783,
               "min": 3.481312,
               "max": 50.229249
             },
             "sl_first": {
-              "n": 122,
-              "mean": 13.44326,
-              "median": 11.67256,
-              "stdev": 7.1093,
+              "n": 123,
+              "mean": 13.401361,
+              "median": 11.54571,
+              "stdev": 7.095335,
               "min": 5.0,
               "max": 50.127768
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -1.481971,
-            "cliffs_delta_tp_higher": -0.137213,
+            "median_diff_tp_minus_sl": -1.289812,
+            "cliffs_delta_tp_higher": -0.113742,
             "bootstrap_95ci": [
-              -0.288852,
-              0.022787
+              -0.267819,
+              0.038914
             ],
-            "permutation_p_two_sided": 0.083645
+            "permutation_p_two_sided": 0.154806
           },
           {
             "feature": "reward_risk",
@@ -4465,7 +4473,7 @@
             "provenance": "exact_persisted_derived",
             "description": "reward_pct / risk_pct",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 2.0,
               "median": 2.0,
               "stdev": 0.0,
@@ -4473,7 +4481,7 @@
               "max": 2.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 2.0,
               "median": 2.0,
               "stdev": 0.0,
@@ -4482,12 +4490,12 @@
             },
             "comparison_allowed": true,
             "median_diff_tp_minus_sl": 0.0,
-            "cliffs_delta_tp_higher": 0.094262,
+            "cliffs_delta_tp_higher": 0.090615,
             "bootstrap_95ci": [
-              -0.052295,
-              0.230082
+              -0.032441,
+              0.218249
             ],
-            "permutation_p_two_sided": 0.182272
+            "permutation_p_two_sided": 0.177278
           },
           {
             "feature": "entry_vs_signal_pct",
@@ -4495,7 +4503,7 @@
             "provenance": "exact_persisted_derived",
             "description": "direction-adjusted entry_price vs signal_price",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4503,7 +4511,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4557,29 +4565,29 @@
             "provenance": "runtime_log_rounded",
             "description": "pct24 emitted by the overheated early signal path",
             "tp_first": {
-              "n": 68,
-              "mean": 21.527941,
-              "median": 18.2,
-              "stdev": 8.83262,
+              "n": 71,
+              "mean": 21.598592,
+              "median": 18.1,
+              "stdev": 8.830798,
               "min": 15.0,
               "max": 57.4
             },
             "sl_first": {
-              "n": 103,
-              "mean": 23.400971,
-              "median": 18.7,
-              "stdev": 14.144094,
+              "n": 104,
+              "mean": 23.352885,
+              "median": 18.55,
+              "stdev": 14.083806,
               "min": 15.0,
               "max": 111.2
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.5,
-            "cliffs_delta_tp_higher": -0.035979,
+            "median_diff_tp_minus_sl": -0.45,
+            "cliffs_delta_tp_higher": -0.029252,
             "bootstrap_95ci": [
-              -0.212736,
-              0.134352
+              -0.204361,
+              0.14098
             ],
-            "permutation_p_two_sided": 0.71161
+            "permutation_p_two_sided": 0.725343
           },
           {
             "feature": "overheated_rsi_log",
@@ -4587,29 +4595,29 @@
             "provenance": "runtime_log_rounded",
             "description": "RSI emitted by the overheated early signal path",
             "tp_first": {
-              "n": 68,
-              "mean": 64.872059,
+              "n": 71,
+              "mean": 64.874648,
               "median": 66.2,
-              "stdev": 4.264286,
+              "stdev": 4.204716,
               "min": 55.2,
               "max": 69.8
             },
             "sl_first": {
-              "n": 103,
-              "mean": 65.131068,
+              "n": 104,
+              "mean": 65.167308,
               "median": 66.8,
-              "stdev": 4.26741,
+              "stdev": 4.262695,
               "min": 55.6,
               "max": 70.0
             },
             "comparison_allowed": true,
             "median_diff_tp_minus_sl": -0.6,
-            "cliffs_delta_tp_higher": -0.057539,
+            "cliffs_delta_tp_higher": -0.067308,
             "bootstrap_95ci": [
-              -0.234009,
-              0.132067
+              -0.230634,
+              0.106582
             ],
-            "permutation_p_two_sided": 0.525593
+            "permutation_p_two_sided": 0.463171
           },
           {
             "feature": "confirmation_volume_ratio_log",
@@ -4713,7 +4721,7 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "direction-adjusted close-to-close return over the last completed 1h candle",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4721,7 +4729,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4743,29 +4751,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "direction-adjusted close-to-close return over the last two completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 0.003193,
-              "median": -0.147232,
-              "stdev": 3.966855,
+              "n": 103,
+              "mean": -0.046666,
+              "median": -0.152519,
+              "stdev": 3.951929,
               "min": -17.76688,
               "max": 13.786501
             },
             "sl_first": {
-              "n": 122,
-              "mean": 0.009016,
-              "median": -0.121996,
-              "stdev": 5.912706,
+              "n": 123,
+              "mean": 0.007403,
+              "median": -0.147984,
+              "stdev": 5.888451,
               "min": -12.10425,
               "max": 38.899431
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.025236,
-            "cliffs_delta_tp_higher": 0.057049,
+            "median_diff_tp_minus_sl": -0.004535,
+            "cliffs_delta_tp_higher": 0.048544,
             "bootstrap_95ci": [
-              -0.092295,
-              0.215246
+              -0.097008,
+              0.209093
             ],
-            "permutation_p_two_sided": 0.465668
+            "permutation_p_two_sided": 0.538077
           },
           {
             "feature": "price_return_4h_pct",
@@ -4773,29 +4781,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "direction-adjusted close-to-close return over the last four completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 1.876723,
-              "median": 0.632398,
-              "stdev": 6.50571,
+              "n": 103,
+              "mean": 1.911254,
+              "median": 0.7331,
+              "stdev": 6.518112,
               "min": -14.329385,
               "max": 36.781029
             },
             "sl_first": {
-              "n": 122,
-              "mean": 2.44868,
-              "median": 0.979038,
-              "stdev": 7.991713,
+              "n": 123,
+              "mean": 2.448349,
+              "median": 1.081499,
+              "stdev": 7.958894,
               "min": -13.89948,
               "max": 33.333333
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.34664,
-            "cliffs_delta_tp_higher": 0.015246,
+            "median_diff_tp_minus_sl": -0.348399,
+            "cliffs_delta_tp_higher": 0.013182,
             "bootstrap_95ci": [
-              -0.124344,
-              0.168197
+              -0.134028,
+              0.157392
             ],
-            "permutation_p_two_sided": 0.848939
+            "permutation_p_two_sided": 0.872659
           },
           {
             "feature": "range_1h_pct",
@@ -4803,27 +4811,27 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "high-low range of the last completed 1h candle divided by its low",
             "tp_first": {
-              "n": 100,
-              "mean": 5.772616,
-              "median": 3.16742,
-              "stdev": 7.01127,
+              "n": 103,
+              "mean": 5.778729,
+              "median": 3.299954,
+              "stdev": 6.908656,
               "min": 0.799479,
               "max": 36.728838
             },
             "sl_first": {
-              "n": 122,
-              "mean": 8.160292,
-              "median": 4.576808,
-              "stdev": 8.701197,
+              "n": 123,
+              "mean": 8.099192,
+              "median": 4.57331,
+              "stdev": 8.691918,
               "min": 0.054462,
               "max": 61.228407
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -1.409388,
-            "cliffs_delta_tp_higher": -0.25,
+            "median_diff_tp_minus_sl": -1.273356,
+            "cliffs_delta_tp_higher": -0.227248,
             "bootstrap_95ci": [
-              -0.386885,
-              -0.102951
+              -0.362223,
+              -0.069382
             ],
             "permutation_p_two_sided": 0.003745
           },
@@ -4833,29 +4841,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "high-low range across the last two completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 8.665268,
-              "median": 4.838024,
-              "stdev": 9.593854,
+              "n": 103,
+              "mean": 8.739751,
+              "median": 4.894015,
+              "stdev": 9.517226,
               "min": 0.930839,
               "max": 51.744681
             },
             "sl_first": {
-              "n": 122,
-              "mean": 11.470745,
-              "median": 7.565434,
-              "stdev": 11.901175,
+              "n": 123,
+              "mean": 11.406831,
+              "median": 7.530187,
+              "stdev": 11.873477,
               "min": 0.699301,
               "max": 90.045249
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -2.72741,
-            "cliffs_delta_tp_higher": -0.221148,
+            "median_diff_tp_minus_sl": -2.636172,
+            "cliffs_delta_tp_higher": -0.204673,
             "bootstrap_95ci": [
-              -0.361148,
-              -0.07377
+              -0.354014,
+              -0.055016
             ],
-            "permutation_p_two_sided": 0.008739
+            "permutation_p_two_sided": 0.009988
           },
           {
             "feature": "range_4h_pct",
@@ -4863,29 +4871,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "high-low range across the last four completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": 11.476188,
-              "median": 7.92783,
-              "stdev": 10.205629,
+              "n": 103,
+              "mean": 11.583905,
+              "median": 8.022839,
+              "stdev": 10.09736,
               "min": 1.934227,
               "max": 51.744681
             },
             "sl_first": {
-              "n": 122,
-              "mean": 16.446996,
-              "median": 11.434142,
-              "stdev": 15.239687,
+              "n": 123,
+              "mean": 16.38093,
+              "median": 11.364968,
+              "stdev": 15.194777,
               "min": 2.425813,
               "max": 90.045249
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -3.506312,
-            "cliffs_delta_tp_higher": -0.24,
+            "median_diff_tp_minus_sl": -3.342129,
+            "cliffs_delta_tp_higher": -0.225669,
             "bootstrap_95ci": [
-              -0.382787,
-              -0.089016
+              -0.377694,
+              -0.066698
             ],
-            "permutation_p_two_sided": 0.002497
+            "permutation_p_two_sided": 0.004994
           },
           {
             "feature": "realized_vol_2h_pct",
@@ -4893,7 +4901,7 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "population standard deviation of completed 1h log returns in the 2h window",
             "tp_first": {
-              "n": 100,
+              "n": 103,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4901,7 +4909,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 122,
+              "n": 123,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -4923,29 +4931,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "population standard deviation of completed 1h log returns in the 4h window",
             "tp_first": {
-              "n": 100,
-              "mean": 2.933342,
-              "median": 1.976532,
-              "stdev": 2.896853,
+              "n": 103,
+              "mean": 3.003926,
+              "median": 1.993581,
+              "stdev": 2.938379,
               "min": 0.250534,
               "max": 16.065873
             },
             "sl_first": {
-              "n": 122,
-              "mean": 4.187948,
-              "median": 2.482079,
-              "stdev": 4.388969,
+              "n": 123,
+              "mean": 4.165738,
+              "median": 2.452926,
+              "stdev": 4.37788,
               "min": 0.154286,
               "max": 20.165582
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.505547,
-            "cliffs_delta_tp_higher": -0.155738,
+            "median_diff_tp_minus_sl": -0.459345,
+            "cliffs_delta_tp_higher": -0.136948,
             "bootstrap_95ci": [
-              -0.299508,
-              -0.009344
+              -0.289131,
+              0.016181
             ],
-            "permutation_p_two_sided": 0.043695
+            "permutation_p_two_sided": 0.059925
           },
           {
             "feature": "volume_ratio_1h_vs_24h",
@@ -4953,29 +4961,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "latest completed 1h volume divided by the mean of the preceding 24 completed 1h volumes",
             "tp_first": {
-              "n": 100,
-              "mean": 1.703575,
-              "median": 0.984628,
-              "stdev": 2.207701,
+              "n": 103,
+              "mean": 1.718186,
+              "median": 0.990096,
+              "stdev": 2.193057,
               "min": 0.066081,
               "max": 14.194482
             },
             "sl_first": {
-              "n": 122,
-              "mean": 3.092332,
-              "median": 1.402616,
-              "stdev": 4.784627,
+              "n": 123,
+              "mean": 3.07042,
+              "median": 1.399666,
+              "stdev": 4.77117,
               "min": 0.012574,
               "max": 31.947783
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -0.417988,
-            "cliffs_delta_tp_higher": -0.207213,
+            "median_diff_tp_minus_sl": -0.40957,
+            "cliffs_delta_tp_higher": -0.194254,
             "bootstrap_95ci": [
-              -0.341967,
-              -0.054098
+              -0.339016,
+              -0.043334
             ],
-            "permutation_p_two_sided": 0.006242
+            "permutation_p_two_sided": 0.012484
           },
           {
             "feature": "volume_change_1h_pct",
@@ -4983,29 +4991,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "latest completed 1h volume change versus the preceding completed 1h candle",
             "tp_first": {
-              "n": 100,
-              "mean": 27.325181,
-              "median": -10.485512,
-              "stdev": 118.535847,
+              "n": 103,
+              "mean": 26.453104,
+              "median": -9.670832,
+              "stdev": 117.205654,
               "min": -93.037339,
               "max": 674.503645
             },
             "sl_first": {
-              "n": 122,
-              "mean": 112.126152,
-              "median": -7.280389,
-              "stdev": 640.12503,
+              "n": 123,
+              "mean": 110.547528,
+              "median": -8.636364,
+              "stdev": 637.736534,
               "min": -98.174987,
               "max": 6823.508772
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -3.205123,
-            "cliffs_delta_tp_higher": -0.037377,
+            "median_diff_tp_minus_sl": -1.034468,
+            "cliffs_delta_tp_higher": -0.031494,
             "bootstrap_95ci": [
-              -0.189836,
-              0.111803
+              -0.179099,
+              0.126845
             ],
-            "permutation_p_two_sided": 0.632959
+            "permutation_p_two_sided": 0.691635
           },
           {
             "feature": "volume_acceleration_pct",
@@ -5013,29 +5021,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "change in volume growth rate across the last three completed 1h candles",
             "tp_first": {
-              "n": 100,
-              "mean": -62.245705,
-              "median": -27.534708,
-              "stdev": 342.411669,
+              "n": 103,
+              "mean": -60.346324,
+              "median": -26.996384,
+              "stdev": 337.91025,
               "min": -2049.849127,
               "max": 719.145342
             },
             "sl_first": {
-              "n": 122,
-              "mean": -257.074445,
-              "median": -5.633865,
-              "stdev": 1881.485924,
+              "n": 123,
+              "mean": -255.958407,
+              "median": -8.866406,
+              "stdev": 1873.79993,
               "min": -12629.453701,
               "max": 6854.081245
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": -21.900843,
-            "cliffs_delta_tp_higher": -0.048361,
+            "median_diff_tp_minus_sl": -18.129978,
+            "cliffs_delta_tp_higher": -0.039387,
             "bootstrap_95ci": [
-              -0.196721,
-              0.10918
+              -0.183519,
+              0.116742
             ],
-            "permutation_p_two_sided": 0.538077
+            "permutation_p_two_sided": 0.620474
           },
           {
             "feature": "momentum_acceleration_pct",
@@ -5043,29 +5051,29 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "directional 1h return minus the average directional return per hour over 2h",
             "tp_first": {
-              "n": 100,
-              "mean": -0.001597,
-              "median": 0.073616,
-              "stdev": 1.983428,
+              "n": 103,
+              "mean": 0.023333,
+              "median": 0.076259,
+              "stdev": 1.975964,
               "min": -6.89325,
               "max": 8.88344
             },
             "sl_first": {
-              "n": 122,
-              "mean": -0.004508,
-              "median": 0.060998,
-              "stdev": 2.956353,
+              "n": 123,
+              "mean": -0.003701,
+              "median": 0.073992,
+              "stdev": 2.944225,
               "min": -19.449715,
               "max": 6.052125
             },
             "comparison_allowed": true,
-            "median_diff_tp_minus_sl": 0.012618,
-            "cliffs_delta_tp_higher": -0.057049,
+            "median_diff_tp_minus_sl": 0.002267,
+            "cliffs_delta_tp_higher": -0.048544,
             "bootstrap_95ci": [
-              -0.207377,
-              0.088197
+              -0.184308,
+              0.089904
             ],
-            "permutation_p_two_sided": 0.476904
+            "permutation_p_two_sided": 0.558052
           },
           {
             "feature": "momentum_decay_ratio",
@@ -5073,7 +5081,7 @@
             "provenance": "reconstructed_historical_gateio_1h",
             "description": "absolute directional 1h return divided by absolute directional 4h return per hour",
             "tp_first": {
-              "n": 98,
+              "n": 101,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -5081,7 +5089,7 @@
               "max": 0.0
             },
             "sl_first": {
-              "n": 121,
+              "n": 122,
               "mean": 0.0,
               "median": 0.0,
               "stdev": 0.0,
@@ -5099,13 +5107,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 251,
-            "resolved": 222,
-            "unresolved": 29,
-            "average_signals_per_day": 22.8182,
+            "signals": 254,
+            "resolved": 226,
+            "unresolved": 28,
+            "average_signals_per_day": 23.0909,
             "max_signals_per_day": 54
           },
           "selected": {
@@ -5139,8 +5149,796 @@
             "2026-08-25": 11,
             "2026-08-26": 8,
             "2026-08-27": 37,
-            "2026-08-28": 12
+            "2026-08-28": 15
           },
+          "precision_recall": null
+        }
+      },
+      "SHORT": {
+        "metrics": {
+          "n": 0,
+          "total_n": 0,
+          "tp": 0,
+          "sl": 0,
+          "unresolved_n": 0,
+          "resolved_wr_pct": null,
+          "avg_r": null,
+          "sample_status": "insufficient_sample"
+        },
+        "tp_first": 0,
+        "sl_first": 0,
+        "comparison_allowed": false,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "price_return_1h_pct",
+            "label": "Directional price change, 1h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "direction-adjusted close-to-close return over the last completed 1h candle",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "price_return_2h_pct",
+            "label": "Directional price change, 2h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "direction-adjusted close-to-close return over the last two completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "price_return_4h_pct",
+            "label": "Directional price change, 4h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "direction-adjusted close-to-close return over the last four completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "range_1h_pct",
+            "label": "Candle range, 1h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "high-low range of the last completed 1h candle divided by its low",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "range_2h_pct",
+            "label": "Window range, 2h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "high-low range across the last two completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "range_4h_pct",
+            "label": "Window range, 4h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "high-low range across the last four completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "realized_vol_2h_pct",
+            "label": "Realized volatility, 2h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "population standard deviation of completed 1h log returns in the 2h window",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "realized_vol_4h_pct",
+            "label": "Realized volatility, 4h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "population standard deviation of completed 1h log returns in the 4h window",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "volume_ratio_1h_vs_24h",
+            "label": "Volume ratio, 1h vs prior 24h",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "latest completed 1h volume divided by the mean of the preceding 24 completed 1h volumes",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "volume_change_1h_pct",
+            "label": "Volume change, last 1h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "latest completed 1h volume change versus the preceding completed 1h candle",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "volume_acceleration_pct",
+            "label": "Volume acceleration (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "change in volume growth rate across the last three completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "momentum_acceleration_pct",
+            "label": "Momentum acceleration (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "directional 1h return minus the average directional return per hour over 2h",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "momentum_decay_ratio",
+            "label": "Momentum decay ratio",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "absolute directional 1h return divided by absolute directional 4h return per hour",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null,
+        "comparison_status": "INSUFFICIENT_TP_OR_SL",
+        "comparison_reason": "Requires TP>= 20 and SL>= 20; observed TP=0, SL=0.",
+        "retrospective": {
+          "candidate_present": false,
+          "baseline": {
+            "signals": 0,
+            "resolved": 0,
+            "unresolved": 0,
+            "average_signals_per_day": null,
+            "max_signals_per_day": 0
+          },
+          "selected": {
+            "signals": 0,
+            "resolved": 0,
+            "unresolved": 0,
+            "coverage_pct": 0.0,
+            "average_signals_per_day": null,
+            "max_signals_per_day": 0,
+            "daily_signal_counts": {},
+            "resolved_metrics": {
+              "n": 0,
+              "total_n": 0,
+              "tp": 0,
+              "sl": 0,
+              "unresolved_n": 0,
+              "resolved_wr_pct": null,
+              "avg_r": null,
+              "sample_status": "insufficient_sample"
+            }
+          },
+          "days_observed": 0,
+          "daily_baseline_counts": {},
           "precision_recall": null
         }
       }
@@ -5149,10 +5947,10 @@
       "overall": {
         "metrics": {
           "n": 410,
-          "total_n": 473,
+          "total_n": 475,
           "tp": 170,
           "sl": 240,
-          "unresolved_n": 63,
+          "unresolved_n": 65,
           "resolved_wr_pct": 41.46,
           "avg_r": 0.205609,
           "sample_status": "ready"
@@ -5863,13 +6661,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 473,
+            "signals": 475,
             "resolved": 410,
-            "unresolved": 63,
-            "average_signals_per_day": 29.5625,
+            "unresolved": 65,
+            "average_signals_per_day": 29.6875,
             "max_signals_per_day": 51
           },
           "selected": {
@@ -5908,7 +6708,7 @@
             "2026-08-25": 19,
             "2026-08-26": 40,
             "2026-08-27": 33,
-            "2026-08-28": 20
+            "2026-08-28": 22
           },
           "precision_recall": null
         }
@@ -5916,10 +6716,10 @@
       "LONG": {
         "metrics": {
           "n": 237,
-          "total_n": 266,
+          "total_n": 267,
           "tp": 118,
           "sl": 119,
-          "unresolved_n": 29,
+          "unresolved_n": 30,
           "resolved_wr_pct": 49.79,
           "avg_r": 0.485798,
           "sample_status": "ready"
@@ -6630,13 +7430,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 266,
+            "signals": 267,
             "resolved": 237,
-            "unresolved": 29,
-            "average_signals_per_day": 16.625,
+            "unresolved": 30,
+            "average_signals_per_day": 16.6875,
             "max_signals_per_day": 46
           },
           "selected": {
@@ -6675,7 +7477,7 @@
             "2026-08-25": 12,
             "2026-08-26": 20,
             "2026-08-27": 23,
-            "2026-08-28": 9
+            "2026-08-28": 10
           },
           "precision_recall": null
         }
@@ -6683,10 +7485,10 @@
       "SHORT": {
         "metrics": {
           "n": 173,
-          "total_n": 207,
+          "total_n": 208,
           "tp": 52,
           "sl": 121,
-          "unresolved_n": 34,
+          "unresolved_n": 35,
           "resolved_wr_pct": 30.06,
           "avg_r": -0.178233,
           "sample_status": "ready"
@@ -7397,13 +8199,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 207,
+            "signals": 208,
             "resolved": 173,
-            "unresolved": 34,
-            "average_signals_per_day": 12.9375,
+            "unresolved": 35,
+            "average_signals_per_day": 13.0,
             "max_signals_per_day": 34
           },
           "selected": {
@@ -7442,7 +8246,7 @@
             "2026-08-25": 7,
             "2026-08-26": 20,
             "2026-08-27": 10,
-            "2026-08-28": 11
+            "2026-08-28": 12
           },
           "precision_recall": null
         }
@@ -7452,10 +8256,10 @@
       "overall": {
         "metrics": {
           "n": 239,
-          "total_n": 463,
+          "total_n": 465,
           "tp": 101,
           "sl": 138,
-          "unresolved_n": 224,
+          "unresolved_n": 226,
           "resolved_wr_pct": 42.26,
           "avg_r": 0.26326,
           "sample_status": "ready"
@@ -8162,13 +8966,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 463,
+            "signals": 465,
             "resolved": 239,
-            "unresolved": 224,
-            "average_signals_per_day": 35.6154,
+            "unresolved": 226,
+            "average_signals_per_day": 35.7692,
             "max_signals_per_day": 157
           },
           "selected": {
@@ -8204,7 +9010,7 @@
             "2026-08-25": 16,
             "2026-08-26": 7,
             "2026-08-27": 47,
-            "2026-08-28": 13
+            "2026-08-28": 15
           },
           "precision_recall": null
         }
@@ -8212,10 +9018,10 @@
       "LONG": {
         "metrics": {
           "n": 239,
-          "total_n": 463,
+          "total_n": 465,
           "tp": 101,
           "sl": 138,
-          "unresolved_n": 224,
+          "unresolved_n": 226,
           "resolved_wr_pct": 42.26,
           "avg_r": 0.26326,
           "sample_status": "ready"
@@ -8922,13 +9728,15 @@
           }
         ],
         "candidate": null,
+        "comparison_status": "READY",
+        "comparison_reason": "Both resolved outcome cohorts meet n>=minimum_group_n.",
         "retrospective": {
           "candidate_present": false,
           "baseline": {
-            "signals": 463,
+            "signals": 465,
             "resolved": 239,
-            "unresolved": 224,
-            "average_signals_per_day": 35.6154,
+            "unresolved": 226,
+            "average_signals_per_day": 35.7692,
             "max_signals_per_day": 157
           },
           "selected": {
@@ -8964,8 +9772,796 @@
             "2026-08-25": 16,
             "2026-08-26": 7,
             "2026-08-27": 47,
-            "2026-08-28": 13
+            "2026-08-28": 15
           },
+          "precision_recall": null
+        }
+      },
+      "SHORT": {
+        "metrics": {
+          "n": 0,
+          "total_n": 0,
+          "tp": 0,
+          "sl": 0,
+          "unresolved_n": 0,
+          "resolved_wr_pct": null,
+          "avg_r": null,
+          "sample_status": "insufficient_sample"
+        },
+        "tp_first": 0,
+        "sl_first": 0,
+        "comparison_allowed": false,
+        "feature_comparisons": [
+          {
+            "feature": "risk_pct",
+            "label": "SL distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(entry_price - sl_price) / entry_price",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "reward_pct",
+            "label": "TP distance from entry (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "abs(tp_price - entry_price) / entry_price",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "reward_risk",
+            "label": "TP/SL distance ratio",
+            "provenance": "exact_persisted_derived",
+            "description": "reward_pct / risk_pct",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "entry_vs_signal_pct",
+            "label": "Directional entry move from signal (%)",
+            "provenance": "exact_persisted_derived",
+            "description": "direction-adjusted entry_price vs signal_price",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "ema_gap_pct_log",
+            "label": "EMA cross gap (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "EMA(9)-EMA(21) gap emitted by the signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_pct24_log",
+            "label": "Overheated 24h move (%)",
+            "provenance": "runtime_log_rounded",
+            "description": "pct24 emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "overheated_rsi_log",
+            "label": "Overheated RSI",
+            "provenance": "runtime_log_rounded",
+            "description": "RSI emitted by the overheated early signal path",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_volume_ratio_log",
+            "label": "Confirmation volume ratio (x)",
+            "provenance": "runtime_log_rounded",
+            "description": "completed-candle volume / 10-bar average",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_number_log",
+            "label": "Confirmation number",
+            "provenance": "runtime_log_exact_integer",
+            "description": "confirmation count emitted by continuation telemetry",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "confirmation_age_min_log",
+            "label": "Confirmation age (minutes)",
+            "provenance": "runtime_log_exact_integer",
+            "description": "age of the parent signal at confirmation",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "price_return_1h_pct",
+            "label": "Directional price change, 1h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "direction-adjusted close-to-close return over the last completed 1h candle",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "price_return_2h_pct",
+            "label": "Directional price change, 2h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "direction-adjusted close-to-close return over the last two completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "price_return_4h_pct",
+            "label": "Directional price change, 4h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "direction-adjusted close-to-close return over the last four completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "range_1h_pct",
+            "label": "Candle range, 1h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "high-low range of the last completed 1h candle divided by its low",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "range_2h_pct",
+            "label": "Window range, 2h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "high-low range across the last two completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "range_4h_pct",
+            "label": "Window range, 4h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "high-low range across the last four completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "realized_vol_2h_pct",
+            "label": "Realized volatility, 2h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "population standard deviation of completed 1h log returns in the 2h window",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "realized_vol_4h_pct",
+            "label": "Realized volatility, 4h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "population standard deviation of completed 1h log returns in the 4h window",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "volume_ratio_1h_vs_24h",
+            "label": "Volume ratio, 1h vs prior 24h",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "latest completed 1h volume divided by the mean of the preceding 24 completed 1h volumes",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "volume_change_1h_pct",
+            "label": "Volume change, last 1h (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "latest completed 1h volume change versus the preceding completed 1h candle",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "volume_acceleration_pct",
+            "label": "Volume acceleration (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "change in volume growth rate across the last three completed 1h candles",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "momentum_acceleration_pct",
+            "label": "Momentum acceleration (%)",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "directional 1h return minus the average directional return per hour over 2h",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          },
+          {
+            "feature": "momentum_decay_ratio",
+            "label": "Momentum decay ratio",
+            "provenance": "reconstructed_historical_gateio_1h",
+            "description": "absolute directional 1h return divided by absolute directional 4h return per hour",
+            "tp_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "sl_first": {
+              "n": 0,
+              "coverage_pct": 0.0,
+              "mean": null,
+              "median": null,
+              "stdev": null,
+              "min": null,
+              "max": null
+            },
+            "comparison_allowed": false,
+            "median_diff_tp_minus_sl": null,
+            "cliffs_delta_tp_higher": null,
+            "bootstrap_95ci": [
+              null,
+              null
+            ],
+            "permutation_p_two_sided": null
+          }
+        ],
+        "candidate": null,
+        "comparison_status": "INSUFFICIENT_TP_OR_SL",
+        "comparison_reason": "Requires TP>= 20 and SL>= 20; observed TP=0, SL=0.",
+        "retrospective": {
+          "candidate_present": false,
+          "baseline": {
+            "signals": 0,
+            "resolved": 0,
+            "unresolved": 0,
+            "average_signals_per_day": null,
+            "max_signals_per_day": 0
+          },
+          "selected": {
+            "signals": 0,
+            "resolved": 0,
+            "unresolved": 0,
+            "coverage_pct": 0.0,
+            "average_signals_per_day": null,
+            "max_signals_per_day": 0,
+            "daily_signal_counts": {},
+            "resolved_metrics": {
+              "n": 0,
+              "total_n": 0,
+              "tp": 0,
+              "sl": 0,
+              "unresolved_n": 0,
+              "resolved_wr_pct": null,
+              "avg_r": null,
+              "sample_status": "insufficient_sample"
+            }
+          },
+          "days_observed": 0,
+          "daily_baseline_counts": {},
           "precision_recall": null
         }
       }

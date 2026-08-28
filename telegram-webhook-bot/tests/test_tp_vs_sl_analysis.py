@@ -89,6 +89,28 @@ def test_insufficient_outcome_group_is_preserved_without_candidate():
     assert cohort["candidate"] is None
 
 
+def test_direction_summary_keeps_missing_short_cohorts_explicit():
+    rows = [
+        _row("tp", row_id=i, strategy="overheated_confirmed")
+        for i in range(1, MIN_GROUP_N + 1)
+    ]
+    rows += [
+        _row("sl", row_id=100 + i, strategy="overheated_confirmed")
+        for i in range(MIN_GROUP_N)
+    ]
+
+    report = build_report(rows, {})
+    strategy = report["strategies"]["overheated_confirmed"]
+
+    assert set(strategy) >= {"overall", "LONG", "SHORT"}
+    assert strategy["LONG"]["comparison_allowed"] is True
+    assert strategy["SHORT"]["metrics"]["total_n"] == 0
+    assert strategy["SHORT"]["comparison_status"] == "INSUFFICIENT_TP_OR_SL"
+    assert strategy["SHORT"]["comparison_reason"] == (
+        "Requires TP>= 20 and SL>= 20; observed TP=0, SL=0."
+    )
+
+
 def test_candidate_is_in_sample_and_not_silently_promoted_to_telegram():
     rows = []
     for i in range(MIN_GROUP_N):

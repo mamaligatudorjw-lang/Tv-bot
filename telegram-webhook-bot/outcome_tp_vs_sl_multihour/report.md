@@ -2,9 +2,9 @@
 
 **Read-only report. No production logic, filters, score, SL/TP, or SQLite rows were changed.**
 
-- Scope: all valid target shadow `demo_positions` rows; loaded **1597**, with **1021** resolved.
-- Runtime log matches: **1200** (75.14%).
-- Historical 1h candle coverage: **389** of **389** symbols.
+- Scope: all valid target shadow `demo_positions` rows; loaded **1604**, with **1025** resolved.
+- Runtime log matches: **1207** (75.25%).
+- Historical 1h candle coverage: **390** of **390** symbols.
 - Minimum comparison cohort: **20 TP-first and 20 SL-first**.
 - `WR` is TP / (TP + SL); `avg R` uses recorded exit price and original entry-to-SL risk.
 - Any rule below is in-sample: the threshold was selected and scored on the same rows.
@@ -15,14 +15,14 @@
 |---|---|---:|---|
 | SL distance from entry (%) (`risk_pct`) | exact_persisted_derived | 100.0% | abs(entry_price - sl_price) / entry_price |
 | TP distance from entry (%) (`reward_pct`) | exact_persisted_derived | 100.0% | abs(tp_price - entry_price) / entry_price |
-| TP/SL distance ratio (`reward_risk`) | exact_persisted_derived | 74.5% | reward_pct / risk_pct |
+| TP/SL distance ratio (`reward_risk`) | exact_persisted_derived | 74.6% | reward_pct / risk_pct |
 | Directional entry move from signal (%) (`entry_vs_signal_pct`) | exact_persisted_derived | 100.0% | direction-adjusted entry_price vs signal_price |
 | EMA cross gap (%) (`ema_gap_pct_log`) | runtime_log_rounded | 29.6% | EMA(9)-EMA(21) gap emitted by the signal path |
-| Overheated 24h move (%) (`overheated_pct24_log`) | runtime_log_rounded | 12.5% | pct24 emitted by the overheated early signal path |
-| Overheated RSI (`overheated_rsi_log`) | runtime_log_rounded | 12.5% | RSI emitted by the overheated early signal path |
-| Confirmation volume ratio (x) (`confirmation_volume_ratio_log`) | runtime_log_rounded | 33.1% | completed-candle volume / 10-bar average |
-| Confirmation number (`confirmation_number_log`) | runtime_log_exact_integer | 33.1% | confirmation count emitted by continuation telemetry |
-| Confirmation age (minutes) (`confirmation_age_min_log`) | runtime_log_exact_integer | 33.1% | age of the parent signal at confirmation |
+| Overheated 24h move (%) (`overheated_pct24_log`) | runtime_log_rounded | 12.6% | pct24 emitted by the overheated early signal path |
+| Overheated RSI (`overheated_rsi_log`) | runtime_log_rounded | 12.6% | RSI emitted by the overheated early signal path |
+| Confirmation volume ratio (x) (`confirmation_volume_ratio_log`) | runtime_log_rounded | 33.0% | completed-candle volume / 10-bar average |
+| Confirmation number (`confirmation_number_log`) | runtime_log_exact_integer | 33.0% | confirmation count emitted by continuation telemetry |
+| Confirmation age (minutes) (`confirmation_age_min_log`) | runtime_log_exact_integer | 33.0% | age of the parent signal at confirmation |
 | Directional price change, 1h (%) (`price_return_1h_pct`) | reconstructed_historical_gateio_1h | 100.0% | direction-adjusted close-to-close return over the last completed 1h candle |
 | Directional price change, 2h (%) (`price_return_2h_pct`) | reconstructed_historical_gateio_1h | 100.0% | direction-adjusted close-to-close return over the last two completed 1h candles |
 | Directional price change, 4h (%) (`price_return_4h_pct`) | reconstructed_historical_gateio_1h | 100.0% | direction-adjusted close-to-close return over the last four completed 1h candles |
@@ -32,25 +32,40 @@
 | Realized volatility, 2h (%) (`realized_vol_2h_pct`) | reconstructed_historical_gateio_1h | 100.0% | population standard deviation of completed 1h log returns in the 2h window |
 | Realized volatility, 4h (%) (`realized_vol_4h_pct`) | reconstructed_historical_gateio_1h | 100.0% | population standard deviation of completed 1h log returns in the 4h window |
 | Volume ratio, 1h vs prior 24h (`volume_ratio_1h_vs_24h`) | reconstructed_historical_gateio_1h | 100.0% | latest completed 1h volume divided by the mean of the preceding 24 completed 1h volumes |
-| Volume change, last 1h (%) (`volume_change_1h_pct`) | reconstructed_historical_gateio_1h | 99.7% | latest completed 1h volume change versus the preceding completed 1h candle |
-| Volume acceleration (%) (`volume_acceleration_pct`) | reconstructed_historical_gateio_1h | 99.7% | change in volume growth rate across the last three completed 1h candles |
+| Volume change, last 1h (%) (`volume_change_1h_pct`) | reconstructed_historical_gateio_1h | 99.8% | latest completed 1h volume change versus the preceding completed 1h candle |
+| Volume acceleration (%) (`volume_acceleration_pct`) | reconstructed_historical_gateio_1h | 99.8% | change in volume growth rate across the last three completed 1h candles |
 | Momentum acceleration (%) (`momentum_acceleration_pct`) | reconstructed_historical_gateio_1h | 100.0% | directional 1h return minus the average directional return per hour over 2h |
-| Momentum decay ratio (`momentum_decay_ratio`) | reconstructed_historical_gateio_1h | 99.2% | absolute directional 1h return divided by absolute directional 4h return per hour |
+| Momentum decay ratio (`momentum_decay_ratio`) | reconstructed_historical_gateio_1h | 99.3% | absolute directional 1h return divided by absolute directional 4h return per hour |
 
 ## Current strategy performance
 
 | Strategy | Cohort | total | resolved | TP | SL | WR resolved | avg R | Status |
 |---|---|---:|---:|---:|---:|---:|---:|---|
-| ema_cross_confirmed | overall | 410 | 150 | 79 | 71 | 52.67% | 0.5663 | ready |
-| ema_cross_confirmed | LONG | 226 | 99 | 67 | 32 | 67.68% | 1.0694 | ready |
-| ema_cross_confirmed | SHORT | 184 | 51 | 12 | 39 | 23.53% | -0.4103 | INSUFFICIENT (<20 in TP or SL) |
-| overheated_early | overall | 251 | 222 | 100 | 122 | 45.05% | 0.4079 | ready |
-| overheated_early | LONG | 251 | 222 | 100 | 122 | 45.05% | 0.4079 | ready |
-| ema_cross | overall | 473 | 410 | 170 | 240 | 41.46% | 0.2056 | ready |
-| ema_cross | LONG | 266 | 237 | 118 | 119 | 49.79% | 0.4858 | ready |
-| ema_cross | SHORT | 207 | 173 | 52 | 121 | 30.06% | -0.1782 | ready |
-| overheated_confirmed | overall | 463 | 239 | 101 | 138 | 42.26% | 0.2633 | ready |
-| overheated_confirmed | LONG | 463 | 239 | 101 | 138 | 42.26% | 0.2633 | ready |
+| ema_cross_confirmed | overall | 410 | 150 | 79 | 71 | 52.67% | 0.5663 | READY |
+| ema_cross_confirmed | LONG | 226 | 99 | 67 | 32 | 67.68% | 1.0694 | READY |
+| ema_cross_confirmed | SHORT | 184 | 51 | 12 | 39 | 23.53% | -0.4103 | INSUFFICIENT_TP_OR_SL |
+| overheated_early | overall | 254 | 226 | 103 | 123 | 45.58% | 0.4214 | READY |
+| overheated_early | LONG | 254 | 226 | 103 | 123 | 45.58% | 0.4214 | READY |
+| overheated_early | SHORT | 0 | 0 | 0 | 0 | —% | — | INSUFFICIENT_TP_OR_SL |
+| ema_cross | overall | 475 | 410 | 170 | 240 | 41.46% | 0.2056 | READY |
+| ema_cross | LONG | 267 | 237 | 118 | 119 | 49.79% | 0.4858 | READY |
+| ema_cross | SHORT | 208 | 173 | 52 | 121 | 30.06% | -0.1782 | READY |
+| overheated_confirmed | overall | 465 | 239 | 101 | 138 | 42.26% | 0.2633 | READY |
+| overheated_confirmed | LONG | 465 | 239 | 101 | 138 | 42.26% | 0.2633 | READY |
+| overheated_confirmed | SHORT | 0 | 0 | 0 | 0 | —% | — | INSUFFICIENT_TP_OR_SL |
+
+## Direction summary across all strategies
+
+| Strategy | Direction | total | resolved | TP | SL | WR resolved | avg R | Status |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| ema_cross_confirmed | LONG | 226 | 99 | 67 | 32 | 67.68% | 1.0694 | READY |
+| ema_cross_confirmed | SHORT | 184 | 51 | 12 | 39 | 23.53% | -0.4103 | INSUFFICIENT_TP_OR_SL |
+| overheated_early | LONG | 254 | 226 | 103 | 123 | 45.58% | 0.4214 | READY |
+| overheated_early | SHORT | 0 | 0 | 0 | 0 | —% | — | INSUFFICIENT_TP_OR_SL |
+| ema_cross | LONG | 267 | 237 | 118 | 119 | 49.79% | 0.4858 | READY |
+| ema_cross | SHORT | 208 | 173 | 52 | 121 | 30.06% | -0.1782 | READY |
+| overheated_confirmed | LONG | 465 | 239 | 101 | 138 | 42.26% | 0.2633 | READY |
+| overheated_confirmed | SHORT | 0 | 0 | 0 | 0 | —% | — | INSUFFICIENT_TP_OR_SL |
 
 ## Retrospective candidate volume and precision
 
@@ -59,13 +74,15 @@
 | ema_cross_confirmed | overall | risk_pct | 34.17 | 21.75 | 261 | 0.833 | 0.633 | 83.33% |
 | ema_cross_confirmed | LONG | risk_pct | 18.83 | 13.25 | 159 | 0.870 | 0.701 | 87.04% |
 | ema_cross_confirmed | SHORT | NO CANDIDATE | 15.33 | 0.00 | 0 | — | — | —% |
-| overheated_early | overall | NO CANDIDATE | 22.82 | 0.00 | 0 | — | — | —% |
-| overheated_early | LONG | NO CANDIDATE | 22.82 | 0.00 | 0 | — | — | —% |
-| ema_cross | overall | NO CANDIDATE | 29.56 | 0.00 | 0 | — | — | —% |
-| ema_cross | LONG | NO CANDIDATE | 16.62 | 0.00 | 0 | — | — | —% |
-| ema_cross | SHORT | NO CANDIDATE | 12.94 | 0.00 | 0 | — | — | —% |
-| overheated_confirmed | overall | NO CANDIDATE | 35.62 | 0.00 | 0 | — | — | —% |
-| overheated_confirmed | LONG | NO CANDIDATE | 35.62 | 0.00 | 0 | — | — | —% |
+| overheated_early | overall | NO CANDIDATE | 23.09 | 0.00 | 0 | — | — | —% |
+| overheated_early | LONG | NO CANDIDATE | 23.09 | 0.00 | 0 | — | — | —% |
+| overheated_early | SHORT | NO CANDIDATE | — | — | 0 | — | — | —% |
+| ema_cross | overall | NO CANDIDATE | 29.69 | 0.00 | 0 | — | — | —% |
+| ema_cross | LONG | NO CANDIDATE | 16.69 | 0.00 | 0 | — | — | —% |
+| ema_cross | SHORT | NO CANDIDATE | 13.00 | 0.00 | 0 | — | — | —% |
+| overheated_confirmed | overall | NO CANDIDATE | 35.77 | 0.00 | 0 | — | — | —% |
+| overheated_confirmed | LONG | NO CANDIDATE | 35.77 | 0.00 | 0 | — | — | —% |
+| overheated_confirmed | SHORT | NO CANDIDATE | — | — | 0 | — | — | —% |
 
 ## TP-first vs SL-first comparisons
 
@@ -149,7 +166,7 @@
 
 #### SHORT
 
-**INSUFFICIENT:** TP=12, SL=39; no feature conclusion or candidate is allowed.
+**INSUFFICIENT_TP_OR_SL:** Requires TP>= 20 and SL>= 20; observed TP=12, SL=39. No feature conclusion or candidate is allowed.
 
 ### overheated_early
 
@@ -157,65 +174,69 @@
 
 | Feature | TP median (n) | SL median (n) | TP−SL median | Cliff’s δ | 95% CI δ | p |
 |---|---:|---:|---:|---:|---|---:|
-| SL distance from entry (%) [exact_persisted_derived] | 5.095 (100) | 5.836 (122) | -0.741 | -0.137 | [-0.300, 0.020] | 0.0811 |
-| TP distance from entry (%) [exact_persisted_derived] | 10.191 (100) | 11.673 (122) | -1.482 | -0.137 | [-0.292, 0.020] | 0.0899 |
-| TP/SL distance ratio [exact_persisted_derived] | 2.000 (100) | 2.000 (122) | 0.000 | 0.094 | [-0.037, 0.232] | 0.1798 |
-| Directional entry move from signal (%) [exact_persisted_derived] | 0.000 (100) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| SL distance from entry (%) [exact_persisted_derived] | 5.128 (103) | 5.773 (123) | -0.645 | -0.114 | [-0.268, 0.040] | 0.1348 |
+| TP distance from entry (%) [exact_persisted_derived] | 10.256 (103) | 11.546 (123) | -1.290 | -0.114 | [-0.268, 0.044] | 0.1286 |
+| TP/SL distance ratio [exact_persisted_derived] | 2.000 (103) | 2.000 (123) | 0.000 | 0.091 | [-0.032, 0.229] | 0.1873 |
+| Directional entry move from signal (%) [exact_persisted_derived] | 0.000 (103) | 0.000 (123) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
 | EMA cross gap (%) [runtime_log_rounded] | — (0) | — (0) | — | — | [—, —] | — |
-| Overheated 24h move (%) [runtime_log_rounded] | 18.200 (68) | 18.700 (103) | -0.500 | -0.036 | [-0.216, 0.135] | 0.7041 |
-| Overheated RSI [runtime_log_rounded] | 66.200 (68) | 66.800 (103) | -0.600 | -0.058 | [-0.240, 0.122] | 0.5456 |
+| Overheated 24h move (%) [runtime_log_rounded] | 18.100 (71) | 18.550 (104) | -0.450 | -0.029 | [-0.196, 0.139] | 0.7653 |
+| Overheated RSI [runtime_log_rounded] | 66.200 (71) | 66.800 (104) | -0.600 | -0.067 | [-0.249, 0.105] | 0.4557 |
 | Confirmation volume ratio (x) [runtime_log_rounded] | — (0) | — (0) | — | — | [—, —] | — |
 | Confirmation number [runtime_log_exact_integer] | — (0) | — (0) | — | — | [—, —] | — |
 | Confirmation age (minutes) [runtime_log_exact_integer] | — (0) | — (0) | — | — | [—, —] | — |
-| Directional price change, 1h (%) [reconstructed_historical_gateio_1h] | 0.000 (100) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
-| Directional price change, 2h (%) [reconstructed_historical_gateio_1h] | -0.147 (100) | -0.122 (122) | -0.025 | 0.057 | [-0.091, 0.210] | 0.4719 |
-| Directional price change, 4h (%) [reconstructed_historical_gateio_1h] | 0.632 (100) | 0.979 (122) | -0.347 | 0.015 | [-0.143, 0.168] | 0.8414 |
-| Candle range, 1h (%) [reconstructed_historical_gateio_1h] | 3.167 (100) | 4.577 (122) | -1.409 | -0.250 | [-0.396, -0.110] | 0.0025 |
-| Window range, 2h (%) [reconstructed_historical_gateio_1h] | 4.838 (100) | 7.565 (122) | -2.727 | -0.221 | [-0.358, -0.070] | 0.0037 |
-| Window range, 4h (%) [reconstructed_historical_gateio_1h] | 7.928 (100) | 11.434 (122) | -3.506 | -0.240 | [-0.376, -0.080] | 0.0012 |
-| Realized volatility, 2h (%) [reconstructed_historical_gateio_1h] | 0.000 (100) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
-| Realized volatility, 4h (%) [reconstructed_historical_gateio_1h] | 1.977 (100) | 2.482 (122) | -0.506 | -0.156 | [-0.312, -0.014] | 0.0462 |
-| Volume ratio, 1h vs prior 24h [reconstructed_historical_gateio_1h] | 0.985 (100) | 1.403 (122) | -0.418 | -0.207 | [-0.345, -0.042] | 0.0075 |
-| Volume change, last 1h (%) [reconstructed_historical_gateio_1h] | -10.486 (100) | -7.280 (122) | -3.205 | -0.037 | [-0.192, 0.122] | 0.6442 |
-| Volume acceleration (%) [reconstructed_historical_gateio_1h] | -27.535 (100) | -5.634 (122) | -21.901 | -0.048 | [-0.200, 0.110] | 0.5693 |
-| Momentum acceleration (%) [reconstructed_historical_gateio_1h] | 0.074 (100) | 0.061 (122) | 0.013 | -0.057 | [-0.209, 0.104] | 0.5081 |
-| Momentum decay ratio [reconstructed_historical_gateio_1h] | 0.000 (98) | 0.000 (121) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| Directional price change, 1h (%) [reconstructed_historical_gateio_1h] | 0.000 (103) | 0.000 (123) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| Directional price change, 2h (%) [reconstructed_historical_gateio_1h] | -0.153 (103) | -0.148 (123) | -0.005 | 0.049 | [-0.104, 0.197] | 0.5243 |
+| Directional price change, 4h (%) [reconstructed_historical_gateio_1h] | 0.733 (103) | 1.081 (123) | -0.348 | 0.013 | [-0.144, 0.174] | 0.8427 |
+| Candle range, 1h (%) [reconstructed_historical_gateio_1h] | 3.300 (103) | 4.573 (123) | -1.273 | -0.227 | [-0.363, -0.068] | 0.0062 |
+| Window range, 2h (%) [reconstructed_historical_gateio_1h] | 4.894 (103) | 7.530 (123) | -2.636 | -0.205 | [-0.338, -0.058] | 0.0075 |
+| Window range, 4h (%) [reconstructed_historical_gateio_1h] | 8.023 (103) | 11.365 (123) | -3.342 | -0.226 | [-0.358, -0.072] | 0.0037 |
+| Realized volatility, 2h (%) [reconstructed_historical_gateio_1h] | 0.000 (103) | 0.000 (123) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| Realized volatility, 4h (%) [reconstructed_historical_gateio_1h] | 1.994 (103) | 2.453 (123) | -0.459 | -0.137 | [-0.291, 0.022] | 0.0999 |
+| Volume ratio, 1h vs prior 24h [reconstructed_historical_gateio_1h] | 0.990 (103) | 1.400 (123) | -0.410 | -0.194 | [-0.335, -0.041] | 0.0112 |
+| Volume change, last 1h (%) [reconstructed_historical_gateio_1h] | -9.671 (103) | -8.636 (123) | -1.034 | -0.031 | [-0.178, 0.124] | 0.6754 |
+| Volume acceleration (%) [reconstructed_historical_gateio_1h] | -26.996 (103) | -8.866 (123) | -18.130 | -0.039 | [-0.192, 0.134] | 0.6080 |
+| Momentum acceleration (%) [reconstructed_historical_gateio_1h] | 0.076 (103) | 0.074 (123) | 0.002 | -0.049 | [-0.189, 0.115] | 0.5181 |
+| Momentum decay ratio [reconstructed_historical_gateio_1h] | 0.000 (101) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
 
 #### LONG
 
 | Feature | TP median (n) | SL median (n) | TP−SL median | Cliff’s δ | 95% CI δ | p |
 |---|---:|---:|---:|---:|---|---:|
-| SL distance from entry (%) [exact_persisted_derived] | 5.095 (100) | 5.836 (122) | -0.741 | -0.137 | [-0.280, 0.013] | 0.0886 |
-| TP distance from entry (%) [exact_persisted_derived] | 10.191 (100) | 11.673 (122) | -1.482 | -0.137 | [-0.289, 0.023] | 0.0836 |
-| TP/SL distance ratio [exact_persisted_derived] | 2.000 (100) | 2.000 (122) | 0.000 | 0.094 | [-0.052, 0.230] | 0.1823 |
-| Directional entry move from signal (%) [exact_persisted_derived] | 0.000 (100) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| SL distance from entry (%) [exact_persisted_derived] | 5.128 (103) | 5.773 (123) | -0.645 | -0.114 | [-0.263, 0.032] | 0.1448 |
+| TP distance from entry (%) [exact_persisted_derived] | 10.256 (103) | 11.546 (123) | -1.290 | -0.114 | [-0.268, 0.039] | 0.1548 |
+| TP/SL distance ratio [exact_persisted_derived] | 2.000 (103) | 2.000 (123) | 0.000 | 0.091 | [-0.032, 0.218] | 0.1773 |
+| Directional entry move from signal (%) [exact_persisted_derived] | 0.000 (103) | 0.000 (123) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
 | EMA cross gap (%) [runtime_log_rounded] | — (0) | — (0) | — | — | [—, —] | — |
-| Overheated 24h move (%) [runtime_log_rounded] | 18.200 (68) | 18.700 (103) | -0.500 | -0.036 | [-0.213, 0.134] | 0.7116 |
-| Overheated RSI [runtime_log_rounded] | 66.200 (68) | 66.800 (103) | -0.600 | -0.058 | [-0.234, 0.132] | 0.5256 |
+| Overheated 24h move (%) [runtime_log_rounded] | 18.100 (71) | 18.550 (104) | -0.450 | -0.029 | [-0.204, 0.141] | 0.7253 |
+| Overheated RSI [runtime_log_rounded] | 66.200 (71) | 66.800 (104) | -0.600 | -0.067 | [-0.231, 0.107] | 0.4632 |
 | Confirmation volume ratio (x) [runtime_log_rounded] | — (0) | — (0) | — | — | [—, —] | — |
 | Confirmation number [runtime_log_exact_integer] | — (0) | — (0) | — | — | [—, —] | — |
 | Confirmation age (minutes) [runtime_log_exact_integer] | — (0) | — (0) | — | — | [—, —] | — |
-| Directional price change, 1h (%) [reconstructed_historical_gateio_1h] | 0.000 (100) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
-| Directional price change, 2h (%) [reconstructed_historical_gateio_1h] | -0.147 (100) | -0.122 (122) | -0.025 | 0.057 | [-0.092, 0.215] | 0.4657 |
-| Directional price change, 4h (%) [reconstructed_historical_gateio_1h] | 0.632 (100) | 0.979 (122) | -0.347 | 0.015 | [-0.124, 0.168] | 0.8489 |
-| Candle range, 1h (%) [reconstructed_historical_gateio_1h] | 3.167 (100) | 4.577 (122) | -1.409 | -0.250 | [-0.387, -0.103] | 0.0037 |
-| Window range, 2h (%) [reconstructed_historical_gateio_1h] | 4.838 (100) | 7.565 (122) | -2.727 | -0.221 | [-0.361, -0.074] | 0.0087 |
-| Window range, 4h (%) [reconstructed_historical_gateio_1h] | 7.928 (100) | 11.434 (122) | -3.506 | -0.240 | [-0.383, -0.089] | 0.0025 |
-| Realized volatility, 2h (%) [reconstructed_historical_gateio_1h] | 0.000 (100) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
-| Realized volatility, 4h (%) [reconstructed_historical_gateio_1h] | 1.977 (100) | 2.482 (122) | -0.506 | -0.156 | [-0.300, -0.009] | 0.0437 |
-| Volume ratio, 1h vs prior 24h [reconstructed_historical_gateio_1h] | 0.985 (100) | 1.403 (122) | -0.418 | -0.207 | [-0.342, -0.054] | 0.0062 |
-| Volume change, last 1h (%) [reconstructed_historical_gateio_1h] | -10.486 (100) | -7.280 (122) | -3.205 | -0.037 | [-0.190, 0.112] | 0.6330 |
-| Volume acceleration (%) [reconstructed_historical_gateio_1h] | -27.535 (100) | -5.634 (122) | -21.901 | -0.048 | [-0.197, 0.109] | 0.5381 |
-| Momentum acceleration (%) [reconstructed_historical_gateio_1h] | 0.074 (100) | 0.061 (122) | 0.013 | -0.057 | [-0.207, 0.088] | 0.4769 |
-| Momentum decay ratio [reconstructed_historical_gateio_1h] | 0.000 (98) | 0.000 (121) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| Directional price change, 1h (%) [reconstructed_historical_gateio_1h] | 0.000 (103) | 0.000 (123) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| Directional price change, 2h (%) [reconstructed_historical_gateio_1h] | -0.153 (103) | -0.148 (123) | -0.005 | 0.049 | [-0.097, 0.209] | 0.5381 |
+| Directional price change, 4h (%) [reconstructed_historical_gateio_1h] | 0.733 (103) | 1.081 (123) | -0.348 | 0.013 | [-0.134, 0.157] | 0.8727 |
+| Candle range, 1h (%) [reconstructed_historical_gateio_1h] | 3.300 (103) | 4.573 (123) | -1.273 | -0.227 | [-0.362, -0.069] | 0.0037 |
+| Window range, 2h (%) [reconstructed_historical_gateio_1h] | 4.894 (103) | 7.530 (123) | -2.636 | -0.205 | [-0.354, -0.055] | 0.0100 |
+| Window range, 4h (%) [reconstructed_historical_gateio_1h] | 8.023 (103) | 11.365 (123) | -3.342 | -0.226 | [-0.378, -0.067] | 0.0050 |
+| Realized volatility, 2h (%) [reconstructed_historical_gateio_1h] | 0.000 (103) | 0.000 (123) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
+| Realized volatility, 4h (%) [reconstructed_historical_gateio_1h] | 1.994 (103) | 2.453 (123) | -0.459 | -0.137 | [-0.289, 0.016] | 0.0599 |
+| Volume ratio, 1h vs prior 24h [reconstructed_historical_gateio_1h] | 0.990 (103) | 1.400 (123) | -0.410 | -0.194 | [-0.339, -0.043] | 0.0125 |
+| Volume change, last 1h (%) [reconstructed_historical_gateio_1h] | -9.671 (103) | -8.636 (123) | -1.034 | -0.031 | [-0.179, 0.127] | 0.6916 |
+| Volume acceleration (%) [reconstructed_historical_gateio_1h] | -26.996 (103) | -8.866 (123) | -18.130 | -0.039 | [-0.184, 0.117] | 0.6205 |
+| Momentum acceleration (%) [reconstructed_historical_gateio_1h] | 0.076 (103) | 0.074 (123) | 0.002 | -0.049 | [-0.184, 0.090] | 0.5581 |
+| Momentum decay ratio [reconstructed_historical_gateio_1h] | 0.000 (101) | 0.000 (122) | 0.000 | 0.000 | [0.000, 0.000] | 1.0000 |
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+
+#### SHORT
+
+**INSUFFICIENT_TP_OR_SL:** Requires TP>= 20 and SL>= 20; observed TP=0, SL=0. No feature conclusion or candidate is allowed.
 
 ### ema_cross
 
@@ -249,7 +270,7 @@
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
 
 #### LONG
 
@@ -281,7 +302,7 @@
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
 
 #### SHORT
 
@@ -313,7 +334,7 @@
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
 
 ### overheated_confirmed
 
@@ -347,7 +368,7 @@
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
 
 #### LONG
 
@@ -379,7 +400,11 @@
 
 #### Experimental candidate
 
-**NO CANDIDATE:** no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, but no feature met the predeclared effect, permutation, confidence-interval, coverage, and balanced-accuracy criteria.
+
+#### SHORT
+
+**INSUFFICIENT_TP_OR_SL:** Requires TP>= 20 and SL>= 20; observed TP=0, SL=0. No feature conclusion or candidate is allowed.
 
 ## Telegram marker decision
 

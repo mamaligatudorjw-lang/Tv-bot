@@ -1125,7 +1125,7 @@ def build_report(
     numeric_fields = list(FEATURE_META)
     for strategy in TARGET_STRATEGIES:
         strategy_rows = [row for row in enriched if row["alert_type"] == strategy]
-        directions = sorted({row["direction"] for row in strategy_rows})
+        directions = ("LONG", "SHORT")
         cohorts = {"overall": strategy_rows}
         cohorts.update({
             direction: [row for row in strategy_rows if row["direction"] == direction]
@@ -1158,6 +1158,19 @@ def build_report(
                     else None
                 ),
             }
+            strategy_report[cohort_name]["comparison_status"] = (
+                "READY"
+                if strategy_report[cohort_name]["comparison_allowed"]
+                else "INSUFFICIENT_TP_OR_SL"
+            )
+            strategy_report[cohort_name]["comparison_reason"] = (
+                "Both resolved outcome cohorts meet n>=minimum_group_n."
+                if strategy_report[cohort_name]["comparison_allowed"]
+                else (
+                    f"Requires TP>= {MIN_GROUP_N} and SL>= {MIN_GROUP_N}; "
+                    f"observed TP={len(tp_rows)}, SL={len(sl_rows)}."
+                )
+            )
             strategy_report[cohort_name]["retrospective"] = retrospective_candidate_audit(
                 cohort_rows, strategy_report[cohort_name]["candidate"]
             )
@@ -1241,16 +1254,27 @@ def write_outputs(
     for strategy, cohorts in report["strategies"].items():
         for cohort_name, item in cohorts.items():
             metric = item["metrics"]
-            status = (
-                "ready"
-                if item["comparison_allowed"]
-                else f"INSUFFICIENT (<{MIN_GROUP_N} in TP or SL)"
-            )
+            status = item["comparison_status"]
             lines.append(
                 f"| {strategy} | {cohort_name} | {metric['total_n']} | {metric['n']} | "
                 f"{metric['tp']} | "
                 f"{metric['sl']} | {_md_value(metric['resolved_wr_pct'], 2)}% | "
                 f"{_md_value(metric['avg_r'], 4)} | {status} |"
+            )
+    lines += ["", "## Direction summary across all strategies", ""]
+    lines += [
+        "| Strategy | Direction | total | resolved | TP | SL | WR resolved | avg R | Status |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for strategy, cohorts in report["strategies"].items():
+        for direction in ("LONG", "SHORT"):
+            item = cohorts[direction]
+            metric = item["metrics"]
+            lines.append(
+                f"| {strategy} | {direction} | {metric['total_n']} | {metric['n']} | "
+                f"{metric['tp']} | {metric['sl']} | "
+                f"{_md_value(metric['resolved_wr_pct'], 2)}% | "
+                f"{_md_value(metric['avg_r'], 4)} | {item['comparison_status']} |"
             )
     lines += ["", "## Retrospective candidate volume and precision", ""]
     lines += [
@@ -1282,8 +1306,8 @@ def write_outputs(
             lines += [f"#### {cohort_name}", ""]
             if not item["comparison_allowed"]:
                 lines.append(
-                    f"**INSUFFICIENT:** TP={item['tp_first']}, SL={item['sl_first']}; "
-                    "no feature conclusion or candidate is allowed."
+                    f"**{item['comparison_status']}:** {item['comparison_reason']} "
+                    "No feature conclusion or candidate is allowed."
                 )
                 lines.append("")
                 continue
@@ -1308,8 +1332,9 @@ def write_outputs(
             lines += ["", "#### Experimental candidate", ""]
             if candidate is None:
                 lines.append(
-                    "**NO CANDIDATE:** no feature met the predeclared effect, "
-                    "permutation, confidence-interval, coverage, and balanced-accuracy criteria."
+                    "**NO CANDIDATE — EFFECT CRITERIA:** TP/SL cohorts were sufficient, "
+                    "but no feature met the predeclared effect, permutation, "
+                    "confidence-interval, coverage, and balanced-accuracy criteria."
                 )
             else:
                 audit = candidate["classification_in_sample"]
