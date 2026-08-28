@@ -3,7 +3,7 @@
 **Read-only отчёт. Allowlist, Telegram-видимость, scoring, TP/SL, cooldown и execution не изменяются.**
 
 - Cutoff: **2026-08-28T11:36:58+00:00** (`1787917018`)
-- Generated: **2026-08-28T11:37:30+00:00**
+- Generated: **2026-08-28T12:19:39+00:00**
 - Scope: `is_shadow=1`, `direction=SHORT`, resolved `tp/sl`, `ts_open > cutoff`.
 - Verdict threshold: **20 resolved trades per strategy**.
 - Rule: negative unrounded forward avg R = **CONFIRMED**; positive = **REFUTED**; exact zero = **AMBIGUOUS**.
