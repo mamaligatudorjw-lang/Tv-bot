@@ -15,12 +15,17 @@ import math
 import random
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bisect import bisect_left
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, median, stdev
 from typing import Any, Iterable
+
+import requests
+
+from shadow_outcome_report import fetch_candles
 
 
 TARGET_STRATEGIES = (
@@ -33,6 +38,11 @@ MIN_GROUP_N = 20
 BOOTSTRAP_ITERATIONS = 800
 PERMUTATION_ITERATIONS = 800
 RANDOM_SEED = 143
+HOUR_SEC = 60 * 60
+HISTORICAL_INTERVAL = "1h"
+HISTORICAL_INTERVAL_SEC = HOUR_SEC
+HISTORICAL_WARMUP_HOURS = 30
+DEFAULT_HISTORY_WORKERS = 3
 LOG_MATCH_WINDOWS = {
     "ema_cross": 120.0,
     "overheated_early": 120.0,
@@ -110,6 +120,71 @@ FEATURE_META = {
         "label": "Confirmation age (minutes)",
         "provenance": "runtime_log_exact_integer",
         "description": "age of the parent signal at confirmation",
+    },
+    "price_return_1h_pct": {
+        "label": "Directional price change, 1h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "direction-adjusted close-to-close return over the last completed 1h candle",
+    },
+    "price_return_2h_pct": {
+        "label": "Directional price change, 2h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "direction-adjusted close-to-close return over the last two completed 1h candles",
+    },
+    "price_return_4h_pct": {
+        "label": "Directional price change, 4h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "direction-adjusted close-to-close return over the last four completed 1h candles",
+    },
+    "range_1h_pct": {
+        "label": "Candle range, 1h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "high-low range of the last completed 1h candle divided by its low",
+    },
+    "range_2h_pct": {
+        "label": "Window range, 2h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "high-low range across the last two completed 1h candles",
+    },
+    "range_4h_pct": {
+        "label": "Window range, 4h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "high-low range across the last four completed 1h candles",
+    },
+    "realized_vol_2h_pct": {
+        "label": "Realized volatility, 2h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "population standard deviation of completed 1h log returns in the 2h window",
+    },
+    "realized_vol_4h_pct": {
+        "label": "Realized volatility, 4h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "population standard deviation of completed 1h log returns in the 4h window",
+    },
+    "volume_ratio_1h_vs_24h": {
+        "label": "Volume ratio, 1h vs prior 24h",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "latest completed 1h volume divided by the mean of the preceding 24 completed 1h volumes",
+    },
+    "volume_change_1h_pct": {
+        "label": "Volume change, last 1h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "latest completed 1h volume change versus the preceding completed 1h candle",
+    },
+    "volume_acceleration_pct": {
+        "label": "Volume acceleration (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "change in volume growth rate across the last three completed 1h candles",
+    },
+    "momentum_acceleration_pct": {
+        "label": "Momentum acceleration (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "directional 1h return minus the average directional return per hour over 2h",
+    },
+    "momentum_decay_ratio": {
+        "label": "Momentum decay ratio",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": "absolute directional 1h return divided by absolute directional 4h return per hour",
     },
 }
 
@@ -211,15 +286,23 @@ def nearest_event(
     return dict(event)
 
 
-def load_resolved(db_path: Path) -> list[dict[str, Any]]:
+def load_positions(
+    db_path: Path, *, resolved_only: bool = False
+) -> list[dict[str, Any]]:
+    """Load target shadow positions through a read-only SQLite connection."""
     uri = f"file:{db_path.resolve()}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
+    resolved_clause = (
+        "AND status IN ('tp', 'sl') AND exit_price IS NOT NULL AND exit_price > 0"
+        if resolved_only
+        else ""
+    )
     try:
         rows = [
             dict(row)
             for row in conn.execute(
-                """
+                f"""
                 SELECT id, ts_open, symbol, direction, entry_price, sl_price,
                        tp_price, status, ts_close, exit_price, alert_type,
                        is_shadow, signal_price
@@ -227,12 +310,10 @@ def load_resolved(db_path: Path) -> list[dict[str, Any]]:
                  WHERE is_shadow=1
                    AND alert_type IN (?, ?, ?, ?)
                    AND direction IN ('LONG', 'SHORT')
-                   AND status IN ('tp', 'sl')
                    AND entry_price > 0
                    AND sl_price > 0
                    AND tp_price > 0
-                   AND exit_price IS NOT NULL
-                   AND exit_price > 0
+                    {resolved_clause}
                  ORDER BY ts_open, id
                 """,
                 TARGET_STRATEGIES,
@@ -243,25 +324,299 @@ def load_resolved(db_path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def load_resolved(db_path: Path) -> list[dict[str, Any]]:
+    """Backward-compatible resolved-only loader used by the prior report."""
+    return load_positions(db_path, resolved_only=True)
+
+
+def load_position_counts(db_path: Path) -> dict[str, dict[str, int]]:
+    """Return total/status counts without changing the database."""
+    uri = f"file:{db_path.resolve()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        rows = conn.execute(
+            """
+            SELECT alert_type, status, COUNT(*)
+              FROM demo_positions
+             WHERE is_shadow=1
+               AND alert_type IN (?, ?, ?, ?)
+               AND direction IN ('LONG', 'SHORT')
+               AND entry_price > 0 AND sl_price > 0 AND tp_price > 0
+             GROUP BY alert_type, status
+            """,
+            TARGET_STRATEGIES,
+        ).fetchall()
+    finally:
+        conn.close()
+    counts: dict[str, dict[str, int]] = {
+        strategy: {"total": 0, "resolved": 0, "tp": 0, "sl": 0}
+        for strategy in TARGET_STRATEGIES
+    }
+    for strategy, status, count in rows:
+        item = counts[strategy]
+        item["total"] += int(count)
+        if status in ("tp", "sl"):
+            item["resolved"] += int(count)
+            item[status] += int(count)
+        else:
+            item[str(status)] = int(count)
+    return counts
+
+
+def _normalise_market_candles(
+    candles: Iterable[dict[str, Any]],
+) -> list[dict[str, float | int]]:
+    """Keep only valid Gate.io OHLCV candles in chronological order."""
+    by_ts: dict[int, dict[str, float | int]] = {}
+    for candle in candles:
+        try:
+            timestamp = int(candle["t"])
+            values = {
+                "t": timestamp,
+                "o": float(candle["o"]),
+                "h": float(candle["h"]),
+                "l": float(candle["l"]),
+                "c": float(candle["c"]),
+                "v": float(candle["v"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (
+            values["o"] > 0 and values["h"] > 0 and values["l"] > 0
+            and values["c"] > 0 and values["v"] >= 0
+            and values["h"] >= values["l"]
+        ):
+            by_ts[timestamp] = values
+    return [by_ts[timestamp] for timestamp in sorted(by_ts)]
+
+
+def _contiguous_window(
+    candles: list[dict[str, float | int]], bars: int
+) -> list[dict[str, float | int]] | None:
+    if len(candles) < bars:
+        return None
+    window = candles[-bars:]
+    timestamps = [int(candle["t"]) for candle in window]
+    if any(
+        right - left != HISTORICAL_INTERVAL_SEC
+        for left, right in zip(timestamps, timestamps[1:])
+    ):
+        return None
+    return window
+
+
+def _directional_return(
+    direction: str, first_close: float, last_close: float
+) -> float | None:
+    if first_close <= 0:
+        return None
+    raw = (last_close - first_close) / first_close * 100.0
+    return raw if direction == "LONG" else -raw
+
+
+def historical_features(
+    candles: Iterable[dict[str, Any]], ts_open: int, direction: str
+) -> dict[str, Any]:
+    """Reconstruct lookahead-safe features from completed 1h Gate.io candles."""
+    normalised = _normalise_market_candles(candles)
+    completed = [
+        candle for candle in normalised
+        if int(candle["t"]) + HISTORICAL_INTERVAL_SEC <= int(ts_open)
+    ]
+    feature_fields = [
+        field for field in FEATURE_META
+        if field.startswith((
+            "price_return_", "range_", "realized_vol_", "volume_", "momentum_"
+        ))
+    ]
+    missing = {field: None for field in feature_fields}
+    missing["historical_feature_status"] = (
+        "no_candles" if not normalised else "insufficient_or_gapped_history"
+    )
+    if not completed:
+        return missing
+
+    features: dict[str, Any] = {
+        **missing,
+        "historical_feature_status": "ok",
+        "historical_last_candle_ts": int(completed[-1]["t"]),
+        "historical_last_candle_utc": fmt_ts(int(completed[-1]["t"])),
+    }
+    windows: dict[int, list[dict[str, float | int]] | None] = {
+        bars: _contiguous_window(completed, bars) for bars in (1, 2, 4)
+    }
+    returns: dict[int, float | None] = {}
+    latest = float(completed[-1]["c"])
+    for bars, window in windows.items():
+        returns[bars] = None
+        if window is not None:
+            returns[bars] = _directional_return(
+                direction, float(window[0]["c"]), latest
+            )
+            low = min(float(candle["l"]) for candle in window)
+            high = max(float(candle["h"]) for candle in window)
+            features[f"range_{bars}h_pct"] = (
+                (high - low) / low * 100.0 if low > 0 else None
+            )
+    features.update({
+        "price_return_1h_pct": returns[1],
+        "price_return_2h_pct": returns[2],
+        "price_return_4h_pct": returns[4],
+    })
+
+    for bars in (2, 4):
+        window = windows[bars]
+        if window is None:
+            continue
+        close_returns = [
+            math.log(float(right["c"]) / float(left["c"])) * 100.0
+            for left, right in zip(window, window[1:])
+            if float(left["c"]) > 0 and float(right["c"]) > 0
+        ]
+        if close_returns:
+            features[f"realized_vol_{bars}h_pct"] = (
+                stdev(close_returns) if len(close_returns) >= 2 else 0.0
+            )
+
+    latest_volume = float(completed[-1]["v"])
+    prior_volume = float(completed[-2]["v"]) if len(completed) >= 2 else None
+    prior_prior_volume = (
+        float(completed[-3]["v"]) if len(completed) >= 3 else None
+    )
+    baseline = completed[-25:-1] if len(completed) >= 25 else []
+    baseline_volumes = [float(candle["v"]) for candle in baseline]
+    if baseline_volumes:
+        average_volume = mean(baseline_volumes)
+        if average_volume > 0:
+            features["volume_ratio_1h_vs_24h"] = latest_volume / average_volume
+    if prior_volume is not None and prior_volume > 0:
+        features["volume_change_1h_pct"] = (
+            (latest_volume - prior_volume) / prior_volume * 100.0
+        )
+    if (
+        prior_volume is not None and prior_prior_volume is not None
+        and prior_volume > 0 and prior_prior_volume > 0
+    ):
+        latest_growth = (latest_volume - prior_volume) / prior_volume * 100.0
+        prior_growth = (prior_volume - prior_prior_volume) / prior_prior_volume * 100.0
+        features["volume_acceleration_pct"] = latest_growth - prior_growth
+    if returns[1] is not None and returns[2] is not None:
+        features["momentum_acceleration_pct"] = returns[1] - returns[2] / 2.0
+    if (
+        returns[1] is not None and returns[4] is not None
+        and abs(returns[4]) > 1e-12
+    ):
+        features["momentum_decay_ratio"] = abs(returns[1]) / (abs(returns[4]) / 4.0)
+    return features
+
+
+def fetch_historical_histories(
+    rows: Iterable[dict[str, Any]],
+    output_dir: Path,
+    *,
+    workers: int = DEFAULT_HISTORY_WORKERS,
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Fetch one cached 1h history per symbol, with explicit failure coverage."""
+    rows = list(rows)
+    if not rows:
+        return {}, {"status": "no_signals", "symbols_requested": 0}
+    symbols = sorted({str(row["symbol"]) for row in rows})
+    min_ts = min(int(row["ts_open"]) for row in rows)
+    max_ts = max(int(row["ts_open"]) for row in rows)
+    start = min_ts - HISTORICAL_WARMUP_HOURS * HOUR_SEC
+    required_last_candle_ts = (max_ts // HOUR_SEC) * HOUR_SEC - HOUR_SEC
+    cache_dir = output_dir / "candle_cache_1h"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    histories: dict[str, list[dict[str, Any]]] = {}
+    cached = 0
+    pending: list[str] = []
+    for symbol in symbols:
+        cache_path = cache_dir / f"{symbol}.json"
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            candles = _normalise_market_candles(payload)
+            if (
+                candles
+                and int(candles[0]["t"]) <= start + HOUR_SEC
+                and int(candles[-1]["t"]) >= required_last_candle_ts
+            ):
+                histories[symbol] = candles
+                cached += 1
+                continue
+        except (OSError, ValueError, TypeError):
+            pass
+        pending.append(symbol)
+
+    failures: dict[str, str] = {}
+
+    def fetch_one(symbol: str) -> tuple[str, list[dict[str, Any]]]:
+        with requests.Session() as session:
+            candles = fetch_candles(
+                session,
+                symbol,
+                start,
+                max_ts,
+                interval=HISTORICAL_INTERVAL,
+                interval_sec=HISTORICAL_INTERVAL_SEC,
+            )
+        return symbol, _normalise_market_candles(candles)
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {executor.submit(fetch_one, symbol): symbol for symbol in pending}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                fetched_symbol, candles = future.result()
+                if candles:
+                    histories[fetched_symbol] = candles
+                    (cache_dir / f"{fetched_symbol}.json").write_text(
+                        json.dumps(candles, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                else:
+                    failures[symbol] = "empty_response"
+            except Exception as exc:
+                failures[symbol] = f"{type(exc).__name__}: {exc}"
+    return histories, {
+        "status": "ok" if not failures else "partial",
+        "interval": HISTORICAL_INTERVAL,
+        "requested_start_ts": start,
+        "requested_end_ts": max_ts,
+        "requested_start_utc": fmt_ts(start),
+        "requested_end_utc": fmt_ts(max_ts),
+        "symbols_requested": len(symbols),
+        "symbols_cached": cached,
+        "symbols_fetched": len(pending) - len(failures),
+        "symbols_with_history": len(histories),
+        "symbols_failed": len(failures),
+        "failed_symbols": failures,
+    }
+
+
 def enrich_rows(
     rows: Iterable[dict[str, Any]],
     events: dict[tuple[str, str, str], list[dict[str, Any]]],
+    candles_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
+    candles_by_symbol = candles_by_symbol or {}
     enriched = []
     for source in rows:
         row = dict(source)
         entry = float(row["entry_price"])
         stop = float(row["sl_price"])
         target = float(row["tp_price"])
-        exit_price = float(row["exit_price"])
+        exit_value = row.get("exit_price")
+        exit_price = float(exit_value) if exit_value not in (None, "") else None
         direction = str(row["direction"])
         risk = abs(stop - entry)
         reward = abs(target - entry)
-        result_r = (
-            (exit_price - entry) / risk
-            if direction == "LONG"
-            else (entry - exit_price) / risk
-        )
+        result_r = None
+        if exit_price is not None and risk > 0:
+            result_r = (
+                (exit_price - entry) / risk
+                if direction == "LONG"
+                else (entry - exit_price) / risk
+            )
         signal_price = row.get("signal_price")
         directional_entry_move = None
         if signal_price is not None and float(signal_price) > 0:
@@ -281,8 +636,12 @@ def enrich_rows(
         row.update({
             "ts_open_utc": fmt_ts(int(row["ts_open"])),
             "ts_close_utc": fmt_ts(row.get("ts_close")),
-            "outcome": "tp" if row["status"] == "tp" else "sl",
-            "result_r": result_r if math.isfinite(result_r) else None,
+            "outcome": (
+                "tp" if row.get("status") == "tp"
+                else "sl" if row.get("status") == "sl"
+                else None
+            ),
+            "result_r": result_r if result_r is not None and math.isfinite(result_r) else None,
             "risk_pct": risk / entry * 100.0,
             "reward_pct": reward / entry * 100.0,
             "reward_risk": reward / risk if risk > 0 else None,
@@ -294,6 +653,18 @@ def enrich_rows(
             ),
         })
         row.update(event)
+        row["outcome"] = (
+            "tp" if row.get("status") == "tp"
+            else "sl" if row.get("status") == "sl"
+            else None
+        )
+        row.update(
+            historical_features(
+                candles_by_symbol.get(str(row["symbol"]), []),
+                int(row["ts_open"]),
+                direction,
+            )
+        )
         enriched.append(row)
     return enriched
 
@@ -331,8 +702,8 @@ def describe(rows: Iterable[dict[str, Any]], field: str) -> dict[str, Any]:
 
 
 def metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    tp = sum(row["outcome"] == "tp" for row in rows)
-    sl = sum(row["outcome"] == "sl" for row in rows)
+    tp = sum(row.get("outcome") == "tp" for row in rows)
+    sl = sum(row.get("outcome") == "sl" for row in rows)
     rs = [
         float(row["result_r"])
         for row in rows
@@ -342,8 +713,10 @@ def metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     n = tp + sl
     return {
         "n": n,
+        "total_n": len(rows),
         "tp": tp,
         "sl": sl,
+        "unresolved_n": len(rows) - n,
         "resolved_wr_pct": round(100.0 * tp / n, 2) if n else None,
         "avg_r": round(mean(rs), 6) if rs else None,
         "sample_status": "ready" if n >= MIN_GROUP_N else "insufficient_sample",
@@ -451,6 +824,8 @@ def _classification(
     matrix = {"tp_pred_tp": 0, "tp_pred_sl": 0, "sl_pred_tp": 0, "sl_pred_sl": 0}
     used = 0
     for row in rows:
+        if row.get("outcome") not in ("tp", "sl"):
+            continue
         value = row.get(field)
         if value in (None, ""):
             continue
@@ -479,6 +854,8 @@ def _classification(
     sl_precision = (
         matrix["sl_pred_sl"] / sl_pred_total if sl_pred_total else None
     )
+    tp_recall = matrix["tp_pred_tp"] / tp_total if tp_total else None
+    sl_recall = matrix["sl_pred_sl"] / sl_total if sl_total else None
     balanced_accuracy = (
         (
             matrix["tp_pred_tp"] / tp_total
@@ -496,6 +873,8 @@ def _classification(
         ),
         "precision_tp": round(tp_precision, 6) if tp_precision is not None else None,
         "precision_sl": round(sl_precision, 6) if sl_precision is not None else None,
+        "tp_recall": round(tp_recall, 6) if tp_recall is not None else None,
+        "sl_recall": round(sl_recall, 6) if sl_recall is not None else None,
     }
 
 
@@ -503,11 +882,14 @@ def find_candidate(
     rows: list[dict[str, Any]],
     comparisons: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+    resolved_rows = [row for row in rows if row.get("outcome") in ("tp", "sl")]
+    tp_total = sum(row["outcome"] == "tp" for row in resolved_rows)
+    sl_total = sum(row["outcome"] == "sl" for row in resolved_rows)
     eligible = [
         item for item in comparisons
         if item["comparison_allowed"]
-        and item["tp_first"]["n"] / sum(row["outcome"] == "tp" for row in rows) >= 0.8
-        and item["sl_first"]["n"] / sum(row["outcome"] == "sl" for row in rows) >= 0.8
+        and item["tp_first"]["n"] / tp_total >= 0.8
+        and item["sl_first"]["n"] / sl_total >= 0.8
         and item["permutation_p_two_sided"] is not None
         and item["permutation_p_two_sided"] <= 0.05
         and item["bootstrap_95ci"][0] is not None
@@ -575,16 +957,140 @@ def find_candidate(
     return best
 
 
-def build_report(rows: list[dict[str, Any]], events: dict) -> dict[str, Any]:
-    enriched = enrich_rows(rows, events)
+def _rule_matches(row: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    value = row.get(candidate["feature"])
+    if value in (None, ""):
+        return False
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(value):
+        return False
+    return (
+        value >= candidate["threshold"]
+        if candidate["operator"] == "gte"
+        else value <= candidate["threshold"]
+    )
+
+
+def retrospective_candidate_audit(
+    rows: list[dict[str, Any]], candidate: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Measure selection volume on all signals and quality on resolved rows."""
+    days = sorted({
+        datetime.fromtimestamp(int(row["ts_open"]), timezone.utc).date().isoformat()
+        for row in rows
+    })
+    selected = [row for row in rows if candidate and _rule_matches(row, candidate)]
+    selected_resolved = [
+        row for row in selected if row.get("outcome") in ("tp", "sl")
+    ]
+    baseline_resolved = [
+        row for row in rows if row.get("outcome") in ("tp", "sl")
+    ]
+    selected_by_day = defaultdict(int)
+    baseline_by_day = defaultdict(int)
+    for row in rows:
+        day = datetime.fromtimestamp(int(row["ts_open"]), timezone.utc).date().isoformat()
+        baseline_by_day[day] += 1
+    for row in selected:
+        day = datetime.fromtimestamp(int(row["ts_open"]), timezone.utc).date().isoformat()
+        selected_by_day[day] += 1
+    day_count = len(days)
+    return {
+        "candidate_present": candidate is not None,
+        "baseline": {
+            "signals": len(rows),
+            "resolved": len(baseline_resolved),
+            "unresolved": len(rows) - len(baseline_resolved),
+            "average_signals_per_day": round(len(rows) / day_count, 4) if day_count else None,
+            "max_signals_per_day": max(baseline_by_day.values(), default=0),
+        },
+        "selected": {
+            "signals": len(selected),
+            "resolved": len(selected_resolved),
+            "unresolved": len(selected) - len(selected_resolved),
+            "coverage_pct": round(100.0 * len(selected) / len(rows), 4) if rows else 0.0,
+            "average_signals_per_day": round(len(selected) / day_count, 4) if day_count else None,
+            "max_signals_per_day": max(selected_by_day.values(), default=0),
+            "daily_signal_counts": dict(sorted(selected_by_day.items())),
+            "resolved_metrics": metrics(selected_resolved),
+        },
+        "days_observed": day_count,
+        "daily_baseline_counts": dict(sorted(baseline_by_day.items())),
+        "precision_recall": (
+            candidate["classification_in_sample"] if candidate else None
+        ),
+    }
+
+
+def feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Report availability overall and by strategy/outcome, never imputing data."""
+    result: dict[str, Any] = {}
+    for field in FEATURE_META:
+        if not (
+            field.startswith((
+                "price_return_", "range_", "realized_vol_", "volume_", "momentum_"
+            ))
+        ):
+            continue
+        available = [
+            row for row in rows
+            if row.get(field) not in (None, "")
+        ]
+        by_strategy: dict[str, Any] = {}
+        for strategy in TARGET_STRATEGIES:
+            strategy_rows = [
+                row for row in rows if row.get("alert_type") == strategy
+            ]
+            by_outcome = {}
+            for outcome in ("tp", "sl", "unresolved"):
+                cohort = [
+                    row for row in strategy_rows
+                    if (
+                        row.get("outcome") == outcome
+                        if outcome in ("tp", "sl")
+                        else row.get("outcome") not in ("tp", "sl")
+                    )
+                ]
+                count = sum(row.get(field) not in (None, "") for row in cohort)
+                by_outcome[outcome] = {
+                    "n": len(cohort),
+                    "available_n": count,
+                    "coverage_pct": round(100.0 * count / len(cohort), 2)
+                    if cohort else 0.0,
+                }
+            by_strategy[strategy] = by_outcome
+        result[field] = {
+            "provenance": FEATURE_META[field]["provenance"],
+            "n": len(rows),
+            "available_n": len(available),
+            "coverage_pct": round(100.0 * len(available) / len(rows), 2)
+            if rows else 0.0,
+            "by_strategy_and_outcome": by_strategy,
+        }
+    return result
+
+
+def build_report(
+    rows: list[dict[str, Any]],
+    events: dict,
+    candles_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    position_counts: dict[str, dict[str, int]] | None = None,
+    history_coverage: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    enriched = enrich_rows(rows, events, candles_by_symbol)
     report: dict[str, Any] = {
         "config": {
             "strategies": list(TARGET_STRATEGIES),
-            "scope": "resolved shadow demo_positions only",
-            "outcomes": "recorded demo_positions status tp/sl",
+            "scope": "all valid target shadow demo_positions; outcomes use recorded status",
+            "outcomes": "tp/sl are resolved; open and ttl_expired remain unresolved",
             "r_definition": "directional exit-vs-entry divided by absolute entry-to-SL risk",
             "minimum_group_n": MIN_GROUP_N,
             "read_only": True,
+            "historical_candle_interval": HISTORICAL_INTERVAL,
+            "historical_candle_rule": "candle_open + 1h <= ts_open; gapped windows are unavailable",
             "in_sample_rule_warning": (
                 "Any candidate is selected and evaluated on the same history; "
                 "it is not forward evidence."
@@ -605,8 +1111,14 @@ def build_report(rows: list[dict[str, Any]], events: dict) -> dict[str, Any]:
             "last_signal_utc": fmt_ts(
                 max((row["ts_open"] for row in enriched), default=None)
             ),
+            "historical_candles": history_coverage or {
+                "status": "not_requested",
+                "symbols_with_history": len(candles_by_symbol or {}),
+            },
         },
         "feature_provenance": FEATURE_META,
+        "feature_coverage": feature_coverage(enriched),
+        "position_counts": position_counts or {},
         "strategies": {},
         "rows": enriched,
     }
@@ -646,6 +1158,9 @@ def build_report(rows: list[dict[str, Any]], events: dict) -> dict[str, Any]:
                     else None
                 ),
             }
+            strategy_report[cohort_name]["retrospective"] = retrospective_candidate_audit(
+                cohort_rows, strategy_report[cohort_name]["candidate"]
+            )
         report["strategies"][strategy] = strategy_report
     return report
 
@@ -674,6 +1189,14 @@ def write_outputs(
         "ema_gap_pct_log", "overheated_pct24_log", "overheated_rsi_log",
         "confirmation_volume_ratio_log", "confirmation_number_log",
         "confirmation_age_min_log", "confirmation_tp_mult_log",
+        "historical_feature_status", "historical_last_candle_ts",
+        "historical_last_candle_utc",
+        *[
+            field for field in FEATURE_META
+            if field.startswith((
+                "price_return_", "range_", "realized_vol_", "volume_", "momentum_"
+            ))
+        ],
     ]
     with (output_dir / "rows.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
@@ -685,9 +1208,12 @@ def write_outputs(
         "",
         "**Read-only report. No production logic, filters, score, SL/TP, or SQLite rows were changed.**",
         "",
-        f"- Scope: resolved shadow `demo_positions` rows only; loaded **{report['coverage']['rows_loaded']}**.",
+        f"- Scope: all valid target shadow `demo_positions` rows; loaded **{report['coverage']['rows_loaded']}**, "
+        f"with **{sum(row.get('outcome') in ('tp', 'sl') for row in rows)}** resolved.",
         f"- Runtime log matches: **{report['coverage']['log_matches']}** "
         f"({report['coverage']['log_match_rate_pct']}%).",
+        f"- Historical 1h candle coverage: **{report['coverage']['historical_candles'].get('symbols_with_history', 0)}** "
+        f"of **{report['coverage']['historical_candles'].get('symbols_requested', 0)}** symbols.",
         f"- Minimum comparison cohort: **{MIN_GROUP_N} TP-first and {MIN_GROUP_N} SL-first**.",
         "- `WR` is TP / (TP + SL); `avg R` uses recorded exit price and original entry-to-SL risk.",
         "- Any rule below is in-sample: the threshold was selected and scored on the same rows.",
@@ -709,8 +1235,8 @@ def write_outputs(
         )
     lines += ["", "## Current strategy performance", ""]
     lines += [
-        "| Strategy | Cohort | n | TP | SL | WR resolved | avg R | Status |",
-        "|---|---|---:|---:|---:|---:|---:|---|",
+        "| Strategy | Cohort | total | resolved | TP | SL | WR resolved | avg R | Status |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for strategy, cohorts in report["strategies"].items():
         for cohort_name, item in cohorts.items():
@@ -721,9 +1247,33 @@ def write_outputs(
                 else f"INSUFFICIENT (<{MIN_GROUP_N} in TP or SL)"
             )
             lines.append(
-                f"| {strategy} | {cohort_name} | {metric['n']} | {metric['tp']} | "
+                f"| {strategy} | {cohort_name} | {metric['total_n']} | {metric['n']} | "
+                f"{metric['tp']} | "
                 f"{metric['sl']} | {_md_value(metric['resolved_wr_pct'], 2)}% | "
                 f"{_md_value(metric['avg_r'], 4)} | {status} |"
+            )
+    lines += ["", "## Retrospective candidate volume and precision", ""]
+    lines += [
+        "| Strategy | Cohort | Candidate | Baseline/day | Selected/day | Selected signals | "
+        "TP precision | TP recall | Selected WR |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for strategy, cohorts in report["strategies"].items():
+        for cohort_name, item in cohorts.items():
+            audit = item["retrospective"]
+            selected = audit["selected"]
+            classification = audit["precision_recall"]
+            candidate_label = (
+                item["candidate"]["feature"] if item["candidate"] else "NO CANDIDATE"
+            )
+            lines.append(
+                f"| {strategy} | {cohort_name} | {candidate_label} | "
+                f"{_md_value(audit['baseline']['average_signals_per_day'], 2)} | "
+                f"{_md_value(selected['average_signals_per_day'], 2)} | "
+                f"{selected['signals']} | "
+                f"{_md_value(classification.get('precision_tp') if classification else None, 3)} | "
+                f"{_md_value(classification.get('tp_recall') if classification else None, 3)} | "
+                f"{_md_value(selected['resolved_metrics']['resolved_wr_pct'], 2)}% |"
             )
     lines += ["", "## TP-first vs SL-first comparisons", ""]
     for strategy, cohorts in report["strategies"].items():
@@ -770,6 +1320,10 @@ def write_outputs(
                     f"**{audit['balanced_accuracy']}**",
                     f"- Precision TP: **{audit['precision_tp']}**; precision SL: "
                     f"**{audit['precision_sl']}**",
+                    f"- TP recall: **{audit.get('tp_recall')}**; SL recall: "
+                    f"**{audit.get('sl_recall')}**",
+                    f"- Retrospective selected volume: **{item['retrospective']['selected']['signals']}** "
+                    f"signals, **{item['retrospective']['selected']['average_signals_per_day']}**/day.",
                     "- This is experimental and requires forward-shadow validation; it is not a production rule.",
                 ]
             lines.append("")
@@ -797,10 +1351,23 @@ def main() -> int:
     parser.add_argument(
         "--out", type=Path, default=Path("outcome_tp_vs_sl_experimental")
     )
+    parser.add_argument(
+        "--workers", type=int, default=DEFAULT_HISTORY_WORKERS,
+        help="parallel historical candle requests (default: 3)",
+    )
     args = parser.parse_args()
-    rows = load_resolved(args.db)
+    rows = load_positions(args.db)
     events = parse_runtime_log(args.log)
-    report = build_report(rows, events)
+    histories, history_coverage = fetch_historical_histories(
+        rows, args.out, workers=args.workers
+    )
+    report = build_report(
+        rows,
+        events,
+        histories,
+        load_position_counts(args.db),
+        history_coverage,
+    )
     enriched = report.pop("rows")
     write_outputs(report, args.out, enriched)
     print(

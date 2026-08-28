@@ -4,6 +4,7 @@ from tp_vs_sl_analysis import (
     MIN_GROUP_N,
     build_report,
     enrich_rows,
+    historical_features,
     metrics,
     parse_runtime_log,
 )
@@ -111,3 +112,55 @@ def test_candidate_is_in_sample_and_not_silently_promoted_to_telegram():
     assert cohort["candidate"] is not None
     assert "in_sample" in json.dumps(cohort["candidate"])
     assert "telegram" not in report
+
+
+def _candle(ts, close, volume=100.0, high=None, low=None):
+    return {
+        "t": ts,
+        "o": close,
+        "h": high if high is not None else close + 1.0,
+        "l": low if low is not None else close - 1.0,
+        "c": close,
+        "v": volume,
+    }
+
+
+def test_historical_features_use_only_completed_contiguous_candles():
+    hour = 3600
+    candles = [
+        _candle(1_700_000_000 + hour * index, 100.0 + index, 100.0 + index)
+        for index in range(30)
+    ]
+    signal_ts = candles[-1]["t"] + hour + 1
+
+    features = historical_features(candles, signal_ts, "LONG")
+
+    assert features["historical_feature_status"] == "ok"
+    assert features["price_return_1h_pct"] is not None
+    assert features["price_return_2h_pct"] > features["price_return_1h_pct"]
+    assert features["realized_vol_2h_pct"] is not None
+    assert features["volume_ratio_1h_vs_24h"] is not None
+
+    # The last candle is still forming at this timestamp and must not leak.
+    before_last = historical_features(candles, candles[-1]["t"] + 1, "LONG")
+    assert before_last["historical_feature_status"] == "ok"
+    assert before_last["historical_last_candle_ts"] == candles[-2]["t"]
+
+
+def test_historical_features_mark_gapped_windows_unavailable():
+    hour = 3600
+    candles = [
+        _candle(1_700_000_000, 100.0),
+        _candle(1_700_000_000 + hour, 101.0),
+        _candle(1_700_000_000 + hour * 3, 103.0),
+        _candle(1_700_000_000 + hour * 5, 105.0),
+    ]
+
+    features = historical_features(
+        candles, 1_700_000_000 + hour * 6 + 1, "SHORT"
+    )
+
+    assert features["historical_feature_status"] == "ok"
+    assert features["price_return_1h_pct"] is not None
+    assert features["price_return_2h_pct"] is None
+    assert features["price_return_4h_pct"] is None
