@@ -85,6 +85,31 @@ def _insert_position(
     conn.commit()
 
 
+def _run_status(monkeypatch, conn, chat_id):
+    sent = []
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    monkeypatch.setattr(
+        app,
+        "state",
+        {
+            "initialized": True,
+            "known_pairs": {"BTCUSDT"},
+            "last_run": "2026-08-29 20:00",
+            "last_run_summary": {},
+            "silenced": False,
+            "silenced_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        app,
+        "_telegram_send",
+        lambda _chat_id, text, **_kwargs: sent.append(text) or True,
+    )
+    app.handle_status_command(chat_id)
+    assert len(sent) == 1
+    return sent[0]
+
+
 def test_replay_sends_all_positive_resolved_live_and_shadow_rows_once(monkeypatch):
     conn = _replay_db()
     _insert_position(
@@ -172,6 +197,49 @@ def test_replay_sends_all_positive_resolved_live_and_shadow_rows_once(monkeypatc
         "SELECT COUNT(*) FROM telegram_replay_delivery_log "
         "WHERE chat_id=123 AND delivered=1"
     ).fetchone() == (3,)
+    conn.close()
+
+
+def test_status_reports_empty_replay_backlog_without_writing(monkeypatch):
+    conn = _replay_db()
+    before = conn.execute(
+        "SELECT COUNT(*) FROM telegram_replay_delivery_log"
+    ).fetchone()[0]
+
+    message = _run_status(monkeypatch, conn, 321)
+
+    assert "🕰 Replay:</b> ожидают отправки: <b>0</b>" in message
+    assert "Последняя успешная доставка: <code>нет отправок</code>" in message
+    assert conn.execute(
+        "SELECT COUNT(*) FROM telegram_replay_delivery_log"
+    ).fetchone()[0] == before
+    conn.close()
+
+
+def test_status_reports_pending_replay_and_last_success_for_chat(monkeypatch):
+    conn = _replay_db()
+    _insert_position(conn, symbol="PENDINGUSDT", status="tp", pnl_usd=1.0)
+    _insert_position(conn, symbol="SENTUSDT", status="manual", pnl_usd=2.0)
+    sent_position_id = conn.execute(
+        "SELECT id FROM demo_positions WHERE symbol='SENTUSDT'"
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO telegram_replay_delivery_log
+            (demo_position_id, chat_id, ts_sent, delivered)
+        VALUES (?, ?, ?, 1)
+        """,
+        (sent_position_id, 456, 1_700_000_600),
+    )
+    conn.commit()
+
+    message = _run_status(monkeypatch, conn, 456)
+
+    assert "🕰 Replay:</b> ожидают отправки: <b>1</b>" in message
+    assert "Последняя успешная доставка: <code>2023-" in message
+    assert conn.execute(
+        "SELECT COUNT(*) FROM telegram_replay_delivery_log"
+    ).fetchone() == (1,)
     conn.close()
 
 

@@ -1191,6 +1191,46 @@ def handle_replay_command(chat_id: int) -> None:
     _telegram_send(chat_id, summary)
 
 
+def _get_replay_status_snapshot(chat_id: int) -> tuple[int | None, int | None]:
+    """Return (pending_count, last_success_ts) for one chat without sending."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+            row = conn.execute(
+                """
+                SELECT
+                    (
+                        SELECT COUNT(*)
+                        FROM demo_positions AS dp
+                        WHERE dp.status != 'open'
+                          AND dp.ts_close IS NOT NULL
+                          AND dp.pnl_usd IS NOT NULL
+                          AND dp.pnl_usd > 0
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM telegram_replay_delivery_log AS rd
+                              WHERE rd.demo_position_id = dp.id
+                                AND rd.chat_id = ?
+                                AND rd.delivered = 1
+                          )
+                    ) AS pending_count,
+                    (
+                        SELECT MAX(rd.ts_sent)
+                        FROM telegram_replay_delivery_log AS rd
+                        WHERE rd.chat_id = ?
+                          AND rd.delivered = 1
+                    ) AS last_success_ts
+                """,
+                (int(chat_id), int(chat_id)),
+            ).fetchone()
+        if not row:
+            return 0, None
+        return int(row[0] or 0), int(row[1]) if row[1] is not None else None
+    except Exception as exc:
+        logger.warning("replay status snapshot failed: %s", exc)
+        return None, None
+
+
 def _telegram_answer_callback(callback_id: str, text: str = "") -> None:
     """Acknowledge a callback_query so Telegram stops showing a loading spinner."""
     try:
@@ -14622,6 +14662,23 @@ def handle_status_command(chat_id: int) -> None:
     errors = summary.get("errors", [])
     error_line = f"\n⚠️ Ошибок: {len(errors)}" if errors else ""
     silence_line = f"\n🔕 <b>Алерты заглушены</b> с {silenced_at}" if silenced else "\n🔔 Алерты активны"
+    replay_pending, replay_last_sent_ts = _get_replay_status_snapshot(chat_id)
+    if replay_pending is None:
+        replay_status_line = (
+            "\n<b>🕰 Replay:</b> статус временно недоступен (ошибка чтения)"
+        )
+    else:
+        replay_last_sent = (
+            datetime.fromtimestamp(
+                replay_last_sent_ts, ZoneInfo("Europe/Chisinau")
+            ).strftime("%Y-%m-%d %H:%M")
+            if replay_last_sent_ts is not None
+            else "нет отправок"
+        )
+        replay_status_line = (
+            f"\n<b>🕰 Replay:</b> ожидают отправки: <b>{replay_pending}</b>\n"
+            f"Последняя успешная доставка: <code>{replay_last_sent}</code>"
+        )
 
     # ── Hidden items section ────────────────────────────────────────────────
     _ensure_prefs_loaded()
@@ -14663,6 +14720,7 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Активный хост:</b> <code>{active_host}</code>\n\n"
         f"<b>Последняя проверка:</b> {last_run}\n"
         f"<b>Время цикла:</b> {elapsed}с\n\n"
+         f"{replay_status_line}\n\n"
         f"<b>За последний цикл:</b>\n"
         f"  🚨 Отправлено конфлюэнция-алертов: <b>{summary.get('confluence_alerts', 0)}</b>\n"
         f"  💤 Подавлено одиночных сигналов: {summary.get('single_signals_skipped', 0)}\n"
