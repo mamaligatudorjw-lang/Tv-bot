@@ -343,8 +343,11 @@ def test_relay_requires_https_token_and_fixed_bybit_path():
         base_url="https://relay.example.test",
     )
     assert ok.status_code == 200
-    assert upstream.calls[0][1] == "https://api-demo.bybit.com/v5/market/time"
-    assert upstream.calls[0][2]["params"] == [("category", "linear")]
+    assert (
+        upstream.calls[0][1]
+        == "https://api-demo.bybit.com/v5/market/time?category=linear"
+    )
+    assert "params" not in upstream.calls[0][2]
 
     not_proxy = client.get(
         "/anything?url=https://example.com",

@@ -43,14 +43,6 @@ def _forward_headers() -> dict[str, str]:
     return forwarded
 
 
-def _query_params() -> list[tuple[str, str]]:
-    return [
-        (key, value)
-        for key in request.args
-        for value in request.args.getlist(key)
-    ]
-
-
 def _is_https_request() -> bool:
     forwarded = request.headers.get("X-Forwarded-Proto")
     if forwarded:
@@ -99,11 +91,15 @@ def create_app(
         if request.content_length and request.content_length > BYBIT_RELAY_MAX_BODY_BYTES:
             return jsonify({"error": "request_too_large"}), 413
 
+        upstream_url = f"{BYBIT_RELAY_TARGET}/v5/{api_path}"
+        if request.query_string:
+            upstream_url = (
+                f"{upstream_url}?{request.query_string.decode('ascii', errors='strict')}"
+            )
         try:
             upstream = http.request(
                 request.method,
-                f"{BYBIT_RELAY_TARGET}/v5/{api_path}",
-                params=_query_params(),
+                upstream_url,
                 data=request.get_data(cache=True),
                 headers=_forward_headers(),
                 timeout=BYBIT_RELAY_TIMEOUT,

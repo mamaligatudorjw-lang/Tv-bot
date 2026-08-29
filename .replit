@@ -90,3 +90,6 @@ channel = "stable-25_05"
 
 [userenv.development]
 BOT_POLLING_DISABLED = "true"
+
+[userenv.shared]
+BYBIT_RELAY_URL = "https://sinekdemo.duckdns.org"
