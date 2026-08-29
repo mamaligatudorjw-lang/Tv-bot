@@ -54,6 +54,9 @@ via Gemini Vision and runs them through the same analysis pipeline.
 - The Gemini base URL is the Replit AI Integrations proxy; it mounts model
   endpoints **without** a `/v1beta` prefix (mirrors the SDK template's
   `apiVersion: ""`). Auth is via the `x-goog-api-key` header.
+- Bybit Demo requests may use the separately documented HTTPS relay in
+  `telegram-webhook-bot/BYBIT_RELAY.md`; never route Telegram or other bot
+  traffic through that relay.
 
 ## Pointers
 

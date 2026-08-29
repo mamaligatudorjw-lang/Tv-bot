@@ -16,7 +16,7 @@ import threading
 import time
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import requests
 
@@ -28,6 +28,8 @@ BYBIT_DEMO_NOTIONAL_USD = 50.0
 BYBIT_DEMO_RECV_WINDOW = 5_000
 BYBIT_DEMO_REQUEST_TIMEOUT = 8.0
 BYBIT_DEMO_MAX_POLL_ROWS = 25
+BYBIT_RELAY_URL_ENV = "BYBIT_RELAY_URL"
+BYBIT_RELAY_TOKEN_ENV = "BYBIT_RELAY_TOKEN"
 
 _TERMINAL_STATUSES = {"closed", "rejected"}
 _POLL_STATUSES = {
@@ -162,6 +164,9 @@ class BybitDemoClient:
         clock: Any = time.time,
         timeout: float = BYBIT_DEMO_REQUEST_TIMEOUT,
         recv_window: int = BYBIT_DEMO_RECV_WINDOW,
+        relay_url: str | None = None,
+        relay_token: str | None = None,
+        require_relay: bool = False,
     ) -> None:
         self.api_key = (api_key or "").strip()
         self.api_secret = (api_secret or "").strip()
@@ -170,17 +175,66 @@ class BybitDemoClient:
         self.clock = clock
         self.timeout = timeout
         self.recv_window = int(recv_window)
+        self.relay_url = (relay_url or "").strip().rstrip("/")
+        self.relay_token = (relay_token or "").strip()
+        self.require_relay = bool(require_relay)
+        self._configuration_error = self._validate_relay_config()
 
     @classmethod
     def from_env(cls) -> "BybitDemoClient":
         return cls(
             os.environ.get("BYBIT_DEMO_API_KEY"),
             os.environ.get("BYBIT_DEMO_API_SECRET"),
+            relay_url=os.environ.get(BYBIT_RELAY_URL_ENV),
+            relay_token=os.environ.get(BYBIT_RELAY_TOKEN_ENV),
+            require_relay=True,
         )
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key and self.api_secret)
+        return bool(self.api_key and self.api_secret and not self._configuration_error)
+
+    @property
+    def route(self) -> str:
+        if self.relay_url:
+            return "relay"
+        return "unconfigured" if self.require_relay else "direct"
+
+    @property
+    def relay_configured(self) -> bool:
+        return bool(self.relay_url and self.relay_token and not self._configuration_error)
+
+    @property
+    def configuration_error(self) -> str | None:
+        return self._configuration_error
+
+    @property
+    def disabled_reason(self) -> str:
+        if not self.api_key or not self.api_secret:
+            return "credentials_not_configured"
+        return self._configuration_error or "disabled"
+
+    def _validate_relay_config(self) -> str | None:
+        if not self.relay_url:
+            if self.relay_token:
+                return "relay_url_missing"
+            if self.require_relay:
+                return "relay_url_missing"
+            return None
+        if not self.relay_token:
+            return "relay_token_missing"
+        parsed = urlparse(self.relay_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.path not in {"", "/"}
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            return "relay_url_must_be_https_origin"
+        return None
 
     def _request(
         self,
@@ -191,8 +245,10 @@ class BybitDemoClient:
         body: dict[str, Any] | None = None,
         retry_safe: bool = False,
     ) -> dict[str, Any]:
-        if not self.enabled:
+        if not self.api_key or not self.api_secret:
             raise BybitDemoError(endpoint, "credentials_not_configured")
+        if self._configuration_error:
+            raise BybitDemoError(endpoint, self._configuration_error)
 
         method = method.upper()
         clean_params = {
@@ -222,13 +278,16 @@ class BybitDemoClient:
             "X-BAPI-SIGN-TYPE": "2",
             "Content-Type": "application/json",
         }
+        request_url = f"{self.relay_url if self.relay_url else self.base_url}{endpoint}"
+        if self.relay_url:
+            headers["X-Bybit-Relay-Token"] = self.relay_token
 
         attempts = 2 if retry_safe else 1
         for attempt in range(attempts):
             try:
                 response = self.session.request(
                     method,
-                    f"{self.base_url}{endpoint}",
+                    request_url,
                     params=clean_params if method == "GET" else None,
                     data=body_text if method != "GET" else None,
                     headers=headers,
@@ -601,7 +660,7 @@ def submit_signal(
     if not is_allowed_signal(strategy, confirmation_level):
         return {"status": "filtered", "reason": "strategy_or_confirmation"}
     if not client.enabled:
-        return {"status": "disabled", "reason": "credentials_not_configured"}
+        return {"status": "disabled", "reason": client.disabled_reason}
     if direction not in {"LONG", "SHORT"}:
         return {"status": "rejected", "reason": "invalid_direction"}
     values = (signal_price, entry_price, sl_price, tp_price, notional_usd)
@@ -1012,6 +1071,10 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
     return {
         "enabled": client.enabled,
         "configured": client.enabled,
+        "route": client.route,
+        "relay_required": client.require_relay,
+        "relay_configured": client.relay_configured,
+        "configuration_error": client.configuration_error,
         "notional_usd": BYBIT_DEMO_NOTIONAL_USD,
         "total": int(row[0] or 0),
         "unfinished": int(row[1] or 0),

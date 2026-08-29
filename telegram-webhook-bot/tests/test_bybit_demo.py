@@ -8,6 +8,7 @@ import time
 import pytest
 
 from app import _bybit_demo_signal_allowed
+from bybit_relay import create_app as create_bybit_relay_app
 from bybit_demo import (
     BybitDemoClient,
     BybitDemoSizingError,
@@ -20,9 +21,11 @@ from bybit_demo import (
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self.payload = payload
         self.status_code = status_code
+        self.headers = headers or {}
+        self.content = json.dumps(payload).encode("utf-8")
 
     def json(self):
         return self.payload
@@ -242,3 +245,133 @@ def test_recovery_never_posts_when_order_is_ambiguous_or_missing():
         "SELECT status FROM bybit_demo_positions"
     ).fetchone()[0]
     assert status in {"submitted", "unknown"}
+
+
+def test_client_uses_https_relay_and_keeps_relay_token_out_of_url():
+    session = RecordingSession()
+    client = BybitDemoClient(
+        "api-key",
+        "api-secret",
+        relay_url="https://relay.example.test",
+        relay_token="relay-secret",
+        session=session,
+        clock=lambda: 1_700_000_000,
+    )
+
+    client.get_order_realtime(symbol="BTCUSDT", order_link_id="bdabc")
+
+    method, url, kwargs = session.calls[0]
+    assert method == "GET"
+    assert url == "https://relay.example.test/v5/order/realtime"
+    assert kwargs["headers"]["X-Bybit-Relay-Token"] == "relay-secret"
+    assert "relay-secret" not in url
+
+
+def test_client_rejects_incomplete_or_insecure_relay_configuration():
+    missing_token = BybitDemoClient("key", "secret", relay_url="https://relay.example")
+    assert not missing_token.enabled
+    assert missing_token.disabled_reason == "relay_token_missing"
+
+    insecure = BybitDemoClient(
+        "key",
+        "secret",
+        relay_url="http://relay.example",
+        relay_token="token",
+    )
+    assert not insecure.enabled
+    assert insecure.disabled_reason == "relay_url_must_be_https_origin"
+
+    pathful = BybitDemoClient(
+        "key",
+        "secret",
+        relay_url="https://relay.example/prefix",
+        relay_token="token",
+    )
+    assert not pathful.enabled
+    assert pathful.disabled_reason == "relay_url_must_be_https_origin"
+
+    token_without_url = BybitDemoClient("key", "secret", relay_token="token")
+    assert not token_without_url.enabled
+    assert token_without_url.disabled_reason == "relay_url_missing"
+
+
+def test_production_client_from_env_fails_closed_without_relay(monkeypatch):
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "key")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "secret")
+    monkeypatch.delenv("BYBIT_RELAY_URL", raising=False)
+    monkeypatch.delenv("BYBIT_RELAY_TOKEN", raising=False)
+
+    client = BybitDemoClient.from_env()
+
+    assert not client.enabled
+    assert client.route == "unconfigured"
+    assert client.disabled_reason == "relay_url_missing"
+
+
+class FakeRelayUpstream:
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return FakeResponse(
+            {"retCode": 0, "result": {"timeSecond": "1700000000"}},
+            status_code=200,
+        )
+
+
+def test_relay_requires_https_token_and_fixed_bybit_path():
+    upstream = FakeRelayUpstream()
+    relay = create_bybit_relay_app(shared_token="relay-secret", session=upstream)
+    client = relay.test_client()
+
+    unauthorized = client.get(
+        "/v5/market/time",
+        base_url="https://relay.example.test",
+    )
+    assert unauthorized.status_code == 401
+
+    insecure = client.get(
+        "/v5/market/time",
+        headers={"X-Bybit-Relay-Token": "relay-secret"},
+    )
+    assert insecure.status_code == 400
+
+    ok = client.get(
+        "/v5/market/time?category=linear",
+        headers={"X-Bybit-Relay-Token": "relay-secret"},
+        base_url="https://relay.example.test",
+    )
+    assert ok.status_code == 200
+    assert upstream.calls[0][1] == "https://api-demo.bybit.com/v5/market/time"
+    assert upstream.calls[0][2]["params"] == [("category", "linear")]
+
+    not_proxy = client.get(
+        "/anything?url=https://example.com",
+        headers={"X-Bybit-Relay-Token": "relay-secret"},
+        base_url="https://relay.example.test",
+    )
+    assert not_proxy.status_code == 404
+
+
+def test_relay_strips_relay_credential_before_upstream():
+    upstream = FakeRelayUpstream()
+    relay = create_bybit_relay_app(shared_token="relay-secret", session=upstream)
+    response = relay.test_client().post(
+        "/v5/order/create",
+        headers={
+            "X-Bybit-Relay-Token": "relay-secret",
+            "X-BAPI-API-KEY": "api-key",
+            "X-BAPI-SIGN": "signature",
+            "Content-Type": "application/json",
+        },
+        data='{"category":"linear"}',
+        base_url="https://relay.example.test",
+    )
+
+    assert response.status_code == 200
+    forwarded_headers = upstream.calls[0][2]["headers"]
+    forwarded_lower = {key.lower(): value for key, value in forwarded_headers.items()}
+    assert "x-bybit-relay-token" not in forwarded_lower
+    assert forwarded_lower["x-bapi-api-key"] == "api-key"
+    assert forwarded_lower["x-bapi-sign"] == "signature"

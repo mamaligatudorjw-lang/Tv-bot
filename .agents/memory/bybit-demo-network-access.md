@@ -7,4 +7,4 @@ The current Replit runtime cannot reach Bybit Demo Trading API: `api-demo.bybit.
 
 **Why:** A live credential check can fail because of network geography even when the HMAC implementation and credentials are otherwise correct.
 
-**How to apply:** Treat this as an environment limitation, not evidence of an invalid key or a reason to retry order POSTs. Validate the first live order from a runtime/network permitted by Bybit, while keeping the bot's safe disabled/unknown behavior in blocked environments.
+**How to apply:** Treat this as an environment limitation, not evidence of an invalid key or a reason to retry order POSTs. Validate the first live order from a runtime/network permitted by Bybit, while keeping the bot's safe disabled/unknown behavior in blocked environments. The production client must fail closed unless an explicit HTTPS relay is configured; never silently fall back to direct access.
