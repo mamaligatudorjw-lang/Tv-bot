@@ -1085,9 +1085,10 @@ def _format_replay_message(row: tuple) -> str:
         .strftime("%Y-%m-%d %H:%M")
         if ts_close else "—"
     )
+    fix_warnings = _get_replay_fix_warnings(alert_type, ts_close)
     exit_text = f"${float(exit_price):,.8g}" if exit_price is not None else "—"
     strategy = html.escape(str(alert_type or "unknown"))
-    return (
+    message = (
         "🕰 <b>REPLAY — историческая сделка, не live</b>\n"
         "⚠️ Информационный разбор: позиция не открывается и не сопровождается ботом.\n"
         f"{direction_icon} <b>{scope}</b> · <code>{html.escape(str(symbol))}</code> "
@@ -1100,6 +1101,9 @@ def _format_replay_message(row: tuple) -> str:
         f"💰 P&L: <b>{pnl_sign}${pnl_value:.2f}</b>\n"
         f"🆔 Replay ID: <code>{int(position_id)}</code>"
     )
+    if fix_warnings:
+        message += "\n" + "\n".join(fix_warnings)
+    return message
 
 
 def handle_replay_command(chat_id: int) -> None:
@@ -6742,6 +6746,73 @@ EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 # Price source was fixed from the completed 4h candle close to the live ticker.
 # Marker: 2026-08-15 23:00 Europe/Chisinau = 2026-08-15 20:00 UTC.
 EMA_CROSS_PRICE_FIX_TS: int = 1786912858
+
+# These are historical, strategy-specific mechanics fixes.  They are
+# intentionally kept separate from the replay query: an old profitable row
+# remains eligible for delivery, but its message explains when its mechanics
+# differed from today's implementation.  Unknown strategies stay unlabelled.
+#
+# Timestamps are the first known effective moment of the fix, in UTC.  Only
+# fixes with an explicit timestamp and a direct strategy mapping belong here.
+REPLAY_STRATEGY_FIXES: dict[str, tuple[tuple[int, str], ...]] = {
+    "oversold_24h": (
+        (
+            1786738899,  # 2026-08-14 20:21:39 UTC
+            "TP LONG 5% и R:R 2:1 вместо старых 4% и 1.6:1",
+        ),
+        (
+            OVERSOLD_SL_CAP_SINCE,
+            "ограничение ATR-SL до 8%",
+        ),
+    ),
+    "vwap_reversion": (
+        (
+            1786741180,  # 2026-08-14 20:59:40 UTC
+            "целевой R:R 2:1 вместо ошибочного 1.6:1",
+        ),
+    ),
+    "pump_fade_confirmed": (
+        (
+            1786773650,  # 2026-08-15 06:00:50 UTC
+            "проверка последней завершённой 15m свечи без текущей live-свечи",
+        ),
+    ),
+    "ema_cross": (
+        (
+            EMA_CROSS_PRICE_FIX_TS,
+            "цена входа из live ticker вместо close завершённой 4h-свечи",
+        ),
+    ),
+    "ema_cross_confirmed": (
+        (
+            EMA_CROSS_PRICE_FIX_TS,
+            "цена входа из live ticker вместо close завершённой 4h-свечи",
+        ),
+    ),
+}
+
+
+def _get_replay_fix_warnings(alert_type: object, ts_close: object) -> list[str]:
+    """Return informational warnings for a row closed before known fixes."""
+    if not alert_type or ts_close is None:
+        return []
+    try:
+        close_ts = float(ts_close)
+    except (TypeError, ValueError):
+        return []
+
+    warnings: list[str] = []
+    for fix_ts, description in REPLAY_STRATEGY_FIXES.get(str(alert_type), ()):
+        if close_ts < fix_ts:
+            fix_date = datetime.fromtimestamp(
+                fix_ts, ZoneInfo("Europe/Chisinau")
+            ).strftime("%d.%m.%Y %H:%M")
+            warnings.append(
+                "⚠️ Сделка предшествует фиксу "
+                f"«{html.escape(description)}» ({fix_date}) — "
+                "R:R/логика могли отличаться от текущей"
+            )
+    return warnings
 
 # --- High Rejection SHORT shadow ---
 # Entry: coin surged intraday (range >= 20%), now rejecting from the 24h high (price >= 3% below).

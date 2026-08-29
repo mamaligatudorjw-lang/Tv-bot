@@ -85,6 +85,20 @@ def _insert_position(
     conn.commit()
 
 
+def _fetch_position_row(conn, symbol):
+    return conn.execute(
+        """
+        SELECT
+            id, ts_open, symbol, direction, entry_price, sl_price, tp_price,
+            status, ts_close, exit_price, pnl_usd, is_shadow, alert_type,
+            exit_method
+        FROM demo_positions
+        WHERE symbol = ?
+        """,
+        (symbol,),
+    ).fetchone()
+
+
 def _run_status(monkeypatch, conn, chat_id):
     sent = []
     monkeypatch.setattr(app, "_get_db", lambda: conn)
@@ -320,4 +334,89 @@ def test_replay_batches_without_daily_cap(monkeypatch):
         "WHERE chat_id=789 AND delivered=1"
     ).fetchone() == (31,)
     assert any("Backlog пуст." in text for text in sent)
+    conn.close()
+
+
+def test_replay_marks_trade_closed_before_strategy_fix(monkeypatch):
+    conn = _replay_db()
+    first_fix_ts = app.REPLAY_STRATEGY_FIXES["oversold_24h"][0][0]
+    _insert_position(
+        conn,
+        symbol="OLDOSUSDT",
+        status="tp",
+        pnl_usd=1.0,
+        alert_type="oversold_24h",
+        ts_open=first_fix_ts + 100,
+        ts_close=first_fix_ts - 1,
+    )
+
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    message = app._format_replay_message(_fetch_position_row(conn, "OLDOSUSDT"))
+
+    assert "Сделка предшествует фиксу" in message
+    assert "TP LONG 5%" in message
+    assert "R:R/логика могли отличаться от текущей" in message
+    conn.close()
+
+
+def test_replay_does_not_mark_trade_closed_after_all_strategy_fixes(monkeypatch):
+    conn = _replay_db()
+    latest_fix_ts = max(
+        fix_ts for fix_ts, _description in app.REPLAY_STRATEGY_FIXES["oversold_24h"]
+    )
+    _insert_position(
+        conn,
+        symbol="NEWOSUSDT",
+        status="tp",
+        pnl_usd=1.0,
+        alert_type="oversold_24h",
+        ts_open=latest_fix_ts - 100,
+        ts_close=latest_fix_ts + 1,
+    )
+
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    message = app._format_replay_message(_fetch_position_row(conn, "NEWOSUSDT"))
+
+    assert "Сделка предшествует фиксу" not in message
+    conn.close()
+
+
+def test_replay_unknown_strategy_has_no_fix_warning(monkeypatch):
+    conn = _replay_db()
+    _insert_position(
+        conn,
+        symbol="UNKNOWNUSDT",
+        status="tp",
+        pnl_usd=1.0,
+        alert_type="strategy_not_in_fix_registry",
+        ts_close=1,
+    )
+
+    message = app._format_replay_message(
+        _fetch_position_row(conn, "UNKNOWNUSDT")
+    )
+
+    assert "Сделка предшествует фиксу" not in message
+    conn.close()
+
+
+def test_replay_fix_warning_uses_close_timestamp_not_open_timestamp(monkeypatch):
+    conn = _replay_db()
+    first_fix_ts = app.REPLAY_STRATEGY_FIXES["ema_cross"][0][0]
+    _insert_position(
+        conn,
+        symbol="CLOSETIMEUSDT",
+        status="tp",
+        pnl_usd=1.0,
+        alert_type="ema_cross",
+        ts_open=first_fix_ts + 100,
+        ts_close=first_fix_ts - 1,
+    )
+
+    message = app._format_replay_message(
+        _fetch_position_row(conn, "CLOSETIMEUSDT")
+    )
+
+    assert "Сделка предшествует фиксу" in message
+    assert "live ticker" in message
     conn.close()
