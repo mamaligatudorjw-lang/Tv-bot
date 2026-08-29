@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from trend_regime_analysis import fetch_btc_history, regime_at_signal
 from trailing_stop_analysis import price_r
 
 
@@ -134,9 +133,27 @@ def load_resolved(
     return rows
 
 
+def load_regime_snapshot(path: Path) -> dict[str, dict[str, str]]:
+    """Load the existing lookahead-safe regime snapshot, keyed by signal ID."""
+    snapshot: dict[str, dict[str, str]] = {}
+    for row in read_csv(path):
+        signal_id = str(row.get("id", ""))
+        if not signal_id:
+            raise ValueError(f"Regime snapshot row has no id: {row!r}")
+        if signal_id in snapshot:
+            raise ValueError(f"Duplicate id in regime snapshot: {signal_id}")
+        regime = row.get("trend_regime", "")
+        if regime not in REGIMES:
+            raise ValueError(
+                f"Invalid trend_regime for id={signal_id}: {regime!r}"
+            )
+        snapshot[signal_id] = row
+    return snapshot
+
+
 def annotate_rows(
     positions: Sequence[dict[str, Any]],
-    btc_candles: Sequence[dict[str, Any]],
+    regime_snapshot: dict[str, dict[str, str]],
 ) -> list[dict[str, Any]]:
     annotated: list[dict[str, Any]] = []
     for source in positions:
@@ -146,10 +163,25 @@ def annotate_rows(
         tp = _as_float(row["tp_price"], "tp_price")
         exit_price = _as_float(row["exit_price"], "exit_price")
         level = infer_level(entry, sl, tp)
-        regime = regime_at_signal(
-            btc_candles,
-            _as_int(row["ts_open"], "ts_open"),
-        )
+        snapshot_row = regime_snapshot.get(str(row["id"]))
+        if snapshot_row is None:
+            regime = {
+                "trend_regime": "unknown",
+                "regime_reason": "snapshot_missing",
+                "btc_candle_ts": "",
+                "btc_close": "",
+                "btc_ema50": "",
+            }
+        else:
+            regime = {
+                "trend_regime": snapshot_row["trend_regime"],
+                "regime_reason": snapshot_row.get(
+                    "regime_reason", "snapshot_join"
+                ),
+                "btc_candle_ts": snapshot_row.get("btc_candle_ts", ""),
+                "btc_close": snapshot_row.get("btc_close", ""),
+                "btc_ema50": snapshot_row.get("btc_ema50", ""),
+            }
         result_r = price_r(str(row["direction"]), entry, sl, exit_price)
         if not math.isfinite(result_r):
             raise ValueError(f"Non-finite result R for id={row['id']}")
@@ -420,7 +452,7 @@ def write_markdown(
         "",
         f"- Resolved rows: `{report['coverage']['resolved_rows']}`.",
         f"- Strategies: `{', '.join(TARGET_STRATEGIES)}`.",
-        f"- Regime coverage: `{report['coverage']['regime_rows_missing']}` rows missing regime data; missing rows remain `unknown`.",
+        f"- Regime coverage: `{report['coverage']['regime_snapshot_missing_rows']}` of `{report['coverage']['resolved_rows']}` rows were absent from the existing snapshot and remain `unknown`.",
         f"- Minimum cohort size: `{report['config']['minimum_group_n']}`; smaller cells are **insufficient**.",
         "",
         "## Blended vs level-split cohorts",
@@ -513,27 +545,22 @@ def run_analysis(
     output_dir: Path,
     *,
     minimum_n: int = MIN_GROUP_N,
+    regime_snapshot_path: Path | None = None,
 ) -> dict[str, Any]:
     if minimum_n <= 0:
         raise ValueError("minimum_n must be positive")
     positions = load_resolved(db_path)
     if not positions:
         raise ValueError("No resolved confirmed-strategy positions found")
-
-    try:
-        btc_candles, btc_info = fetch_btc_history(positions)
-    except Exception as exc:
-        btc_candles = []
-        btc_info = {
-            "status": "fetch_failed",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
-    annotated = annotate_rows(positions, btc_candles)
+    snapshot_path = regime_snapshot_path or (
+        Path(__file__).with_name("trend_regime_analysis")
+        / "signal_regimes.csv"
+    )
+    regime_snapshot = load_regime_snapshot(snapshot_path)
+    annotated = annotate_rows(positions, regime_snapshot)
     cohort_rows = build_cohort_rows(annotated, minimum_n=minimum_n)
     hypotheses = build_strategy_hypotheses(cohort_rows, minimum_n=minimum_n)
-    missing_regime = sum(
-        row["regime_reason"] != "close_vs_ema50" for row in annotated
-    )
+    missing_regime = sum(row["regime_reason"] == "snapshot_missing" for row in annotated)
     coverage = {
         "resolved_rows": len(annotated),
         "resolved_by_strategy": dict(
@@ -552,8 +579,9 @@ def run_analysis(
         "regime_reason_counts": dict(
             Counter(row["regime_reason"] for row in annotated)
         ),
-        "regime_rows_missing": missing_regime,
-        "btc_fetch": btc_info,
+        "regime_snapshot_path": str(snapshot_path),
+        "regime_snapshot_rows": len(regime_snapshot),
+        "regime_snapshot_missing_rows": missing_regime,
         "analysis_run_utc": datetime.now(timezone.utc).isoformat(),
     }
     report = {
@@ -570,7 +598,10 @@ def run_analysis(
                 }
                 for level in LEVELS
             ],
-            "regime_source": "lookahead-safe BTC 4h close vs EMA50",
+            "regime_source": (
+                "existing trend_regime_analysis/signal_regimes.csv "
+                "lookahead-safe snapshot joined by signal id"
+            ),
             "minimum_group_n": minimum_n,
             "read_only": True,
             "production_changes": False,
@@ -587,6 +618,7 @@ def run_analysis(
         "symbol",
         "direction",
         "strategy",
+        "alert_type",
         "is_shadow",
         "status",
         "ts_close",
@@ -673,7 +705,9 @@ def main() -> int:
             {
                 "output": str(args.out),
                 "resolved_rows": report["coverage"]["resolved_rows"],
-                "regime_rows_missing": report["coverage"]["regime_rows_missing"],
+                "regime_snapshot_missing_rows": report["coverage"][
+                    "regime_snapshot_missing_rows"
+                ],
                 "hypotheses": report["hypotheses"],
             },
             indent=2,

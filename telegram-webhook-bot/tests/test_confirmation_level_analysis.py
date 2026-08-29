@@ -1,12 +1,9 @@
-import csv
-import json
 import sqlite3
-from pathlib import Path
 
 import pytest
 
 from confirmation_level_analysis import (
-    LEVELS,
+    annotate_rows,
     build_cohort_rows,
     infer_level,
     load_resolved,
@@ -28,6 +25,27 @@ def test_infer_level_uses_the_persisted_tp_sl_ratio(ratio, level, breakeven):
 def test_infer_level_rejects_a_ratio_outside_the_ladder():
     with pytest.raises(ValueError, match="does not match confirmation ladder"):
         infer_level(100.0, 90.0, 117.0)
+
+
+def test_missing_regime_snapshot_row_is_explicitly_unknown():
+    positions = [
+        {
+            "id": 42,
+            "ts_open": 100,
+            "entry_price": 100.0,
+            "sl_price": 90.0,
+            "tp_price": 120.0,
+            "exit_price": 120.0,
+            "direction": "LONG",
+            "status": "tp",
+            "alert_type": "overheated_confirmed",
+        }
+    ]
+
+    result = annotate_rows(positions, {})
+
+    assert result[0]["trend_regime"] == "unknown"
+    assert result[0]["regime_reason"] == "snapshot_missing"
 
 
 def _annotated(strategy, direction, regime, level, status, result_r):
@@ -75,6 +93,23 @@ def test_cohort_report_keeps_empty_cells_and_calculates_breakeven_delta():
     assert level_1["sample_status"] == "ready"
     assert level_3_empty["n"] == 0
     assert level_3_empty["sample_status"] == "insufficient"
+    blended = next(
+        row
+        for row in report
+        if row["sample"] == "blended"
+        and row["strategy"] == "overheated_confirmed"
+        and row["direction"] == "LONG"
+        and row["regime"] == "bull"
+    )
+    level_sum = sum(
+        row["n"]
+        for row in report
+        if row["sample"] == "confirmation_level"
+        and row["strategy"] == "overheated_confirmed"
+        and row["direction"] == "LONG"
+        and row["regime"] == "bull"
+    )
+    assert blended["n"] == level_sum == 3
 
 
 def test_load_resolved_is_read_only(tmp_path):

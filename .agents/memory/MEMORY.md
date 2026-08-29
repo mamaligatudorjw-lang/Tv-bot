@@ -13,3 +13,4 @@
 - [Telegram notification allowlist](telegram-notification-allowlist.md) — delivery is filtered independently; signal, demo, shadow, and forward telemetry must keep running.
 - [Directional cohort reporting](directional-cohort-reporting.md) — always show LONG and SHORT; missing direction is insufficient data, never an omitted cohort.
 - [Partial TP candle boundaries](partial-tp-candle-boundaries.md) — frozen intrabar TP events must not reuse that candle’s OHLC for trailing updates.
+- [Frozen regime snapshot joins](frozen-regime-snapshot-joins.md) — cohort analyses must join the existing regime snapshot by signal ID; missing IDs stay explicit unknown.
