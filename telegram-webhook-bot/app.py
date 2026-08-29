@@ -1039,7 +1039,8 @@ def _record_telegram_delivery(
 
 
 _replay_send_lock = threading.Lock()
-REPLAY_SEND_DELAY_SEC = 0.05
+REPLAY_BATCH_SIZE = 25
+REPLAY_SEND_DELAY_SEC = 1.0
 
 
 def _format_replay_message(row: tuple) -> str:
@@ -1135,11 +1136,12 @@ def handle_replay_command(chat_id: int) -> None:
                             AND rd.delivered = 1
                       )
                     ORDER BY dp.ts_close ASC, dp.id ASC
+                    LIMIT ?
                     """,
-                    (int(chat_id),),
+                    (int(chat_id), REPLAY_BATCH_SIZE),
                 ).fetchall()
 
-            for row in rows:
+            for row_index, row in enumerate(rows):
                 message = _format_replay_message(row)
                 delivered = _telegram_send(chat_id, message)
                 if delivered:
@@ -1166,7 +1168,7 @@ def handle_replay_command(chat_id: int) -> None:
                         failed_count += 1
                 else:
                     failed_count += 1
-                if REPLAY_SEND_DELAY_SEC > 0:
+                if row_index + 1 < len(rows) and REPLAY_SEND_DELAY_SEC > 0:
                     time.sleep(REPLAY_SEND_DELAY_SEC)
     except Exception as exc:
         logger.exception("handle_replay_command failed: %s", exc)
@@ -1179,15 +1181,26 @@ def handle_replay_command(chat_id: int) -> None:
             "🕰 <b>REPLAY</b>\nНет новых исторически прибыльных закрытых сделок.",
         )
         return
+    remaining_count, _ = _get_replay_status_snapshot(chat_id)
     summary = (
         "🕰 <b>REPLAY завершён</b>\n"
-        f"Отправлено исторических сделок: <b>{sent_count}</b>."
+        f"Отправлено исторических сделок: <b>{sent_count}</b>.\n"
+        f"Порция: максимум {REPLAY_BATCH_SIZE} сообщений."
     )
     if failed_count:
         summary += (
             f"\nНе доставлено: <b>{failed_count}</b> — повторная команда "
             "попробует их снова."
         )
+    if remaining_count is None:
+        summary += "\nОстаток backlog: временно недоступен."
+    elif remaining_count:
+        summary += (
+            f"\nОсталось в backlog: <b>{remaining_count}</b>. "
+            "Для следующей порции снова отправьте /replay."
+        )
+    else:
+        summary += "\nBacklog пуст."
     _telegram_send(chat_id, summary)
 
 

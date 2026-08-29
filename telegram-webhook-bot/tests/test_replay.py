@@ -278,7 +278,7 @@ def test_replay_picks_up_new_profitable_closures_after_backlog(monkeypatch):
     conn.close()
 
 
-def test_replay_has_no_daily_cap(monkeypatch):
+def test_replay_batches_without_daily_cap(monkeypatch):
     conn = _replay_db()
     for index in range(31):
         _insert_position(
@@ -302,9 +302,22 @@ def test_replay_has_no_daily_cap(monkeypatch):
 
     assert len([
         text for text in sent if "REPLAY — историческая сделка, не live" in text
-    ]) == 31
+    ]) == 25
+    assert conn.execute(
+        "SELECT COUNT(*) FROM telegram_replay_delivery_log "
+        "WHERE chat_id=789 AND delivered=1"
+    ).fetchone() == (25,)
+    assert any("Осталось в backlog: <b>6</b>" in text for text in sent)
+
+    sent.clear()
+    app.handle_replay_command(789)
+
+    assert len([
+        text for text in sent if "REPLAY — историческая сделка, не live" in text
+    ]) == 6
     assert conn.execute(
         "SELECT COUNT(*) FROM telegram_replay_delivery_log "
         "WHERE chat_id=789 AND delivered=1"
     ).fetchone() == (31,)
+    assert any("Backlog пуст." in text for text in sent)
     conn.close()
