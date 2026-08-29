@@ -34,3 +34,24 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/analysis.md"
 type = "text"
 title = "#150 analysis.md"
 description = "Markdown-отчёт #150 с методикой, cohort counts, Σ/WR/avg R, всеми trailing steps и ограничениями in-sample."
+
+[[outputs]]
+id = "DhbGHXZLwCTVlkrTYnp1B"
+uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_bootstrap.json"
+type = "unspecified"
+title = "WR35 paired bootstrap JSON"
+description = "Полный 95% percentile paired-bootstrap CI по ΔavgR для всех 7 trailing steps обеих стратегий; ресемплинг по уникальному signal ID."
+
+[[outputs]]
+id = "FTb-fyOqYiPJ1Q4s5oOZc"
+uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_bootstrap.md"
+type = "text"
+title = "WR35 paired bootstrap Markdown"
+description = "Читаемый отчёт с CI по всем 14 комбинациям и консервативным сравнением выбранных шагов с соседними."
+
+[[outputs]]
+id = "gGoDIODsRxgIWnZFrKP-v"
+uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_bootstrap.csv"
+type = "table"
+title = "WR35 paired bootstrap CSV"
+description = "Табличный экспорт всех bootstrap-метрик для дальнейшей проверки."
