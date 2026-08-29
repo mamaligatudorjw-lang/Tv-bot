@@ -16,3 +16,4 @@
 - [Frozen regime snapshot joins](frozen-regime-snapshot-joins.md) — cohort analyses must join the existing regime snapshot by signal ID; missing IDs stay explicit unknown.
 - [Split-exit fee accounting](split-exit-fee-accounting.md) — proportional fees do not increase when one exit is split; incremental second-leg sensitivity must be labeled separately.
 - [Replay mechanics warnings](replay-mechanics-warnings.md) — pre-fix replay labels use explicit strategy mappings and the close timestamp without changing backlog eligibility.
+- [Bybit Demo network access](bybit-demo-network-access.md) — the current Replit runtime receives CloudFront HTTP 403 country blocking from api-demo.bybit.com.
