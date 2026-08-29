@@ -348,16 +348,20 @@ def _display(value: Any, *, percent: bool = False) -> str:
     return f"{float(value):.2f}%" if percent else f"{float(value):.4f}"
 
 
-def _summary_table(rows: Sequence[dict[str, Any]]) -> list[str]:
+def _summary_table(
+    rows: Sequence[dict[str, Any]],
+    *,
+    minimum_n: int,
+) -> list[str]:
     lines = [
-        "| Strategy | Direction | Regime | n | TP | SL | Admin | Other | WR (TP/(TP+SL)) | avg R | Sample |",
-        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Strategy | Direction | Regime | n | TP | SL | Admin | Other | TP share | SL share | Admin share | Other share | WR (TP/(TP+SL)) | avg R | Sample |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         status = (
             "ready"
             if row["sample_status"] == "ready"
-            else f"INSUFFICIENT (<{MIN_GROUP_N}; n={row['n']})"
+            else f"INSUFFICIENT (<{minimum_n}; n={row['n']})"
         )
         lines.append(
             "| "
@@ -371,6 +375,10 @@ def _summary_table(rows: Sequence[dict[str, Any]]) -> list[str]:
                     str(row["sl_n"]),
                     str(row["admin_n"]),
                     str(row["other_n"]),
+                    _display(row["tp_share_pct"], percent=True),
+                    _display(row["sl_share_pct"], percent=True),
+                    _display(row["admin_share_pct"], percent=True),
+                    _display(row["other_share_pct"], percent=True),
                     _display(row["wr_pct"], percent=True),
                     _display(row["avg_r"]),
                     status,
@@ -498,11 +506,11 @@ def write_report(
         "",
         "## Overall by direction and regime",
         "",
-        *_summary_table(overall),
+        *_summary_table(overall, minimum_n=minimum_n),
         "",
         "## By strategy, direction and regime",
         "",
-        *_summary_table(strategy_rows),
+        *_summary_table(strategy_rows, minimum_n=minimum_n),
         "",
         "## Guardrails",
         "",
