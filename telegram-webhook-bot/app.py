@@ -1956,6 +1956,7 @@ def _demo_open_position(
     repeat_num: int | None = None,
     rsi_at_signal: float | None = None,
     signal_price: float | None = None,
+    confirmation_level: str | None = None,
 ) -> None:
     """Insert a paper-trading position row. score>=TOP_SIGNAL_SCORE marks
     a real position as TOP for the /demo three-way comparison.
@@ -2168,6 +2169,11 @@ def _demo_open_position(
                     _shadow_body = _append_btc_regime_enrichment(
                         _shadow_body, alert_type, direction
                     )
+                    _risk_warning = _get_alert_risk_warning(
+                        alert_type, confirmation_level
+                    )
+                    if _risk_warning:
+                        _shadow_body = f"{_shadow_body}\n{_risk_warning}"
                     if not _cycle_side_effect_allowed("telegram_shadow", symbol=symbol):
                         return
                     _delivery_ok = _telegram_send(
@@ -2388,6 +2394,14 @@ CONT_CONFIRMED_MAX_REPEATS  = 3          # max confirmations per entry (ladder)
 CONT_CONFIRMED_REPEAT_PCT   = 5.0        # min % move from last confirm for next confirm
 # TP multipliers per confirmation step: 1st=2.0×SL, 2nd=1.5×SL, 3rd=1.0×SL
 CONT_CONFIRMED_TP_MULTS     = [2.0, 1.5, 1.0]
+# Explicit informational warnings for historical cohorts that still need
+# independent forward confirmation. Other strategies/cohorts stay unlabelled.
+TELEGRAM_ALERT_RISK_WARNINGS: dict[tuple[str, str], str] = {
+    ("overheated_confirmed", "2/3"):
+        "⚠️ 2/3: в истории убыточно, forward не подтверждён (#93)",
+    ("overheated_confirmed", "3/3"):
+        "⚠️ 3/3: в истории убыточно, forward не подтверждён (#93)",
+}
 # TTL expiries and confirmations are tracked as demo_positions rows with
 # shadow_reason='pump_fade_ttl_expired' / no special reason respectively, so
 # stats survive bot restarts and are visible via plain SQL queries.
@@ -5319,6 +5333,18 @@ def _append_btc_regime_enrichment(
             "📊 Исторический WR: <b>Н/Д</b> — контекст недоступен\n"
             "📈 Тренд WR: <b>Н/Д</b> — контекст недоступен"
         )
+
+
+def _get_alert_risk_warning(
+    alert_type: str | None, confirmation_level: str | None
+) -> str:
+    """Return an explicitly configured informational cohort warning."""
+    if not alert_type or not confirmation_level:
+        return ""
+    return TELEGRAM_ALERT_RISK_WARNINGS.get(
+        (str(alert_type), str(confirmation_level)),
+        "",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -11579,10 +11605,6 @@ def check_cont_confirmed() -> int:
                 f"🟢 TP: <b>${_conf_tp:,.6g}</b>  │  🔴 SL: <b>${_conf_sl:,.6g}</b>"
                 f"  (TP {tp_mult:.1f}×SL)"
             )
-            _conf_conflict = _conflict_direction_line(symbol, direction)
-            if _conf_conflict:
-                _conf_body += f"\n{_conf_conflict}"
-
             # ── Remove or update pending state ────────────────────────────
             if is_last:
                 # Final confirmation — remove from pending entirely
@@ -11626,6 +11648,9 @@ def check_cont_confirmed() -> int:
                 is_shadow=True,
                 alert_type=conf_atype,
                 signal_price=signal_price,
+                confirmation_level=(
+                    f"{confirm_num_new}/{CONT_CONFIRMED_MAX_REPEATS}"
+                ),
                 notify_body=_conf_body,
             )
 

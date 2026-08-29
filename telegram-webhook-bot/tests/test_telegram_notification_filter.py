@@ -3,6 +3,23 @@ import sqlite3
 import app
 
 
+def _shadow_demo_db():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE demo_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts_open INTEGER, symbol TEXT, direction TEXT,
+            entry_price REAL, sl_price REAL, tp_price REAL,
+            size_usd REAL, status TEXT, is_shadow INTEGER,
+            shadow_reason TEXT, alert_type TEXT, is_top INTEGER,
+            repeat_num INTEGER, rsi_at_signal REAL, signal_price REAL
+        )
+        """
+    )
+    return conn
+
+
 def _alerts_db():
     conn = sqlite3.connect(":memory:")
     conn.execute(
@@ -227,4 +244,114 @@ def test_shadow_ema_cross_alert_includes_all_context_blocks(monkeypatch):
         assert "📚 BTC 4h: <b>BULL</b>" in text
         assert "📊 История" in text
         assert "📈 Тренд WR: 40.0% → 60.0%" in text
+    conn.close()
+
+
+
+def test_risk_warning_table_only_matches_configured_confirmed_cohorts():
+    assert app._get_alert_risk_warning(
+        "overheated_confirmed", "2/3"
+    ) == "⚠️ 2/3: в истории убыточно, forward не подтверждён (#93)"
+    assert app._get_alert_risk_warning(
+        "overheated_confirmed", "3/3"
+    ) == "⚠️ 3/3: в истории убыточно, forward не подтверждён (#93)"
+    assert app._get_alert_risk_warning("overheated_confirmed", "1/3") == ""
+    assert app._get_alert_risk_warning("ema_cross_confirmed", "2/3") == ""
+    assert app._get_alert_risk_warning("overheated_confirmed", None) == ""
+
+
+def test_risk_warning_is_informational_and_conflict_line_is_not_duplicated(
+    monkeypatch,
+):
+    conn = _shadow_demo_db()
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    monkeypatch.setattr(
+        app, "_cycle_side_effect_allowed", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        app, "TELEGRAM_NOTIFICATION_STRATEGIES", {"overheated_confirmed"}
+    )
+    monkeypatch.setattr(app, "create_tracker", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        app,
+        "track_forward_tp_vs_sl_position",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(app, "_append_btc_regime_enrichment", lambda body, *_: body)
+    monkeypatch.setattr(
+        app,
+        "_conflict_direction_line",
+        lambda *_args: "⚠️ 1ч назад был <b>SHORT</b> (ema_cross) по этой монете",
+    )
+    sent = []
+    monkeypatch.setattr(
+        app,
+        "_telegram_send",
+        lambda _chat_id, text, **_kwargs: sent.append(text) or True,
+    )
+
+    app._demo_open_position(
+        "RISKUSDT",
+        "LONG",
+        100.0,
+        97.0,
+        106.0,
+        is_shadow=True,
+        alert_type="overheated_confirmed",
+        confirmation_level="2/3",
+        notify_body="обычный текст сигнала",
+    )
+
+    assert len(sent) == 1
+    text = sent[0]
+    assert text.startswith("🔬 SHADOW — не реальная позиция\n")
+    assert "обычный текст сигнала" in text
+    assert "⚠️ 2/3: в истории убыточно, forward не подтверждён (#93)" in text
+    assert text.count("был <b>SHORT</b>") == 1
+    assert conn.execute(
+        "SELECT alert_type, status FROM demo_positions"
+    ).fetchone() == ("overheated_confirmed", "open")
+    conn.close()
+
+
+def test_unconfigured_cohort_keeps_ordinary_shadow_format(monkeypatch):
+    conn = _shadow_demo_db()
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    monkeypatch.setattr(
+        app, "_cycle_side_effect_allowed", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        app, "TELEGRAM_NOTIFICATION_STRATEGIES", {"ema_cross_confirmed"}
+    )
+    monkeypatch.setattr(app, "create_tracker", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        app,
+        "track_forward_tp_vs_sl_position",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        app, "_append_btc_regime_enrichment", lambda body, *_: body
+    )
+    monkeypatch.setattr(app, "_conflict_direction_line", lambda *_args: "")
+    sent = []
+    monkeypatch.setattr(
+        app,
+        "_telegram_send",
+        lambda _chat_id, text, **_kwargs: sent.append(text) or True,
+    )
+
+    app._demo_open_position(
+        "NORMALUSDT",
+        "LONG",
+        100.0,
+        97.0,
+        106.0,
+        is_shadow=True,
+        alert_type="ema_cross_confirmed",
+        confirmation_level="2/3",
+        notify_body="обычный формат",
+    )
+
+    assert sent == ["🔬 SHADOW — не реальная позиция\nобычный формат"]
+    assert "в истории убыточно" not in sent[0]
     conn.close()
