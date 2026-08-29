@@ -1,0 +1,54 @@
+Выполнено.
+
+Что добавлено:
+
+- Новый read-only CLI: `telegram-webhook-bot/confirmation_level_analysis.py`
+- Тесты: `telegram-webhook-bot/tests/test_confirmation_level_analysis.py`
+- Отчёты в `telegram-webhook-bot/outcome_confirmation_level_analysis/`:
+  - `resolved_level_audit.csv`
+  - `cohort_summary.csv`
+  - `hypothesis_summary.csv`
+  - `report.json`
+  - `report.md`
+
+Методика:
+
+- В анализ включены только `tp/sl` resolved-позиции.
+- Confirmation level восстановлен по persisted TP/SL ratio:
+  - `1/3` → `2.0:1`, breakeven WR `33.33%`
+  - `2/3` → `1.5:1`, breakeven WR `40%`
+  - `3/3` → `1.0:1`, breakeven WR `50%`
+- Использован существующий lookahead-safe `trend_regime_analysis/signal_regimes.csv`.
+- Snapshot присоединён по signal ID.
+- 83 отсутствующих ID явно сохранены как `unknown`; они не исключались.
+- Добавлены blended-когорты и level-split когорты по `strategy × direction × regime`.
+- Все ячейки с `n < 20` отмечены как `insufficient`.
+- SQLite, production-логика, гейты, alert format и forward-логика не изменялись.
+
+Основные результаты:
+
+| Стратегия | Уровень | n | avg R | WR − BE |
+|---|---:|---:|---:|---:|
+| `overheated_confirmed` | blended | 273 | — | — |
+|  | `1/3` | 247 | `+0.2638` | `+8.37 pp` |
+|  | `2/3` | 20 | `-0.4190` | `-15.00 pp` |
+|  | `3/3` | 6 | `-0.3885` | `-16.67 pp` |
+| `ema_cross_confirmed` | blended | 175 | — | — |
+|  | `1/3` | 170 | `+0.4549` | `+15.49 pp` |
+|  | `2/3` | 1 | `+1.6756` | `+60.00 pp` |
+|  | `3/3` | 4 | `-0.5000` | `-25.00 pp` |
+
+Вывод по гипотезе поздних уровней:
+
+- `overheated_confirmed`: `partial_support` — уровень `2/3` уже имеет достаточную выборку и отрицательный результат; `3/3` пока недостаточен по объёму.
+- `ema_cross_confirmed`: `insufficient` — оба поздних уровня имеют слишком мало сделок для вывода.
+
+Проверки:
+
+- Полный pytest: `82 passed`
+- Audit: 448 строк
+- Cohort summary: 48 строк
+- Суммы level-split совпадают с blended-когортами
+- Уровни распределились как `1/3: 417`, `2/3: 21`, `3/3: 10`
+- Regime coverage: 365 строк из snapshot, 83 explicit `unknown`
+- SQLite осталась неизменной

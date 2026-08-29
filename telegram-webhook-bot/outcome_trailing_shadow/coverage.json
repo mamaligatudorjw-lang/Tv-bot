@@ -4,19 +4,19 @@
   "bootstrap_seed": 20260826,
   "by_strategy": {
     "ema_cross_confirmed": {
-      "n_pairs": 27,
+      "n_pairs": 28,
       "ready_for_bootstrap": true
     },
     "overheated_24h": {
-      "n_pairs": 65,
+      "n_pairs": 66,
       "ready_for_bootstrap": true
     }
   },
   "freeze_utc": "2026-08-26T11:50:58+00:00",
-  "generated_utc": "2026-08-29T12:54:30.688595+00:00",
+  "generated_utc": "2026-08-29T13:32:46.196105+00:00",
   "historical_candles_used": false,
   "minimum_forward_pairs_per_strategy": 20,
   "rolling_update": true,
   "source": "live_price_snapshots_from_check_demo_positions",
-  "total_resolved_pairs": 92
+  "total_resolved_pairs": 94
 }
