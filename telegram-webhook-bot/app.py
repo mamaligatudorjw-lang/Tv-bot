@@ -30,6 +30,13 @@ from forward_tp_vs_sl import (
     track_position as track_forward_tp_vs_sl_position,
     write_report as write_forward_tp_vs_sl_report,
 )
+from bybit_demo import (
+    BybitDemoClient,
+    initialize_schema as initialize_bybit_demo_schema,
+    poll_positions as poll_bybit_demo_positions,
+    status_snapshot as bybit_demo_status_snapshot,
+    submit_signal as submit_bybit_demo_signal,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -2151,6 +2158,20 @@ def _validate_demo_price_basis(
         )
 
 
+def _bybit_demo_signal_allowed(
+    is_shadow: bool,
+    alert_type: str | None,
+    confirmation_level: str | None,
+) -> bool:
+    """Allow only the explicitly approved Bybit Demo signal variants."""
+    if alert_type == "overheated_24h":
+        return not is_shadow
+    return (
+        alert_type in {"overheated_confirmed", "ema_cross_confirmed"}
+        and confirmation_level == "1/3"
+    )
+
+
 def _demo_open_position(
     symbol: str,
     direction: str,
@@ -2317,6 +2338,56 @@ def _demo_open_position(
                     "TP-vs-SL forward tracker open failed source_id=%d: %s",
                     _new_demo_id,
                     _forward_exc,
+                )
+        # Bybit Demo is a separate execution experiment.  It intentionally
+        # does not mirror every paper/shadow row:
+        #   * overheated_24h: only the accepted non-shadow signal
+        #   * continuation strategies: only the first confirmation (1/3)
+        # Check cycle ownership immediately before the external side effect so
+        # an abandoned polling worker cannot place a late order.
+        _bybit_allowed = _bybit_demo_signal_allowed(
+            is_shadow, alert_type, confirmation_level
+        )
+        if _bybit_allowed and _cycle_side_effect_allowed(
+            "bybit_demo_order", symbol=symbol
+        ):
+            try:
+                with _db_lock:
+                    _bybit_conn = _get_db()
+                _bybit_result = submit_bybit_demo_signal(
+                    _bybit_conn,
+                    _db_lock,
+                    BybitDemoClient.from_env(),
+                    strategy=alert_type or "",
+                    confirmation_level=confirmation_level,
+                    source_demo_position_id=int(_new_demo_id),
+                    signal_ts=_ts_recv,
+                    symbol=symbol,
+                    direction=direction,
+                    signal_price=float(signal_price),
+                    entry_price=float(entry_price),
+                    sl_price=float(sl_price),
+                    tp_price=float(tp_price),
+                )
+                logger.info(
+                    "bybit_demo_signal strategy=%s symbol=%s direction=%s "
+                    "confirmation=%s status=%s ledger_id=%s",
+                    alert_type or "?",
+                    symbol,
+                    direction,
+                    confirmation_level or "-",
+                    _bybit_result.get("status"),
+                    _bybit_result.get("ledger_id", "-"),
+                )
+            except Exception as _bybit_exc:
+                # Bybit errors must never alter the already committed paper
+                # position or prevent its Telegram delivery.
+                logger.warning(
+                    "bybit_demo_signal suppressed error strategy=%s symbol=%s "
+                    "reason=%s",
+                    alert_type or "?",
+                    symbol,
+                    type(_bybit_exc).__name__,
                 )
         logger.info(
             "Demo %s: %s %s/%s entry=%.6g sl=%.6g tp=%.6g pid=%d ts=%d",
@@ -5960,6 +6031,7 @@ def _get_db() -> sqlite3.Connection:
         # mirrors new ema_cross_confirmed LONG positions after its fixed
         # boundary; it cannot affect the source demo position or signal path.
         initialize_forward_tp_vs_sl_schema(_db_conn)
+        initialize_bybit_demo_schema(_db_conn)
         _db_conn.commit()
         # Liquidity-entry strategy: parallel demo-only strategy
         _db_conn.execute("""
@@ -16995,6 +17067,24 @@ def api_status():
         })
 
 
+@app.route("/bot-api/bybit-demo-status", methods=["GET"])
+def api_bybit_demo_status():
+    """Safe Bybit Demo health/ledger summary; never exposes credentials."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+        return jsonify(
+            bybit_demo_status_snapshot(
+                conn,
+                _db_lock,
+                BybitDemoClient.from_env(),
+            )
+        )
+    except Exception as exc:
+        logger.warning("api_bybit_demo_status failed: %s", type(exc).__name__)
+        return jsonify({"error": "Bybit Demo status unavailable"}), 503
+
+
 @app.route("/bot-api/ai-analyze", methods=["POST"])
 def api_ai_analyze():
     """POST { symbol } → { analysis } — Gemini AI analysis of a coin."""
@@ -17169,6 +17259,25 @@ def backup_alerts_db() -> None:
         logger.exception("alerts.db backup failed: %s", e)
 
 
+def _run_bybit_demo_poll() -> None:
+    """Poll Bybit Demo without holding the bot DB lock during network I/O."""
+    client = BybitDemoClient.from_env()
+    if not client.enabled:
+        return
+    try:
+        with _db_lock:
+            conn = _get_db()
+        result = poll_bybit_demo_positions(conn, _db_lock, client)
+        logger.info(
+            "bybit_demo_poll status=%s polled=%s closed=%s",
+            result.get("status"),
+            result.get("polled", 0),
+            result.get("closed", 0),
+        )
+    except Exception as exc:
+        logger.warning("bybit_demo_poll failed: %s", type(exc).__name__)
+
+
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(
     run_checks, "interval", minutes=5, id="binance_check",
@@ -17184,6 +17293,14 @@ scheduler.add_job(
 )
 scheduler.add_job(
     check_demo_positions, "interval", seconds=30, id="demo_check",
+)
+scheduler.add_job(
+    _run_bybit_demo_poll,
+    "interval",
+    seconds=20,
+    id="bybit_demo_check",
+    max_instances=1,
+    coalesce=True,
 )
 scheduler.add_job(
     lambda: schedule_trailing_shadow_report(HIT_RATE_DB_PATH),
