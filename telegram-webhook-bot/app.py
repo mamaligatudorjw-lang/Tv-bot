@@ -1038,6 +1038,159 @@ def _record_telegram_delivery(
         )
 
 
+_replay_send_lock = threading.Lock()
+REPLAY_SEND_DELAY_SEC = 0.05
+
+
+def _format_replay_message(row: tuple) -> str:
+    """Render one already-resolved profitable demo row as a non-live replay."""
+    (
+        position_id,
+        ts_open,
+        symbol,
+        direction,
+        entry_price,
+        sl_price,
+        tp_price,
+        status,
+        ts_close,
+        exit_price,
+        pnl_usd,
+        is_shadow,
+        alert_type,
+        exit_method,
+    ) = row
+    scope = "SHADOW" if is_shadow else "LIVE"
+    direction_icon = "📈" if direction == "LONG" else "📉"
+    status_label = {
+        "tp": "TP",
+        "sl": "SL",
+        "manual": "MANUAL",
+    }.get(str(status).lower(), str(status or "UNKNOWN").upper())
+    exit_label = (
+        f"{status_label} · {str(exit_method).upper()}"
+        if exit_method and str(exit_method).lower() != str(status).lower()
+        else status_label
+    )
+    pnl_value = float(pnl_usd or 0.0)
+    pnl_sign = "+" if pnl_value >= 0 else ""
+    opened_at = (
+        datetime.fromtimestamp(ts_open, ZoneInfo("Europe/Chisinau"))
+        .strftime("%Y-%m-%d %H:%M")
+        if ts_open else "—"
+    )
+    closed_at = (
+        datetime.fromtimestamp(ts_close, ZoneInfo("Europe/Chisinau"))
+        .strftime("%Y-%m-%d %H:%M")
+        if ts_close else "—"
+    )
+    exit_text = f"${float(exit_price):,.8g}" if exit_price is not None else "—"
+    strategy = html.escape(str(alert_type or "unknown"))
+    return (
+        "🕰 <b>REPLAY — историческая сделка, не live</b>\n"
+        "⚠️ Информационный разбор: позиция не открывается и не сопровождается ботом.\n"
+        f"{direction_icon} <b>{scope}</b> · <code>{html.escape(str(symbol))}</code> "
+        f"<b>{html.escape(str(direction))}</b> · стратегия <code>{strategy}</code>\n"
+        f"🕐 Открыта: <code>{opened_at}</code> · закрыта: <code>{closed_at}</code>\n"
+        f"📍 Entry: <b>${float(entry_price):,.8g}</b>\n"
+        f"🎯 TP: <b>${float(tp_price):,.8g}</b>  │  🛑 SL: <b>${float(sl_price):,.8g}</b>\n"
+        f"✅ Фактический исход: <b>{html.escape(exit_label)}</b> "
+        f"по <b>{exit_text}</b>\n"
+        f"💰 P&L: <b>{pnl_sign}${pnl_value:.2f}</b>\n"
+        f"🆔 Replay ID: <code>{int(position_id)}</code>"
+    )
+
+
+def handle_replay_command(chat_id: int) -> None:
+    """Send every unsent profitable resolved demo trade as an informational replay.
+
+    This is deliberately manual and separate from live alert delivery.  The
+    first invocation may send the historical backlog; subsequent invocations
+    pick up newly closed profitable rows.  A successful send is persisted so a
+    later invocation cannot resend the same position.
+    """
+    sent_count = 0
+    failed_count = 0
+    try:
+        with _replay_send_lock:
+            with _db_lock:
+                conn = _get_db()
+                rows = conn.execute(
+                    """
+                    SELECT
+                        dp.id, dp.ts_open, dp.symbol, dp.direction,
+                        dp.entry_price, dp.sl_price, dp.tp_price,
+                        dp.status, dp.ts_close, dp.exit_price, dp.pnl_usd,
+                        dp.is_shadow, dp.alert_type, dp.exit_method
+                    FROM demo_positions AS dp
+                    WHERE dp.status != 'open'
+                      AND dp.ts_close IS NOT NULL
+                      AND dp.pnl_usd IS NOT NULL
+                      AND dp.pnl_usd > 0
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM telegram_replay_delivery_log AS rd
+                          WHERE rd.demo_position_id = dp.id
+                            AND rd.chat_id = ?
+                            AND rd.delivered = 1
+                      )
+                    ORDER BY dp.ts_close ASC, dp.id ASC
+                    """,
+                    (int(chat_id),),
+                ).fetchall()
+
+            for row in rows:
+                message = _format_replay_message(row)
+                delivered = _telegram_send(chat_id, message)
+                if delivered:
+                    try:
+                        with _db_lock:
+                            conn = _get_db()
+                            conn.execute(
+                                """
+                                INSERT OR IGNORE INTO telegram_replay_delivery_log
+                                    (demo_position_id, chat_id, ts_sent, delivered)
+                                VALUES (?, ?, ?, 1)
+                                """,
+                                (row[0], int(chat_id), int(time.time())),
+                            )
+                            conn.commit()
+                        sent_count += 1
+                    except Exception as record_exc:
+                        # Do not claim delivery was persisted: a later run may
+                        # resend after a process/database failure.
+                        logger.warning(
+                            "replay delivery audit failed for position %s: %s",
+                            row[0], record_exc,
+                        )
+                        failed_count += 1
+                else:
+                    failed_count += 1
+                if REPLAY_SEND_DELAY_SEC > 0:
+                    time.sleep(REPLAY_SEND_DELAY_SEC)
+    except Exception as exc:
+        logger.exception("handle_replay_command failed: %s", exc)
+        _telegram_send(chat_id, f"❌ Ошибка replay: {html.escape(str(exc))}")
+        return
+
+    if not rows:
+        _telegram_send(
+            chat_id,
+            "🕰 <b>REPLAY</b>\nНет новых исторически прибыльных закрытых сделок.",
+        )
+        return
+    summary = (
+        "🕰 <b>REPLAY завершён</b>\n"
+        f"Отправлено исторических сделок: <b>{sent_count}</b>."
+    )
+    if failed_count:
+        summary += (
+            f"\nНе доставлено: <b>{failed_count}</b> — повторная команда "
+            "попробует их снова."
+        )
+    _telegram_send(chat_id, summary)
+
+
 def _telegram_answer_callback(callback_id: str, text: str = "") -> None:
     """Acknowledge a callback_query so Telegram stops showing a loading spinner."""
     try:
@@ -3996,6 +4149,7 @@ def _poll_telegram_commands() -> None:
         "/demoshadow":  handle_demoshadow_command,
         "/shadowtrail": handle_shadowtrail_command,
         "/emacross":    handle_emacross_command,
+        "/replay":      handle_replay_command,
         "/scorestats":     handle_scorestats_command,
         "/retroanalysis": lambda cid: threading.Thread(
             target=_run_retro_duration_analysis, args=(cid,), daemon=True
@@ -5528,6 +5682,20 @@ def _get_db() -> sqlite3.Connection:
         _db_conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_tg_delivery_ts "
             "ON telegram_delivery_log(ts)"
+        )
+        _db_conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_replay_delivery_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                demo_position_id INTEGER NOT NULL,
+                chat_id          INTEGER NOT NULL,
+                ts_sent          INTEGER NOT NULL,
+                delivered        INTEGER NOT NULL DEFAULT 1,
+                UNIQUE (demo_position_id, chat_id)
+            )
+        """)
+        _db_conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_replay_delivery_chat "
+            "ON telegram_replay_delivery_log(chat_id, ts_sent)"
         )
         _db_conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
@@ -13633,7 +13801,7 @@ def run_checks():
                     f"<b>Команды торговли:</b>\n"
                     f"  /trade · /mytrades · /positions · /analyze · /ai\n\n"
                     f"<b>Демо P&L:</b>\n"
-                    f"  /demo\n\n"
+                    f"  /demo · /replay — backlog и новые прибыльные сделки, без live-входа\n\n"
                     f"<b>Личный трекер позиций:</b>\n"
                     f"  /addpos SYMBOL LONG|SHORT — добавить позицию\n"
                     f"  /mypos — список открытых позиций\n"
@@ -14528,7 +14696,7 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Команды торговли:</b>\n"
         f"  /trade · /mytrades · /positions · /analyze · /ai\n\n"
         f"<b>Демо P&L:</b>\n"
-        f"  /demo · /demoshadow · /shadowtrail\n\n"
+        f"  /demo · /demoshadow · /shadowtrail · /replay (backlog + новые, без повторов)\n\n"
         f"<b>Личный трекер позиций:</b>\n"
         f"  /addpos SYMBOL LONG|SHORT — добавить позицию\n"
         f"  /mypos — список открытых позиций\n"
