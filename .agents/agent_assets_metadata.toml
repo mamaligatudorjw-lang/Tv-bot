@@ -20,3 +20,17 @@ uri = "file://telegram-webhook-bot/outcome_high_rejection_analysis/analysis.json
 type = "unspecified"
 title = "High rejection analysis data"
 description = "Machine-readable coverage, cohort metrics, provenance, and condition comparisons."
+
+[[outputs]]
+id = "f1JlLoV4mgp516weGI9aN"
+uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/report.json"
+type = "unspecified"
+title = "#150 report.json"
+description = "Полный JSON-отчёт read-only in-sample WR≥35% trailing-stop анализа: baseline, filtered baseline, trailing grid и filter/trailing effects."
+
+[[outputs]]
+id = "_Ws6YTNybrXDOym4DVT_Q"
+uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/analysis.md"
+type = "text"
+title = "#150 analysis.md"
+description = "Markdown-отчёт #150 с методикой, cohort counts, Σ/WR/avg R, всеми trailing steps и ограничениями in-sample."
