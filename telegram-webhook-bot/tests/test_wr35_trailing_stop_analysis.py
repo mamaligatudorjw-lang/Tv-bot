@@ -81,11 +81,12 @@ def test_exact_wr_threshold_passes_and_below_threshold_does_not():
         positions.append(position)
         regimes[index + 1] = regime
 
-    at_boundary, regime = _position(100, 1000)
+    at_boundary, regime = _position(100, 1000, ts_close=1001)
     positions.append(at_boundary)
     regimes[100] = regime
 
-    below_boundary, regime = _position(101, 1001)
+    below_boundary, regime = _position(101, 2000, ts_close=2000)
+    below_boundary["status"] = "sl"
     positions.append(below_boundary)
     regimes[101] = regime
 
@@ -100,10 +101,10 @@ def test_exact_wr_threshold_passes_and_below_threshold_does_not():
 
     # Add one loss after the boundary and verify a genuinely sub-threshold
     # cohort is rejected on the next signal.
-    loss, regime = _position(102, 1002, status="sl")
+    loss, regime = _position(102, 2001, status="sl", ts_close=2001)
     positions.append(loss)
     regimes[102] = regime
-    next_signal, regime = _position(103, 1003)
+    next_signal, regime = _position(103, 3000)
     positions.append(next_signal)
     regimes[103] = regime
     final = build_filter_decisions(positions, regimes)[-1]
@@ -268,4 +269,7 @@ def test_run_is_frozen_and_read_only(tmp_path):
     with (output_dir / "signal_filter_decisions.csv").open(newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert [row["id"] for row in rows] == ["1"]
+    with (output_dir / "trailing_rows_wr35.csv").open(newline="") as handle:
+        simulation_rows = list(csv.DictReader(handle))
+    assert len(simulation_rows) == 1
     assert db_path.read_bytes() == marker_before

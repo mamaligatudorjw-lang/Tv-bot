@@ -1,0 +1,9 @@
+strategy,direction,regime,cohort,n_total,n_passed,n_excluded,pass_pct,no_history_n,insufficient_history_n,below_threshold_n,sample_status
+ema_cross_confirmed,LONG,bear,ema_cross_confirmed|LONG|bear,0,0,0,,0,0,0,insufficient
+ema_cross_confirmed,LONG,bull,ema_cross_confirmed|LONG|bull,89,42,47,47.191,4,43,0,ready
+ema_cross_confirmed,SHORT,bear,ema_cross_confirmed|SHORT|bear,0,0,0,,0,0,0,insufficient
+ema_cross_confirmed,SHORT,bull,ema_cross_confirmed|SHORT|bull,40,0,40,0.0,22,10,8,ready
+overheated_24h,LONG,bear,overheated_24h|LONG|bear,57,12,45,21.0526,1,25,19,ready
+overheated_24h,LONG,bull,overheated_24h|LONG|bull,351,251,100,71.51,1,27,72,ready
+overheated_24h,SHORT,bear,overheated_24h|SHORT|bear,0,0,0,,0,0,0,insufficient
+overheated_24h,SHORT,bull,overheated_24h|SHORT|bull,0,0,0,,0,0,0,insufficient

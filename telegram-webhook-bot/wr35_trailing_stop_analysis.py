@@ -80,9 +80,10 @@ def load_frozen_simulations(
     ids = {row.get("id", "") for row in rows}
     if "" in ids:
         raise ValueError("Frozen trailing output contains a row without an id")
-    steps = sorted({_as_float(row.get("step_pct"), "step_pct") for row in rows})
-    if any(step is None for step in steps):
+    raw_steps = {_as_float(row.get("step_pct")) for row in rows}
+    if any(step is None for step in raw_steps):
         raise ValueError("Frozen trailing output contains an invalid step_pct")
+    steps = sorted(step for step in raw_steps if step is not None)
     expected_steps = {
         float(step)
         for step in coverage.get("steps_pct", list(DEFAULT_STEPS))
@@ -121,7 +122,10 @@ def load_positions(
     sorted_ids = sorted({int(value) for value in ids})
     if not sorted_ids:
         return {}
-    connection = sqlite3.connect(db_path)
+    connection = sqlite3.connect(
+        f"file:{db_path.resolve()}?mode=ro",
+        uri=True,
+    )
     connection.row_factory = sqlite3.Row
     placeholders = ",".join("?" for _ in sorted_ids)
     try:
@@ -353,6 +357,7 @@ def _metrics(
         "sample": sample,
         "strategy": strategy,
         "step_pct": step_pct,
+        "n": len(usable),
         "n_signals": len(rows),
         "n_usable": len(usable),
         "n_coverage_error": len(rows) - len(usable),
@@ -433,8 +438,27 @@ def build_cohort_summary(
                 decision["regime"],
             )
         ].append(decision)
+    pairs = {
+        (strategy, direction)
+        for strategy in TARGET_STRATEGIES
+        for direction in ("LONG", "SHORT")
+    }
+    observed_unknown = {
+        (item["strategy"], item["direction"])
+        for item in decisions
+        if item["regime"] == "unknown"
+    }
+    expected_keys = {
+        (strategy, direction, regime)
+        for strategy, direction in pairs
+        for regime in ("bull", "bear")
+    }
+    expected_keys.update(
+        (strategy, direction, "unknown")
+        for strategy, direction in observed_unknown
+    )
     output: list[dict[str, Any]] = []
-    for strategy, direction, regime in sorted(grouped):
+    for strategy, direction, regime in sorted(expected_keys):
         items = grouped[(strategy, direction, regime)]
         reasons = Counter(str(item["filter_reason"]) for item in items)
         n_total = len(items)
@@ -448,7 +472,10 @@ def build_cohort_summary(
                 "n_total": n_total,
                 "n_passed": n_passed,
                 "n_excluded": n_total - n_passed,
-                "pass_pct": _round_or_none(100.0 * n_passed / n_total, 4),
+                "pass_pct": _round_or_none(
+                    100.0 * n_passed / n_total if n_total else None,
+                    4,
+                ),
                 "no_history_n": reasons["no_history"],
                 "insufficient_history_n": reasons["insufficient_history"],
                 "below_threshold_n": reasons["below_threshold"],
@@ -565,12 +592,27 @@ def write_report(
     output_dir: Path,
     coverage: dict[str, Any],
     decisions: Sequence[dict[str, Any]],
+    simulation_rows: Sequence[dict[str, Any]],
     cohort_summary: Sequence[dict[str, Any]],
     filter_effect: Sequence[dict[str, Any]],
     grid_summary: Sequence[dict[str, Any]],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    signal_fields = (
+    decision_fields = (
+        "id",
+        "strategy",
+        "direction",
+        "regime",
+        "regime_reason",
+        "cohort",
+        "prior_cohort_n",
+        "prior_cohort_wins",
+        "prior_cohort_losses",
+        "historical_wr_pct",
+        "filter_pass",
+        "filter_reason",
+    )
+    simulation_fields = (
         "id",
         "strategy",
         "symbol",
@@ -633,6 +675,7 @@ def write_report(
         "sample",
         "strategy",
         "step_pct",
+        "n",
         "n_signals",
         "n_usable",
         "n_coverage_error",
@@ -649,7 +692,8 @@ def write_report(
         "trail_exit_n",
         "sample_status",
     )
-    write_csv(output_dir / "signal_filter_decisions.csv", decisions, signal_fields)
+    write_csv(output_dir / "signal_filter_decisions.csv", decisions, decision_fields)
+    write_csv(output_dir / "trailing_rows_wr35.csv", simulation_rows, simulation_fields)
     write_csv(output_dir / "cohort_summary.csv", cohort_summary, cohort_fields)
     write_csv(output_dir / "filter_effect.csv", filter_effect, effect_fields)
     write_csv(output_dir / "grid_summary.csv", grid_summary, grid_fields)
@@ -780,13 +824,18 @@ def run_analysis(
     db_path: Path,
     input_dir: Path,
     output_dir: Path,
+    regime_path: Path | None = None,
 ) -> dict[str, Any]:
     if input_dir.resolve() == output_dir.resolve():
         raise ValueError("Refusing to overwrite the frozen input directory")
     simulation_rows, coverage = load_frozen_simulations(input_dir)
     frozen_ids = {_as_int(row["id"], "simulation id") for row in simulation_rows}
     positions = load_positions(db_path, frozen_ids)
-    regimes = load_regimes(input_dir.parent / "trend_regime_analysis" / REGIME_FILENAME, frozen_ids)
+    regimes = load_regimes(
+        regime_path
+        or input_dir.parent / "trend_regime_analysis" / REGIME_FILENAME,
+        frozen_ids,
+    )
     selected_positions = [
         row for row in positions.values() if str(row["alert_type"]) in TARGET_STRATEGIES
     ]
@@ -806,6 +855,7 @@ def run_analysis(
         {
             "positions_loaded": len(positions),
             "decisions": len(decisions),
+            "simulation_rows_annotated": len(annotated),
             "signals_passed": sum(
                 row["filter_pass"] == "yes" for row in decisions
             ),
@@ -818,6 +868,7 @@ def run_analysis(
     write_report(
         output_dir,
         coverage,
+        decisions,
         annotated,
         cohort_summary,
         filter_effect,
@@ -851,12 +902,9 @@ def main() -> int:
         default=Path("outcome_trailing_stop_wr35"),
     )
     args = parser.parse_args()
-    # Keep the explicit CLI override useful while retaining the frozen default.
-    if args.regimes != Path("trend_regime_analysis") / REGIME_FILENAME:
-        original = args.input.parent / "trend_regime_analysis" / REGIME_FILENAME
-        if not original.exists():
-            raise SystemExit(f"Regime snapshot does not exist: {args.regimes}")
-    result = run_analysis(args.db, args.input, args.out)
+    if not args.regimes.exists():
+        raise SystemExit(f"Regime snapshot does not exist: {args.regimes}")
+    result = run_analysis(args.db, args.input, args.out, regime_path=args.regimes)
     print(
         json.dumps(
             {

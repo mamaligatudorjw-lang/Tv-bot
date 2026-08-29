@@ -1,0 +1,3 @@
+strategy,n_all,n_filtered,n_excluded,all_baseline_total_r,all_baseline_avg_r,all_baseline_wr_pct,filtered_baseline_total_r,filtered_baseline_avg_r,filtered_baseline_wr_pct,filter_baseline_avg_r_delta,filter_baseline_wr_delta_pp,selection_effect_note
+overheated_24h,408,263,145,83.8,0.205392,40.4412,43.0,0.163498,38.7833,-0.041894,-1.6579,descriptive filtered-vs-all comparison; not causal
+ema_cross_confirmed,129,42,87,88.5,0.686047,56.5891,26.0,0.619048,54.7619,-0.066999,-1.8272,descriptive filtered-vs-all comparison; not causal
