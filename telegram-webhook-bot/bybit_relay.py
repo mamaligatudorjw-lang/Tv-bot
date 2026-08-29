@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hmac
 import os
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -64,9 +65,17 @@ def create_app(
 ) -> Flask:
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = BYBIT_RELAY_MAX_BODY_BYTES
-    token = (shared_token if shared_token is not None else os.environ.get(
-        BYBIT_RELAY_TOKEN_ENV, ""
-    )).strip()
+    if shared_token is not None:
+        token = shared_token.strip()
+    else:
+        token_file = os.environ.get("BYBIT_RELAY_TOKEN_FILE", "").strip()
+        if token_file:
+            try:
+                token = Path(token_file).read_text(encoding="utf-8").strip()
+            except OSError:
+                token = ""
+        else:
+            token = os.environ.get(BYBIT_RELAY_TOKEN_ENV, "").strip()
     http = session or requests.Session()
 
     def _authorized() -> bool:
