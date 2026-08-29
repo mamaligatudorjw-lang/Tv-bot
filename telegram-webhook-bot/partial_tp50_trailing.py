@@ -268,6 +268,11 @@ def tp_trigger(
     starts = candle_starts(relevant)
     if any(right - left > PATH_INTERVAL_SEC for left, right in zip(starts, starts[1:])):
         return None, "5m_candle_gap_before_tp"
+    if not relevant and close - as_int(row["ts_open"], "ts_open") <= PATH_INTERVAL_SEC:
+        # A baseline TP can occur before the first completed 5m candle after
+        # entry. The frozen DB outcome proves the TP branch was reached, but
+        # there is no safe OHLC bar to reuse for trailing-state updates.
+        return {"t": (close // PATH_INTERVAL_SEC) * PATH_INTERVAL_SEC}, None
     for candle in relevant:
         high = as_float(candle["h"], "candle high")
         low = as_float(candle["l"], "candle low")
@@ -413,7 +418,10 @@ def summarize(
     bootstrap_iterations: int,
     bootstrap_seed: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    baseline_rows = list(rows)
+    baseline_rows_by_id: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        baseline_rows_by_id.setdefault(as_int(row["id"], "id"), row)
+    baseline_rows = list(baseline_rows_by_id.values())
     baseline_values = [as_float(row["baseline_r"], "baseline_r") for row in baseline_rows]
     baseline_wins = sum(row["baseline_status"] == "tp" for row in baseline_rows)
     baseline_total, baseline_avg = metric(baseline_values)

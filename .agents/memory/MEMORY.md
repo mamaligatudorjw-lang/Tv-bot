@@ -12,3 +12,4 @@
 - [BTC regime outcome analysis](trend-regime-analysis.md) — compare resolved outcomes by completed BTC 4h close vs EMA50; keep empty regimes and small cohorts explicit.
 - [Telegram notification allowlist](telegram-notification-allowlist.md) — delivery is filtered independently; signal, demo, shadow, and forward telemetry must keep running.
 - [Directional cohort reporting](directional-cohort-reporting.md) — always show LONG and SHORT; missing direction is insufficient data, never an omitted cohort.
+- [Partial TP candle boundaries](partial-tp-candle-boundaries.md) — frozen intrabar TP events must not reuse that candle’s OHLC for trailing updates.
