@@ -62,3 +62,10 @@ uri = "file://telegram-webhook-bot/outcome_overheated_early_bootstrap/report.md"
 type = "text"
 title = "Overheated early post-fix bootstrap report"
 description = "Read-only 20,000-iteration unique-signal bootstrap with JSON, CSV, and per-signal cohort files in the workspace."
+
+[[outputs]]
+id = "UyKIZX00xbviaabS9zO6h"
+uri = "file://telegram-webhook-bot/outcome_tp_vs_sl_multihour/report.md"
+type = "text"
+title = "Refreshed TP-vs-SL factor report"
+description = "Task #146 read-only report with exact RSI coverage, reconstructed 24h low/high proxies, mean-difference bootstrap CIs, JSON provenance, and per-signal CSV."
