@@ -31,11 +31,16 @@ from forward_tp_vs_sl import (
     write_report as write_forward_tp_vs_sl_report,
 )
 from bybit_demo import (
+    BybitDemoError,
     BybitDemoClient,
     backfill_gate_metadata as backfill_bybit_demo_gate_metadata,
     is_allowed_signal as is_bybit_demo_signal_allowed,
     initialize_schema as initialize_bybit_demo_schema,
     poll_positions as poll_bybit_demo_positions,
+    read_reserve_snapshot as read_bybit_reserve_snapshot,
+    record_reserve_health,
+    reserve_health_config,
+    reserve_health_status,
     status_snapshot as bybit_demo_status_snapshot,
     submit_signal as submit_bybit_demo_signal,
 )
@@ -17298,6 +17303,60 @@ def _run_bybit_demo_poll() -> None:
         logger.warning("bybit_demo_poll failed: %s", type(exc).__name__)
 
 
+def _run_bybit_demo_reserve_probe() -> None:
+    """Check reserve-read availability without making an order decision."""
+    client = BybitDemoClient.from_env()
+    if not client.enabled:
+        return
+    try:
+        snapshot = read_bybit_reserve_snapshot(client)
+    except BybitDemoError as exc:
+        health = record_reserve_health(
+            success=False,
+            error=f"{exc.endpoint}:{exc}",
+        )
+        logger.warning(
+            "bybit_demo_reserve_probe failed reason=%s failures=%d",
+            health["last_error"],
+            health["failure_count"],
+        )
+    except (TypeError, ValueError) as exc:
+        health = record_reserve_health(
+            success=False,
+            error=f"invalid_response:{exc}",
+        )
+        logger.warning(
+            "bybit_demo_reserve_probe failed reason=invalid_response failures=%d",
+            health["failure_count"],
+        )
+    except Exception:
+        health = record_reserve_health(
+            success=False,
+            error="unexpected_probe_error",
+        )
+        logger.warning(
+            "bybit_demo_reserve_probe failed reason=unexpected_probe_error "
+            "failures=%d",
+            health["failure_count"],
+        )
+    else:
+        health = record_reserve_health(success=True, snapshot=snapshot)
+        logger.info(
+            "bybit_demo_reserve_probe status=ok exposure_usd=%s equity_usd=%s",
+            snapshot["open_exposure_usd"],
+            snapshot["equity_usd"],
+        )
+    if health["alert_triggered"]:
+        logger.warning(
+            "bybit_demo_reserve_health_alert failures=%d threshold=%d "
+            "window_sec=%d reason=%s",
+            health["failure_count"],
+            health["threshold"],
+            health["window_sec"],
+            health["last_error"] or "reserve_preflight_error",
+        )
+
+
 scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.add_job(
     run_checks, "interval", minutes=5, id="binance_check",
@@ -17319,6 +17378,14 @@ scheduler.add_job(
     "interval",
     seconds=20,
     id="bybit_demo_check",
+    max_instances=1,
+    coalesce=True,
+)
+scheduler.add_job(
+    _run_bybit_demo_reserve_probe,
+    "interval",
+    seconds=reserve_health_config()["interval_sec"],
+    id="bybit_demo_reserve_probe",
     max_instances=1,
     coalesce=True,
 )

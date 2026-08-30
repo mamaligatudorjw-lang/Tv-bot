@@ -14,6 +14,7 @@ import math
 import os
 import threading
 import time
+from collections import deque
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_UP
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -35,6 +36,16 @@ BYBIT_DEMO_MAX_EXPOSURE_ENV = "BYBIT_DEMO_MAX_EXPOSURE_USD"
 BYBIT_DEMO_EQUITY_RESERVE_ENV = "BYBIT_DEMO_EQUITY_RESERVE_USD"
 BYBIT_DEMO_MAX_EXPOSURE_USD = 500.0
 BYBIT_DEMO_EQUITY_RESERVE_USD = 100.0
+BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV = (
+    "BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_SEC"
+)
+BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV = "BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_SEC"
+BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV = (
+    "BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD"
+)
+BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_SEC = 60
+BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_SEC = 600
+BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD = 3
 # Effective boundary for the unified shadow gate.  Existing orders were
 # created before this implementation was activated and are classified as
 # historical exceptions during the startup backfill.
@@ -99,6 +110,163 @@ def reserve_config() -> dict[str, Any]:
         "max_exposure_usd": max_exposure,
         "equity_reserve_usd": equity_reserve,
     }
+
+
+def _read_positive_int_env(name: str, default: int) -> tuple[int, bool]:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return int(default), False
+    try:
+        value = int(raw_value.strip())
+    except (TypeError, ValueError):
+        return int(default), True
+    if value <= 0:
+        return int(default), True
+    return value, False
+
+
+def reserve_health_config() -> dict[str, Any]:
+    """Return alert settings, falling back safely when env values are invalid."""
+    interval_sec, interval_invalid = _read_positive_int_env(
+        BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV,
+        BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_SEC,
+    )
+    window_sec, window_invalid = _read_positive_int_env(
+        BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV,
+        BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_SEC,
+    )
+    threshold, threshold_invalid = _read_positive_int_env(
+        BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV,
+        BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD,
+    )
+    invalid = []
+    if interval_invalid:
+        invalid.append(BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV)
+    if window_invalid:
+        invalid.append(BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV)
+    if threshold_invalid:
+        invalid.append(BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV)
+    return {
+        "interval_sec": interval_sec,
+        "window_sec": window_sec,
+        "threshold": threshold,
+        "configuration_fallback": invalid,
+    }
+
+
+_RESERVE_HEALTH_LOCK = threading.Lock()
+_reserve_health_failures: deque[float] = deque()
+_reserve_health_alert_active = False
+_reserve_health_last_error: str | None = None
+_reserve_health_last_error_ts: int | None = None
+_reserve_health_last_success_ts: int | None = None
+_reserve_health_latest: dict[str, Any] | None = None
+
+
+def _reserve_health_snapshot_values(
+    snapshot: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not snapshot:
+        return None
+    return {
+        "open_exposure_usd": snapshot.get("open_exposure_usd"),
+        "balance_usd": snapshot.get("balance_usd"),
+        "unrealized_pnl_usd": snapshot.get("unrealized_pnl_usd"),
+        "equity_usd": snapshot.get("equity_usd"),
+    }
+
+
+def record_reserve_health(
+    *,
+    success: bool,
+    error: str | None = None,
+    snapshot: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Track real-time reserve read health without deciding order admission."""
+    global _reserve_health_alert_active
+    global _reserve_health_last_error
+    global _reserve_health_last_error_ts
+    global _reserve_health_last_success_ts
+    global _reserve_health_latest
+
+    current_ts = float(time.time() if now is None else now)
+    config = reserve_health_config()
+    alert_triggered = False
+    with _RESERVE_HEALTH_LOCK:
+        if success:
+            _reserve_health_failures.clear()
+            _reserve_health_alert_active = False
+            _reserve_health_last_success_ts = int(current_ts)
+            _reserve_health_latest = _reserve_health_snapshot_values(snapshot)
+            _reserve_health_last_error = None
+            _reserve_health_last_error_ts = None
+        else:
+            cutoff = current_ts - config["window_sec"]
+            while _reserve_health_failures and _reserve_health_failures[0] < cutoff:
+                _reserve_health_failures.popleft()
+            _reserve_health_failures.append(current_ts)
+            _reserve_health_last_error = error or "reserve_preflight_error"
+            _reserve_health_last_error_ts = int(current_ts)
+            if (
+                len(_reserve_health_failures) >= config["threshold"]
+                and not _reserve_health_alert_active
+            ):
+                _reserve_health_alert_active = True
+                alert_triggered = True
+        return {
+            "failure_count": len(_reserve_health_failures),
+            "window_sec": config["window_sec"],
+            "threshold": config["threshold"],
+            "alert_active": _reserve_health_alert_active,
+            "alert_triggered": alert_triggered,
+            "last_error": _reserve_health_last_error,
+            "last_error_ts": _reserve_health_last_error_ts,
+            "last_success_ts": _reserve_health_last_success_ts,
+            "latest": _reserve_health_latest,
+            "configuration_fallback": config["configuration_fallback"],
+        }
+
+
+def reserve_health_status() -> dict[str, Any]:
+    """Return safe reserve-read health state for status endpoints."""
+    return _reserve_health_status()
+
+
+def _reserve_health_status() -> dict[str, Any]:
+    config = reserve_health_config()
+    current_ts = time.time()
+    with _RESERVE_HEALTH_LOCK:
+        cutoff = current_ts - config["window_sec"]
+        while _reserve_health_failures and _reserve_health_failures[0] < cutoff:
+            _reserve_health_failures.popleft()
+        return {
+            "failure_count": len(_reserve_health_failures),
+            "window_sec": config["window_sec"],
+            "threshold": config["threshold"],
+            "interval_sec": config["interval_sec"],
+            "alert_active": _reserve_health_alert_active,
+            "last_error": _reserve_health_last_error,
+            "last_error_ts": _reserve_health_last_error_ts,
+            "last_success_ts": _reserve_health_last_success_ts,
+            "latest": _reserve_health_latest,
+            "configuration_fallback": config["configuration_fallback"],
+        }
+
+
+def _reset_reserve_health_for_tests() -> None:
+    global _reserve_health_alert_active
+    global _reserve_health_last_error
+    global _reserve_health_last_error_ts
+    global _reserve_health_last_success_ts
+    global _reserve_health_latest
+    with _RESERVE_HEALTH_LOCK:
+        _reserve_health_failures.clear()
+        _reserve_health_alert_active = False
+        _reserve_health_last_error = None
+        _reserve_health_last_error_ts = None
+        _reserve_health_last_success_ts = None
+        _reserve_health_latest = None
 
 
 def allowed_signal_variants(
@@ -858,6 +1026,20 @@ def _position_totals(
     return open_exposure, unrealized_pnl
 
 
+def read_reserve_snapshot(client: BybitDemoClient) -> dict[str, float]:
+    """Read and normalize the remote inputs shared by gates and health probes."""
+    balance = _wallet_balance_usd(client.get_wallet_balance())
+    open_exposure, unrealized_pnl = _position_totals(
+        client.get_open_positions()
+    )
+    return {
+        "open_exposure_usd": open_exposure,
+        "balance_usd": balance,
+        "unrealized_pnl_usd": unrealized_pnl,
+        "equity_usd": balance + unrealized_pnl,
+    }
+
+
 def reserve_preflight(
     client: BybitDemoClient,
     new_notional_usd: float,
@@ -902,10 +1084,7 @@ def reserve_preflight(
 
     result["reason"] = "relay_or_api_error"
     try:
-        balance = _wallet_balance_usd(client.get_wallet_balance())
-        open_exposure, unrealized_pnl = _position_totals(
-            client.get_open_positions()
-        )
+        snapshot = read_reserve_snapshot(client)
     except BybitDemoError as exc:
         result["error"] = f"{exc.endpoint}:{exc}"
         return result
@@ -914,7 +1093,10 @@ def reserve_preflight(
         result["error"] = str(exc)
         return result
 
-    equity = balance + unrealized_pnl
+    open_exposure = snapshot["open_exposure_usd"]
+    balance = snapshot["balance_usd"]
+    unrealized_pnl = snapshot["unrealized_pnl_usd"]
+    equity = snapshot["equity_usd"]
     max_exposure = float(config["max_exposure_usd"])
     equity_reserve = float(config["equity_reserve_usd"])
     exposure_passed = (
@@ -969,6 +1151,11 @@ def _record_reserve_preflight(
         "preflight_ts": ts,
     }
     _update_row(conn, db_lock, ledger_id, **fields)
+    health = record_reserve_health(
+        success=preflight["decision"] != "error",
+        error=preflight["reason"] if preflight["decision"] == "error" else None,
+        snapshot=preflight if preflight["decision"] != "error" else None,
+    )
     logger.info(
         "bybit_demo_reserve_preflight ledger_id=%d decision=%s reason=%s "
         "open_exposure_usd=%s new_notional_usd=%s max_exposure_usd=%s "
@@ -985,6 +1172,15 @@ def _record_reserve_preflight(
         preflight["equity_usd"],
         preflight["equity_reserve_usd"],
     )
+    if health["alert_triggered"]:
+        logger.warning(
+            "bybit_demo_reserve_health_alert failures=%d threshold=%d "
+            "window_sec=%d reason=%s",
+            health["failure_count"],
+            health["threshold"],
+            health["window_sec"],
+            health["last_error"] or "reserve_preflight_error",
+        )
 
 
 def _get_row(conn: Any, db_lock: threading.Lock, row_id: int) -> dict[str, Any] | None:
