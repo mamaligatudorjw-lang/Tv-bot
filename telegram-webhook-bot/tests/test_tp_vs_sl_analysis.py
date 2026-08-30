@@ -1,6 +1,8 @@
 import json
 import random
 
+import pytest
+
 from tp_vs_sl_analysis import (
     MIN_GROUP_N,
     build_report,
