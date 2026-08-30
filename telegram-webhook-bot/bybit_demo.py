@@ -31,6 +31,10 @@ BYBIT_DEMO_MAX_POLL_ROWS = 25
 BYBIT_RELAY_URL_ENV = "BYBIT_RELAY_URL"
 BYBIT_RELAY_TOKEN_ENV = "BYBIT_RELAY_TOKEN"
 BYBIT_DEMO_EARLY_PROMOTED_ENV = "BYBIT_DEMO_OVERHEATED_EARLY_PROMOTED"
+BYBIT_DEMO_MAX_EXPOSURE_ENV = "BYBIT_DEMO_MAX_EXPOSURE_USD"
+BYBIT_DEMO_EQUITY_RESERVE_ENV = "BYBIT_DEMO_EQUITY_RESERVE_USD"
+BYBIT_DEMO_MAX_EXPOSURE_USD = 500.0
+BYBIT_DEMO_EQUITY_RESERVE_USD = 100.0
 # Effective boundary for the unified shadow gate.  Existing orders were
 # created before this implementation was activated and are classified as
 # historical exceptions during the startup backfill.
@@ -56,6 +60,45 @@ def _env_flag(name: str, default: bool = False) -> bool:
 def overheated_early_promoted() -> bool:
     """Return the single configured decision for the third whitelist slot."""
     return _env_flag(BYBIT_DEMO_EARLY_PROMOTED_ENV, False)
+
+
+def _read_positive_usd_env(name: str, default: float) -> float:
+    raw_value = os.environ.get(name)
+    if raw_value is None or not raw_value.strip():
+        return float(default)
+    try:
+        value = float(raw_value.strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name}_invalid") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name}_invalid")
+    return value
+
+
+def reserve_config() -> dict[str, Any]:
+    """Read reserve gates with safe defaults and fail-closed validation."""
+    try:
+        max_exposure = _read_positive_usd_env(
+            BYBIT_DEMO_MAX_EXPOSURE_ENV,
+            BYBIT_DEMO_MAX_EXPOSURE_USD,
+        )
+        equity_reserve = _read_positive_usd_env(
+            BYBIT_DEMO_EQUITY_RESERVE_ENV,
+            BYBIT_DEMO_EQUITY_RESERVE_USD,
+        )
+    except ValueError as exc:
+        return {
+            "valid": False,
+            "configuration_error": str(exc),
+            "max_exposure_usd": None,
+            "equity_reserve_usd": None,
+        }
+    return {
+        "valid": True,
+        "configuration_error": None,
+        "max_exposure_usd": max_exposure,
+        "equity_reserve_usd": equity_reserve,
+    }
 
 
 def allowed_signal_variants(
@@ -509,6 +552,26 @@ class BybitDemoClient:
         )
         return self._result_list(payload)
 
+    def get_open_positions(self) -> list[dict[str, Any]]:
+        """Return all open linear positions used by the reserve preflight."""
+        payload = self._request(
+            "GET",
+            "/v5/position/list",
+            params={"category": BYBIT_DEMO_CATEGORY, "settleCoin": "USDT"},
+            retry_safe=True,
+        )
+        return self._result_list(payload)
+
+    def get_wallet_balance(self) -> list[dict[str, Any]]:
+        """Return the unified USDT wallet account for reserve calculations."""
+        payload = self._request(
+            "GET",
+            "/v5/account/wallet-balance",
+            params={"accountType": "UNIFIED", "coin": "USDT"},
+            retry_safe=True,
+        )
+        return self._result_list(payload)
+
     def get_closed_pnl(self, symbol: str) -> list[dict[str, Any]]:
         payload = self._request(
             "GET",
@@ -589,6 +652,16 @@ def initialize_schema(conn: Any) -> None:
             raw_order_json TEXT,
             raw_position_json TEXT,
             raw_execution_json TEXT,
+            preflight_decision TEXT,
+            preflight_reason TEXT,
+            preflight_open_exposure_usd REAL,
+            preflight_new_notional_usd REAL,
+            preflight_max_exposure_usd REAL,
+            preflight_balance_usd REAL,
+            preflight_unrealized_pnl_usd REAL,
+            preflight_equity_usd REAL,
+            preflight_equity_reserve_usd REAL,
+            preflight_ts INTEGER,
             shadow_origin INTEGER,
             pre_gate_exception INTEGER NOT NULL DEFAULT 0,
             post_fix_leak INTEGER NOT NULL DEFAULT 0,
@@ -607,6 +680,16 @@ def initialize_schema(conn: Any) -> None:
         ("gate_classification_uncertain", "INTEGER NOT NULL DEFAULT 0"),
         ("fallback_pre_gate_exception", "INTEGER NOT NULL DEFAULT 0"),
         ("fallback_post_fix_leak", "INTEGER NOT NULL DEFAULT 0"),
+        ("preflight_decision", "TEXT"),
+        ("preflight_reason", "TEXT"),
+        ("preflight_open_exposure_usd", "REAL"),
+        ("preflight_new_notional_usd", "REAL"),
+        ("preflight_max_exposure_usd", "REAL"),
+        ("preflight_balance_usd", "REAL"),
+        ("preflight_unrealized_pnl_usd", "REAL"),
+        ("preflight_equity_usd", "REAL"),
+        ("preflight_equity_reserve_usd", "REAL"),
+        ("preflight_ts", "INTEGER"),
     ):
         try:
             conn.execute(
@@ -662,6 +745,16 @@ def _update_row(conn: Any, db_lock: threading.Lock, row_id: int, **fields: Any) 
         "raw_order_json",
         "raw_position_json",
         "raw_execution_json",
+        "preflight_decision",
+        "preflight_reason",
+        "preflight_open_exposure_usd",
+        "preflight_new_notional_usd",
+        "preflight_max_exposure_usd",
+        "preflight_balance_usd",
+        "preflight_unrealized_pnl_usd",
+        "preflight_equity_usd",
+        "preflight_equity_reserve_usd",
+        "preflight_ts",
         "pre_gate_exception",
         "post_fix_leak",
         "gate_classification_uncertain",
@@ -681,6 +774,217 @@ def _update_row(conn: Any, db_lock: threading.Lock, row_id: int, **fields: Any) 
             values,
         )
         conn.commit()
+
+
+def _parse_api_number(
+    value: Any,
+    field: str,
+    *,
+    allow_negative: bool = False,
+) -> float:
+    if value is None or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"{field}_missing")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field}_invalid") from exc
+    if not math.isfinite(parsed) or (not allow_negative and parsed < 0):
+        raise ValueError(f"{field}_invalid")
+    return parsed
+
+
+def _wallet_balance_usd(items: list[dict[str, Any]]) -> float:
+    if len(items) != 1 or not isinstance(items[0], dict):
+        raise ValueError("wallet_balance_missing")
+    account = items[0]
+    raw_balance = account.get("totalWalletBalance")
+    if raw_balance is None or (
+        isinstance(raw_balance, str) and not raw_balance.strip()
+    ):
+        coins = account.get("coin")
+        if isinstance(coins, list):
+            usdt = next(
+                (
+                    item
+                    for item in coins
+                    if isinstance(item, dict)
+                    and str(item.get("coin") or "").upper() == "USDT"
+                ),
+                None,
+            )
+            raw_balance = usdt.get("walletBalance") if usdt else None
+    return _parse_api_number(raw_balance, "wallet_balance")
+
+
+def _position_totals(
+    positions: list[dict[str, Any]],
+) -> tuple[float, float]:
+    open_exposure = 0.0
+    unrealized_pnl = 0.0
+    for index, position in enumerate(positions):
+        if not isinstance(position, dict):
+            raise ValueError(f"position_{index}_invalid")
+        size = _parse_api_number(position.get("size"), f"position_{index}_size")
+        if size == 0:
+            continue
+        raw_value = position.get("positionValue")
+        if raw_value is None or (
+            isinstance(raw_value, str) and not raw_value.strip()
+        ):
+            avg_price = _parse_api_number(
+                position.get("avgPrice"),
+                f"position_{index}_avg_price",
+            )
+            position_value = abs(size * avg_price)
+        else:
+            position_value = _parse_api_number(
+                raw_value,
+                f"position_{index}_value",
+            )
+        if position_value <= 0:
+            raise ValueError(f"position_{index}_value_invalid")
+        raw_pnl = position.get("unrealisedPnl")
+        if raw_pnl is None:
+            raw_pnl = position.get("unrealizedPnl")
+        pnl = _parse_api_number(
+            raw_pnl,
+            f"position_{index}_unrealized_pnl",
+            allow_negative=True,
+        )
+        open_exposure += position_value
+        unrealized_pnl += pnl
+    if not math.isfinite(open_exposure) or not math.isfinite(unrealized_pnl):
+        raise ValueError("position_totals_invalid")
+    return open_exposure, unrealized_pnl
+
+
+def reserve_preflight(
+    client: BybitDemoClient,
+    new_notional_usd: float,
+) -> dict[str, Any]:
+    """Read remote funds/positions and decide whether one new order is safe."""
+    try:
+        new_notional = float(new_notional_usd)
+    except (TypeError, ValueError):
+        new_notional = None
+    if new_notional is None or not math.isfinite(new_notional) or new_notional <= 0:
+        return {
+            "decision": "error",
+            "reason": "invalid_notional",
+            "max_exposure_usd": None,
+            "equity_reserve_usd": None,
+            "new_notional_usd": new_notional,
+            "open_exposure_usd": None,
+            "balance_usd": None,
+            "unrealized_pnl_usd": None,
+            "equity_usd": None,
+            "exposure_gate_passed": False,
+            "equity_gate_passed": False,
+            "error": "new_notional_usd_invalid",
+        }
+    config = reserve_config()
+    result: dict[str, Any] = {
+        "decision": "error",
+        "reason": "configuration_invalid",
+        "max_exposure_usd": config["max_exposure_usd"],
+        "equity_reserve_usd": config["equity_reserve_usd"],
+        "new_notional_usd": new_notional,
+        "open_exposure_usd": None,
+        "balance_usd": None,
+        "unrealized_pnl_usd": None,
+        "equity_usd": None,
+        "exposure_gate_passed": False,
+        "equity_gate_passed": False,
+        "error": config["configuration_error"],
+    }
+    if not config["valid"]:
+        return result
+
+    result["reason"] = "relay_or_api_error"
+    try:
+        balance = _wallet_balance_usd(client.get_wallet_balance())
+        open_exposure, unrealized_pnl = _position_totals(
+            client.get_open_positions()
+        )
+    except BybitDemoError as exc:
+        result["error"] = f"{exc.endpoint}:{exc}"
+        return result
+    except (TypeError, ValueError) as exc:
+        result["reason"] = "invalid_response"
+        result["error"] = str(exc)
+        return result
+
+    equity = balance + unrealized_pnl
+    max_exposure = float(config["max_exposure_usd"])
+    equity_reserve = float(config["equity_reserve_usd"])
+    exposure_passed = (
+        Decimal(str(open_exposure)) + Decimal(str(new_notional))
+        <= Decimal(str(max_exposure))
+    )
+    equity_passed = Decimal(str(equity)) >= Decimal(str(equity_reserve))
+    result.update(
+        {
+            "open_exposure_usd": open_exposure,
+            "balance_usd": balance,
+            "unrealized_pnl_usd": unrealized_pnl,
+            "equity_usd": equity,
+            "exposure_gate_passed": exposure_passed,
+            "equity_gate_passed": equity_passed,
+            "error": None,
+        }
+    )
+    if exposure_passed and equity_passed:
+        result["decision"] = "allow"
+        result["reason"] = "allowed"
+    elif not exposure_passed and not equity_passed:
+        result["decision"] = "blocked"
+        result["reason"] = "exposure_cap_and_equity_floor"
+    elif not exposure_passed:
+        result["decision"] = "blocked"
+        result["reason"] = "exposure_cap"
+    else:
+        result["decision"] = "blocked"
+        result["reason"] = "equity_floor"
+    return result
+
+
+def _record_reserve_preflight(
+    conn: Any,
+    db_lock: threading.Lock,
+    ledger_id: int,
+    preflight: dict[str, Any],
+    *,
+    ts: int,
+) -> None:
+    fields = {
+        "preflight_decision": preflight["decision"],
+        "preflight_reason": preflight["reason"],
+        "preflight_open_exposure_usd": preflight["open_exposure_usd"],
+        "preflight_new_notional_usd": preflight["new_notional_usd"],
+        "preflight_max_exposure_usd": preflight["max_exposure_usd"],
+        "preflight_balance_usd": preflight["balance_usd"],
+        "preflight_unrealized_pnl_usd": preflight["unrealized_pnl_usd"],
+        "preflight_equity_usd": preflight["equity_usd"],
+        "preflight_equity_reserve_usd": preflight["equity_reserve_usd"],
+        "preflight_ts": ts,
+    }
+    _update_row(conn, db_lock, ledger_id, **fields)
+    logger.info(
+        "bybit_demo_reserve_preflight ledger_id=%d decision=%s reason=%s "
+        "open_exposure_usd=%s new_notional_usd=%s max_exposure_usd=%s "
+        "balance_usd=%s unrealized_pnl_usd=%s equity_usd=%s "
+        "equity_reserve_usd=%s",
+        ledger_id,
+        preflight["decision"],
+        preflight["reason"],
+        preflight["open_exposure_usd"],
+        preflight["new_notional_usd"],
+        preflight["max_exposure_usd"],
+        preflight["balance_usd"],
+        preflight["unrealized_pnl_usd"],
+        preflight["equity_usd"],
+        preflight["equity_reserve_usd"],
+    )
 
 
 def _get_row(conn: Any, db_lock: threading.Lock, row_id: int) -> dict[str, Any] | None:
@@ -1162,6 +1466,31 @@ def submit_signal(
             _record_order(conn, db_lock, ledger_id, result, now)
             return {"status": "recovered", "ledger_id": ledger_id}
 
+        # This is the final remote read before the only create-order POST.
+        # Reserve gates never close or mutate an existing position.
+        preflight = reserve_preflight(client, notional_usd)
+        _record_reserve_preflight(
+            conn,
+            db_lock,
+            ledger_id,
+            preflight,
+            ts=int(time.time()),
+        )
+        if preflight["decision"] != "allow":
+            _update_row(
+                conn,
+                db_lock,
+                ledger_id,
+                status="rejected",
+                last_error=f"reserve_preflight:{preflight['reason']}",
+            )
+            return {
+                "status": "rejected",
+                "ledger_id": ledger_id,
+                "reason": preflight["reason"],
+                "preflight": preflight,
+            }
+
         _update_row(conn, db_lock, ledger_id, status="submitting")
         result = client.create_market_order(
             symbol=symbol,
@@ -1522,11 +1851,25 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
             LIMIT 1
             """
         ).fetchone()
+        latest_preflight = conn.execute(
+            """
+            SELECT preflight_ts, preflight_decision, preflight_reason,
+                   preflight_open_exposure_usd, preflight_new_notional_usd,
+                   preflight_max_exposure_usd, preflight_balance_usd,
+                   preflight_unrealized_pnl_usd, preflight_equity_usd,
+                   preflight_equity_reserve_usd
+            FROM bybit_demo_positions
+            WHERE preflight_ts IS NOT NULL
+            ORDER BY preflight_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
     leak_count = int(row[4] or 0)
     confirmed_leak_count = int(row[5] or 0)
     uncertain_leak_count = int(row[6] or 0)
     fallback_pre_gate_count = int(row[7] or 0)
     fallback_post_fix_count = int(row[8] or 0)
+    config = reserve_config()
     return {
         "enabled": client.enabled,
         "configured": client.enabled,
@@ -1535,6 +1878,27 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
         "relay_configured": client.relay_configured,
         "configuration_error": client.configuration_error,
         "notional_usd": BYBIT_DEMO_NOTIONAL_USD,
+        "reserve_preflight": {
+            "max_exposure_usd": config["max_exposure_usd"],
+            "equity_reserve_usd": config["equity_reserve_usd"],
+            "configuration_error": config["configuration_error"],
+            "latest": (
+                {
+                    "timestamp": latest_preflight[0],
+                    "decision": latest_preflight[1],
+                    "reason": latest_preflight[2],
+                    "open_exposure_usd": latest_preflight[3],
+                    "new_notional_usd": latest_preflight[4],
+                    "max_exposure_usd": latest_preflight[5],
+                    "balance_usd": latest_preflight[6],
+                    "unrealized_pnl_usd": latest_preflight[7],
+                    "equity_usd": latest_preflight[8],
+                    "equity_reserve_usd": latest_preflight[9],
+                }
+                if latest_preflight
+                else None
+            ),
+        },
         "total": int(row[0] or 0),
         "unfinished": int(row[1] or 0),
         "open": int(row[2] or 0),

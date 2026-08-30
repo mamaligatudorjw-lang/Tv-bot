@@ -11,7 +11,10 @@ from app import _bybit_demo_signal_allowed
 from bybit_relay import create_app as create_bybit_relay_app
 from bybit_demo import (
     BybitDemoClient,
+    BybitDemoError,
     BybitDemoSizingError,
+    BYBIT_DEMO_EQUITY_RESERVE_ENV,
+    BYBIT_DEMO_MAX_EXPOSURE_ENV,
     BYBIT_DEMO_SHADOW_GATE_FIX_TS,
     allowed_signal_variants,
     backfill_gate_metadata,
@@ -20,6 +23,8 @@ from bybit_demo import (
     initialize_schema,
     is_allowed_signal,
     poll_positions,
+    reserve_preflight,
+    reserve_config,
     status_snapshot,
     submit_signal,
 )
@@ -58,6 +63,7 @@ class FakeTradingClient:
         self.order = []
         self.positions = []
         self.closed = []
+        self.wallet_balance = [{"totalWalletBalance": "1000"}]
 
     def get_instrument_info(self, symbol):
         return {"min_order_qty": 0.001, "qty_step": 0.001, "tick_size": 0.1}
@@ -77,6 +83,12 @@ class FakeTradingClient:
 
     def get_position(self, symbol):
         return list(self.positions)
+
+    def get_open_positions(self):
+        return list(self.positions)
+
+    def get_wallet_balance(self):
+        return list(self.wallet_balance)
 
     def get_closed_pnl(self, symbol):
         return list(self.closed)
@@ -314,6 +326,179 @@ def test_quantity_rounds_down_to_step_and_never_exceeds_requested_notional():
         calculate_linear_quantity(50, 10_000, "1", "1")
 
 
+@pytest.mark.parametrize(
+    ("open_exposure", "expected_decision", "expected_reason"),
+    [
+        (449.0, "allow", "allowed"),
+        (450.0, "allow", "allowed"),
+        (451.0, "blocked", "exposure_cap"),
+    ],
+)
+def test_reserve_preflight_exposure_gate_boundaries(
+    open_exposure, expected_decision, expected_reason
+):
+    client = FakeTradingClient()
+    client.positions = [{
+        "symbol": "BTCUSDT",
+        "size": "1",
+        "positionValue": str(open_exposure),
+        "unrealisedPnl": "0",
+    }]
+
+    result = reserve_preflight(client, 50.0)
+
+    assert result["decision"] == expected_decision
+    assert result["reason"] == expected_reason
+    assert result["open_exposure_usd"] == pytest.approx(open_exposure)
+    assert result["exposure_gate_passed"] is (expected_decision == "allow")
+
+
+@pytest.mark.parametrize(
+    ("balance", "unrealized_pnl", "expected_decision", "expected_reason"),
+    [
+        ("101", "-1", "allow", "allowed"),
+        ("100", "0", "allow", "allowed"),
+        ("99", "0", "blocked", "equity_floor"),
+        ("1000", "-1", "allow", "allowed"),
+    ],
+)
+def test_reserve_preflight_equity_floor_and_unrealized_pnl(
+    balance, unrealized_pnl, expected_decision, expected_reason
+):
+    client = FakeTradingClient()
+    client.wallet_balance = [{"totalWalletBalance": balance}]
+    client.positions = [{
+        "symbol": "BTCUSDT",
+        "size": "1",
+        "positionValue": "50",
+        "unrealisedPnl": unrealized_pnl,
+    }]
+
+    result = reserve_preflight(client, 50.0)
+
+    assert result["decision"] == expected_decision
+    assert result["reason"] == expected_reason
+    assert result["equity_usd"] == pytest.approx(
+        float(balance) + float(unrealized_pnl)
+    )
+    assert result["equity_gate_passed"] is (expected_decision == "allow")
+
+
+def test_reserve_preflight_reads_validated_environment_overrides(monkeypatch):
+    monkeypatch.setenv(BYBIT_DEMO_MAX_EXPOSURE_ENV, "600")
+    monkeypatch.setenv(BYBIT_DEMO_EQUITY_RESERVE_ENV, "250")
+    config = reserve_config()
+
+    assert config == {
+        "valid": True,
+        "configuration_error": None,
+        "max_exposure_usd": 600.0,
+        "equity_reserve_usd": 250.0,
+    }
+
+
+def test_reserve_preflight_invalid_environment_fails_closed(monkeypatch):
+    monkeypatch.setenv(BYBIT_DEMO_MAX_EXPOSURE_ENV, "not-a-number")
+    client = FakeTradingClient()
+
+    result = reserve_preflight(client, 50.0)
+
+    assert result["decision"] == "error"
+    assert result["reason"] == "configuration_invalid"
+    assert client.create_calls == []
+
+
+def test_blocked_reserve_preflight_records_observed_values_and_never_posts():
+    conn = _db()
+    db_lock = threading.Lock()
+    client = FakeTradingClient()
+    client.positions = [{
+        "symbol": "BTCUSDT",
+        "size": "1",
+        "positionValue": "451",
+        "unrealisedPnl": "0",
+    }]
+    original_positions = list(client.positions)
+
+    result = submit_signal(
+        conn,
+        db_lock,
+        client,
+        strategy="overheated_24h",
+        confirmation_level=None,
+        source_demo_position_id=501,
+        signal_ts=1_700_000_000,
+        symbol="BTCUSDT",
+        direction="LONG",
+        signal_price=100,
+        entry_price=100,
+        sl_price=95,
+        tp_price=110,
+    )
+
+    assert result["status"] == "rejected"
+    assert result["reason"] == "exposure_cap"
+    assert client.create_calls == []
+    assert client.positions == original_positions
+    row = conn.execute(
+        """
+        SELECT status, last_error, preflight_decision, preflight_reason,
+               preflight_open_exposure_usd, preflight_equity_usd
+        FROM bybit_demo_positions
+        """
+    ).fetchone()
+    assert row[0] == "rejected"
+    assert row[1] == "reserve_preflight:exposure_cap"
+    assert row[2:] == ("blocked", "exposure_cap", 451.0, 1000.0)
+    snapshot = status_snapshot(conn, db_lock, client)
+    latest = snapshot["reserve_preflight"]["latest"]
+    assert latest["decision"] == "blocked"
+    assert latest["reason"] == "exposure_cap"
+    assert latest["open_exposure_usd"] == 451.0
+    assert latest["equity_usd"] == 1000.0
+    assert "relay-secret" not in json.dumps(snapshot)
+
+
+def test_reserve_preflight_relay_error_is_fail_closed_without_post():
+    class RelayErrorClient(FakeTradingClient):
+        def get_wallet_balance(self):
+            raise BybitDemoError(
+                "/v5/account/wallet-balance",
+                "transport_error",
+                retryable=True,
+                transport=True,
+            )
+
+    conn = _db()
+    db_lock = threading.Lock()
+    client = RelayErrorClient()
+
+    result = submit_signal(
+        conn,
+        db_lock,
+        client,
+        strategy="overheated_24h",
+        confirmation_level=None,
+        source_demo_position_id=502,
+        signal_ts=1_700_000_001,
+        symbol="ETHUSDT",
+        direction="SHORT",
+        signal_price=100,
+        entry_price=100,
+        sl_price=105,
+        tp_price=90,
+    )
+
+    assert result["status"] == "rejected"
+    assert result["reason"] == "relay_or_api_error"
+    assert client.create_calls == []
+    row = conn.execute(
+        "SELECT status, preflight_decision, preflight_reason "
+        "FROM bybit_demo_positions"
+    ).fetchone()
+    assert row == ("rejected", "error", "relay_or_api_error")
+
+
 def test_submit_signal_is_idempotent_and_keeps_paper_table_separate():
     conn = _db()
     db_lock = threading.Lock()
@@ -514,6 +699,35 @@ def test_client_uses_https_relay_and_keeps_relay_token_out_of_url():
     assert "params" not in kwargs
     assert kwargs["headers"]["X-Bybit-Relay-Token"] == "relay-secret"
     assert "relay-secret" not in url
+
+
+def test_client_reads_reserve_inputs_through_https_relay():
+    session = RecordingSession()
+    client = BybitDemoClient(
+        "api-key",
+        "api-secret",
+        relay_url="https://relay.example.test",
+        relay_token="relay-secret",
+        session=session,
+        clock=lambda: 1_700_000_000,
+    )
+
+    client.get_wallet_balance()
+    client.get_open_positions()
+
+    assert [call[0] for call in session.calls] == ["GET", "GET"]
+    assert session.calls[0][1] == (
+        "https://relay.example.test/v5/account/wallet-balance"
+        "?accountType=UNIFIED&coin=USDT"
+    )
+    assert session.calls[1][1] == (
+        "https://relay.example.test/v5/position/list"
+        "?category=linear&settleCoin=USDT"
+    )
+    assert all(
+        call[2]["headers"]["X-Bybit-Relay-Token"] == "relay-secret"
+        for call in session.calls
+    )
 
 
 def test_client_rejects_incomplete_or_insecure_relay_configuration():

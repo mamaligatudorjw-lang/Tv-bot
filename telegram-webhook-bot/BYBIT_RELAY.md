@@ -13,6 +13,10 @@ Set these values as environment secrets on the bot:
   string, or fragment.
 - `BYBIT_RELAY_TOKEN` — high-entropy shared token. The same value must be set
   on the relay host.
+- `BYBIT_DEMO_MAX_EXPOSURE_USD` — maximum nominal open linear exposure before a
+  new order; defaults to `500`.
+- `BYBIT_DEMO_EQUITY_RESERVE_USD` — minimum account equity for a new order;
+  defaults to `100`.
 
 The existing `BYBIT_DEMO_API_KEY` and `BYBIT_DEMO_API_SECRET` remain the
 Bybit credentials. They are signed by the bot and forwarded only to the
@@ -49,6 +53,26 @@ does not contact Bybit.
 3. Run a signed read-only Demo request.
 4. Only then allow one approved signal to submit the `$50` market order with
    TP/SL and verify the local ledger plus polling.
+
+Before every new order, the bot performs two additional signed read-only
+requests through the relay:
+
+- `GET /v5/account/wallet-balance` for the unified USDT wallet balance.
+- `GET /v5/position/list?category=linear&settleCoin=USDT` for all linear
+  positions.
+
+The order is allowed only when both independent checks pass:
+
+```text
+nominal_open_exposure + 50 <= max_exposure
+balance + sum(unrealized_pnl) >= equity_reserve
+```
+
+Equality at either boundary is allowed. Invalid reserve environment values or
+incomplete account/position responses fail closed and do not send
+`/v5/order/create`. The decision and observed numeric values are recorded in
+the separate `bybit_demo_positions` ledger and safe status snapshot; no raw
+Bybit payload or credential is exposed.
 
 An upstream timeout or relay `502/504` is treated as an uncertain result for
 order submission. The ledger records the failure and the bot does not
