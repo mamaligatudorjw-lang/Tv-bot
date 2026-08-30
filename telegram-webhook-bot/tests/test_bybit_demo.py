@@ -393,6 +393,75 @@ def test_polling_closes_filled_position_from_closed_pnl():
     assert row == ("closed", 110.0, 4.75, 0.2, "tp")
 
 
+def test_polling_allocates_aggregate_exchange_close_across_entries():
+    conn = _db()
+    db_lock = threading.Lock()
+    client = FakeTradingClient()
+    common = dict(
+        strategy="overheated_24h",
+        confirmation_level=None,
+        signal_ts=int(time.time()),
+        symbol="ZKCUSDT",
+        direction="LONG",
+        signal_price=100,
+        entry_price=100,
+        sl_price=95,
+        tp_price=110,
+        source_is_shadow=False,
+    )
+    first = submit_signal(
+        conn,
+        db_lock,
+        client,
+        source_demo_position_id=100,
+        **common,
+    )
+    client.order = []
+    second = submit_signal(
+        conn,
+        db_lock,
+        client,
+        source_demo_position_id=101,
+        **common,
+    )
+    assert first["status"] == "submitted"
+    assert second["status"] == "submitted"
+
+    entry_ms = (int(time.time()) - 100) * 1000
+    client.order = [{
+        "orderId": "order-1",
+        "orderStatus": "Filled",
+        "cumExecQty": "1",
+        "avgPrice": "100",
+        "createdTime": entry_ms,
+    }]
+    event_ms = entry_ms + 5_000
+    client.closed = [{
+        "symbol": "ZKCUSDT",
+        "avgEntryPrice": "100",
+        "avgExitPrice": "110",
+        "closedPnl": "6.74939849",
+        "openFee": "0.05545813",
+        "closeFee": "0.05923338",
+        "closedSize": "2",
+        "createdTime": event_ms,
+        "updatedTime": event_ms,
+    }]
+
+    polled = poll_positions(conn, db_lock, client)
+    rows = conn.execute(
+        """
+        SELECT status, exit_price, realized_pnl_usd, fee_usd, ts_closed
+        FROM bybit_demo_positions ORDER BY id
+        """
+    ).fetchall()
+    assert polled["closed"] == 2
+    assert rows == [
+        ("closed", 110.0, pytest.approx(3.374699245), pytest.approx(0.057345755), event_ms // 1000),
+        ("closed", 110.0, pytest.approx(3.374699245), pytest.approx(0.057345755), event_ms // 1000),
+    ]
+
+
 def test_recovery_never_posts_when_order_is_ambiguous_or_missing():
     conn = _db()
     db_lock = threading.Lock()

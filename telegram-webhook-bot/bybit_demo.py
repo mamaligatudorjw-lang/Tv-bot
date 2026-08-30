@@ -907,11 +907,31 @@ def _infer_exit_reason(
     return "manual_or_exchange"
 
 
+def _exchange_order_created_ms(row: dict[str, Any]) -> int | None:
+    """Read the exchange order creation time from the durable raw order."""
+    raw_order = row.get("raw_order_json")
+    if not raw_order:
+        return None
+    try:
+        payload = json.loads(raw_order) if isinstance(raw_order, str) else raw_order
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        created = int(payload.get("createdTime") or 0)
+    except (TypeError, ValueError):
+        return None
+    return created if created > 0 else None
+
+
 def _latest_closed_pnl(
     closed_rows: list[dict[str, Any]], row: dict[str, Any]
 ) -> dict[str, Any] | None:
     candidates = []
-    minimum_ms = int((row.get("ts_submitted") or row["ts_created"]) * 1000)
+    minimum_ms = _exchange_order_created_ms(row)
+    if minimum_ms is None:
+        minimum_ms = int((row.get("ts_submitted") or row["ts_created"]) * 1000)
     for item in closed_rows:
         if str(item.get("symbol", "")).upper() != str(row["symbol"]).upper():
             continue
@@ -926,6 +946,75 @@ def _latest_closed_pnl(
         return None
     candidates.sort(key=lambda pair: pair[0], reverse=True)
     return candidates[0][1]
+
+
+def _closed_event_ts(closed_pnl: dict[str, Any], fallback: int) -> int:
+    """Return the exchange close time, falling back to the poll time."""
+    for field in ("updatedTime", "closeTime", "createdTime"):
+        try:
+            value = int(closed_pnl.get(field) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value // 1000 if value > 10_000_000_000 else value
+    return fallback
+
+
+def _closed_pnl_allocation(
+    rows: list[dict[str, Any]],
+    row: dict[str, Any],
+    closed_rows: list[dict[str, Any]],
+    closed_pnl: dict[str, Any],
+) -> float:
+    """Allocate one aggregate exchange close across matching ledger entries."""
+    matching_rows = []
+    for candidate in rows:
+        if (
+            str(candidate.get("symbol", "")).upper()
+            != str(row.get("symbol", "")).upper()
+            or str(candidate.get("direction", "")).upper()
+            != str(row.get("direction", "")).upper()
+            or str(candidate.get("status", "")).lower() in _TERMINAL_STATUSES
+        ):
+            continue
+        if _latest_closed_pnl(closed_rows, candidate) is closed_pnl:
+            matching_rows.append(candidate)
+    if not matching_rows:
+        # On the first poll, sibling rows may not have received their raw
+        # exchange order metadata yet.  The current batch is still the
+        # authoritative set for this symbol/direction, so allocate across
+        # that group rather than writing the aggregate twice.
+        matching_rows = [
+            candidate
+            for candidate in rows
+            if (
+                str(candidate.get("symbol", "")).upper()
+                == str(row.get("symbol", "")).upper()
+                and str(candidate.get("direction", "")).upper()
+                == str(row.get("direction", "")).upper()
+                and str(candidate.get("status", "")).lower()
+                not in _TERMINAL_STATUSES
+            )
+        ]
+    if not matching_rows:
+        return 1.0
+
+    quantities: dict[int, float] = {}
+    for candidate in matching_rows:
+        try:
+            quantity = float(
+                candidate.get("executed_qty")
+                or candidate.get("qty")
+                or candidate.get("position_size")
+                or 0
+            )
+        except (TypeError, ValueError):
+            quantity = 0.0
+        quantities[int(candidate["id"])] = max(quantity, 0.0)
+    total_quantity = sum(quantities.values())
+    if total_quantity <= 0:
+        return 1.0
+    return quantities.get(int(row["id"]), 0.0) / total_quantity
 
 
 def submit_signal(
@@ -1299,6 +1388,15 @@ def poll_positions(
                         fees += float(closed_pnl.get(fee_key) or 0)
                     except (TypeError, ValueError):
                         pass
+                allocation = _closed_pnl_allocation(
+                    rows,
+                    row,
+                    closed_cache[symbol],
+                    closed_pnl,
+                )
+                if realized is not None:
+                    realized *= allocation
+                fees *= allocation
                 reason = _infer_exit_reason(
                     row["direction"],
                     exit_price,
@@ -1316,7 +1414,7 @@ def poll_positions(
                     realized_pnl_usd=realized,
                     fee_usd=fees,
                     exit_reason=reason,
-                    ts_closed=now,
+                    ts_closed=_closed_event_ts(closed_pnl, now),
                     last_polled=now,
                     raw_execution_json=_json({
                         "executions": execution_cache.get(
@@ -1328,11 +1426,12 @@ def poll_positions(
                 )
                 logger.info(
                     "bybit_demo_position_closed ledger_id=%d symbol=%s "
-                    "reason=%s pnl_usd=%s",
+                    "reason=%s pnl_usd=%s allocation=%.6f",
                     row_id,
                     symbol,
                     reason,
                     f"{realized:.8g}" if realized is not None else "unknown",
+                    allocation,
                 )
                 polled += 1
                 closed += 1
