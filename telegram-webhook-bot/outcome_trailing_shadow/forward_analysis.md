@@ -33,7 +33,7 @@ Before both strategies reach the minimum sample, the report is explicitly insuff
     }
   },
   "freeze_utc": "2026-08-26T11:50:58+00:00",
-  "generated_utc": "2026-08-30T05:51:08.000776+00:00",
+  "generated_utc": "2026-08-30T05:53:23.052549+00:00",
   "historical_candles_used": false,
   "minimum_forward_pairs_per_strategy": 20,
   "rolling_update": true,
