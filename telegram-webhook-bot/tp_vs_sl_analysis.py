@@ -1149,6 +1149,12 @@ def build_report(
             "r_definition": "directional exit-vs-entry divided by absolute entry-to-SL risk",
             "minimum_group_n": MIN_GROUP_N,
             "read_only": True,
+            "comparison_statistics": {
+                "primary_effect": "TP mean minus SL mean",
+                "primary_ci": "95% percentile bootstrap CI for the unpaired mean difference",
+                "bootstrap_iterations": BOOTSTRAP_ITERATIONS,
+                "additional_effect": "Cliff's delta with permutation p-value",
+            },
             "historical_candle_interval": HISTORICAL_INTERVAL,
             "historical_candle_rule": "candle_open + 1h <= ts_open; gapped windows are unavailable",
             "in_sample_rule_warning": (
@@ -1292,19 +1298,31 @@ def write_outputs(
         "",
         "## Feature provenance",
         "",
-        "| Field | Provenance | Coverage | Meaning |",
-        "|---|---|---:|---|",
+        "The report keeps exact persisted signal-time fields separate from "
+        "runtime-log observations and reconstructed historical proxies.",
     ]
-    for field, meta in FEATURE_META.items():
-        count = sum(
-            row.get(field) not in (None, "")
-            for row in rows
-        )
-        coverage = 100.0 * count / len(rows) if rows else 0.0
-        lines.append(
-            f"| {meta['label']} (`{field}`) | {meta['provenance']} | "
-            f"{coverage:.1f}% | {meta['description']} |"
-        )
+    provenance_groups = (
+        ("### Exact signal-time fields", lambda meta: meta["provenance"].startswith("exact_")),
+        ("### Runtime-log observations", lambda meta: meta["provenance"].startswith("runtime_")),
+        ("### Reconstructed historical proxies", lambda meta: meta["provenance"].startswith("reconstructed_")),
+    )
+    for heading, predicate in provenance_groups:
+        lines += [
+            "",
+            heading,
+            "",
+            "| Field | Provenance | Coverage | Meaning |",
+            "|---|---|---:|---|",
+        ]
+        for field, meta in FEATURE_META.items():
+            if not predicate(meta):
+                continue
+            count = sum(row.get(field) not in (None, "") for row in rows)
+            coverage = 100.0 * count / len(rows) if rows else 0.0
+            lines.append(
+                f"| {meta['label']} (`{field}`) | {meta['provenance']} | "
+                f"{coverage:.1f}% | {meta['description']} |"
+            )
     lines += ["", "## Current strategy performance", ""]
     lines += [
         "| Strategy | Cohort | total | resolved | TP | SL | WR resolved | avg R | Status |",
@@ -1371,15 +1389,20 @@ def write_outputs(
                 lines.append("")
                 continue
             lines += [
-                "| Feature | TP median (n) | SL median (n) | TP−SL median | Cliff’s δ | 95% CI δ | p |",
-                "|---|---:|---:|---:|---:|---|---:|",
+                "| Feature | TP mean (n) | SL mean (n) | TP−SL mean | 95% CI mean diff | TP median (n) | SL median (n) | Cliff’s δ | 95% CI δ | p |",
+                "|---|---:|---:|---:|---|---:|---:|---:|---|---:|",
             ]
             for comparison in item["feature_comparisons"]:
                 tp = comparison["tp_first"]
                 sl = comparison["sl_first"]
+                mean_ci = comparison["bootstrap_mean_diff_95ci"]
                 ci = comparison["bootstrap_95ci"]
                 lines.append(
                     f"| {comparison['label']} [{comparison['provenance']}] | "
+                    f"{_md_value(tp['mean'])} ({tp['n']}) | "
+                    f"{_md_value(sl['mean'])} ({sl['n']}) | "
+                    f"{_md_value(comparison['mean_diff_tp_minus_sl'])} | "
+                    f"[{_md_value(mean_ci[0])}, {_md_value(mean_ci[1])}] | "
                     f"{_md_value(tp['median'])} ({tp['n']}) | "
                     f"{_md_value(sl['median'])} ({sl['n']}) | "
                     f"{_md_value(comparison['median_diff_tp_minus_sl'])} | "

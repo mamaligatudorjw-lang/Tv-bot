@@ -1,8 +1,10 @@
 import json
+import random
 
 from tp_vs_sl_analysis import (
     MIN_GROUP_N,
     build_report,
+    compare_feature,
     enrich_rows,
     historical_features,
     metrics,
@@ -28,6 +30,7 @@ def _row(outcome, row_id=1, direction="LONG", strategy="overheated_early"):
         "exit_price": exit_price,
         "alert_type": strategy,
         "is_shadow": 1,
+        "rsi_at_signal": 55.0,
         "signal_price": entry,
     }
 
@@ -68,6 +71,7 @@ def test_enrich_rows_computes_directional_r_and_barrier_geometry():
     assert rows[0]["risk_pct"] == 5.0
     assert rows[0]["reward_risk"] == 2.0
     assert rows[0]["entry_vs_signal_pct"] == 0.0
+    assert rows[0]["rsi_at_signal"] == 55.0
     assert metrics(rows)["resolved_wr_pct"] == 50.0
     assert metrics(rows)["avg_r"] == 0.5
 
@@ -162,6 +166,12 @@ def test_historical_features_use_only_completed_contiguous_candles():
     assert features["price_return_2h_pct"] > features["price_return_1h_pct"]
     assert features["realized_vol_2h_pct"] is not None
     assert features["volume_ratio_1h_vs_24h"] is not None
+    assert features["distance_to_recent_low_24h_pct"] == pytest.approx(
+        (129.0 - 105.0) / 105.0 * 100.0
+    )
+    assert features["distance_to_recent_high_24h_pct"] == pytest.approx(
+        (130.0 - 129.0) / 130.0 * 100.0
+    )
 
     # The last candle is still forming at this timestamp and must not leak.
     before_last = historical_features(candles, candles[-1]["t"] + 1, "LONG")
@@ -186,3 +196,23 @@ def test_historical_features_mark_gapped_windows_unavailable():
     assert features["price_return_1h_pct"] is not None
     assert features["price_return_2h_pct"] is None
     assert features["price_return_4h_pct"] is None
+
+
+def test_feature_comparison_reports_bootstrap_ci_for_mean_difference():
+    tp_rows = [_row("tp", row_id=i) for i in range(1, MIN_GROUP_N + 1)]
+    sl_rows = [_row("sl", row_id=100 + i) for i in range(MIN_GROUP_N)]
+    for index, row in enumerate(tp_rows):
+        row["rsi_at_signal"] = 60.0 + index
+    for index, row in enumerate(sl_rows):
+        row["rsi_at_signal"] = 40.0 + index
+
+    comparison = compare_feature(
+        tp_rows, sl_rows, "rsi_at_signal", random.Random(42)
+    )
+
+    assert comparison["comparison_allowed"] is True
+    assert comparison["mean_diff_tp_minus_sl"] == 20.0
+    assert comparison["bootstrap_mean_diff_95ci"][0] is not None
+    assert comparison["bootstrap_mean_diff_95ci"][1] is not None
+    assert comparison["bootstrap_mean_diff_95ci"][0] <= 20.0
+    assert comparison["bootstrap_mean_diff_95ci"][1] >= 20.0
