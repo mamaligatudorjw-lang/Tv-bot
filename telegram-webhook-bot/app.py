@@ -32,6 +32,8 @@ from forward_tp_vs_sl import (
 )
 from bybit_demo import (
     BybitDemoClient,
+    backfill_gate_metadata as backfill_bybit_demo_gate_metadata,
+    is_allowed_signal as is_bybit_demo_signal_allowed,
     initialize_schema as initialize_bybit_demo_schema,
     poll_positions as poll_bybit_demo_positions,
     status_snapshot as bybit_demo_status_snapshot,
@@ -2163,12 +2165,10 @@ def _bybit_demo_signal_allowed(
     alert_type: str | None,
     confirmation_level: str | None,
 ) -> bool:
-    """Allow only the explicitly approved Bybit Demo signal variants."""
-    if alert_type == "overheated_24h":
-        return not is_shadow
+    """Apply the shared whitelist and the non-shadow gate."""
     return (
-        alert_type in {"overheated_confirmed", "ema_cross_confirmed"}
-        and confirmation_level == "1/3"
+        not is_shadow
+        and is_bybit_demo_signal_allowed(alert_type, confirmation_level)
     )
 
 
@@ -2368,6 +2368,7 @@ def _demo_open_position(
                     entry_price=float(entry_price),
                     sl_price=float(sl_price),
                     tp_price=float(tp_price),
+                    source_is_shadow=bool(is_shadow),
                 )
                 logger.info(
                     "bybit_demo_signal strategy=%s symbol=%s direction=%s "
@@ -6032,6 +6033,14 @@ def _get_db() -> sqlite3.Connection:
         # boundary; it cannot affect the source demo position or signal path.
         initialize_forward_tp_vs_sl_schema(_db_conn)
         initialize_bybit_demo_schema(_db_conn)
+        _bybit_source_shadow = {
+            int(source_id): int(source_is_shadow)
+            for source_id, source_is_shadow in _db_conn.execute(
+                "SELECT id, is_shadow FROM demo_positions"
+            ).fetchall()
+            if source_id is not None and source_is_shadow in (0, 1)
+        }
+        backfill_bybit_demo_gate_metadata(_db_conn, _bybit_source_shadow)
         _db_conn.commit()
         # Liquidity-entry strategy: parallel demo-only strategy
         _db_conn.execute("""

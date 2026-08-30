@@ -12,10 +12,15 @@ from bybit_relay import create_app as create_bybit_relay_app
 from bybit_demo import (
     BybitDemoClient,
     BybitDemoSizingError,
+    BYBIT_DEMO_SHADOW_GATE_FIX_TS,
+    allowed_signal_variants,
+    backfill_gate_metadata,
     calculate_linear_quantity,
+    classify_gate_metadata,
     initialize_schema,
     is_allowed_signal,
     poll_positions,
+    status_snapshot,
     submit_signal,
 )
 
@@ -43,6 +48,10 @@ class RecordingSession:
 
 class FakeTradingClient:
     enabled = True
+    route = "test"
+    require_relay = True
+    relay_configured = True
+    configuration_error = None
 
     def __init__(self):
         self.create_calls = []
@@ -116,20 +125,138 @@ def test_whitelist_requires_first_confirmation_only():
     assert not is_allowed_signal("overheated_confirmed", "2/3")
     assert not is_allowed_signal("ema_cross_confirmed", "3/3")
     assert not is_allowed_signal("overheated_early", None)
+    assert len(allowed_signal_variants(overheated_early_is_promoted=False)) == 3
+    assert allowed_signal_variants(overheated_early_is_promoted=False)[
+        "ema_cross_confirmed"
+    ] == "1/3"
+    assert allowed_signal_variants(overheated_early_is_promoted=True) == {
+        "overheated_24h": None,
+        "overheated_confirmed": "1/3",
+        "overheated_early": None,
+    }
+    assert is_allowed_signal(
+        "overheated_early", None, overheated_early_is_promoted=True
+    )
+    assert not is_allowed_signal(
+        "ema_cross_confirmed", "1/3", overheated_early_is_promoted=True
+    )
 
 
-def test_app_gate_excludes_overheated_shadow_but_allows_continuation_one_of_three():
+def test_app_gate_excludes_every_shadow_variant():
     assert _bybit_demo_signal_allowed(False, "overheated_24h", None)
     assert not _bybit_demo_signal_allowed(True, "overheated_24h", None)
-    assert _bybit_demo_signal_allowed(
-        True, "overheated_confirmed", "1/3"
-    )
-    assert _bybit_demo_signal_allowed(
-        True, "ema_cross_confirmed", "1/3"
-    )
+    assert _bybit_demo_signal_allowed(False, "overheated_confirmed", "1/3")
+    assert _bybit_demo_signal_allowed(False, "ema_cross_confirmed", "1/3")
+    assert not _bybit_demo_signal_allowed(True, "overheated_confirmed", "1/3")
+    assert not _bybit_demo_signal_allowed(True, "ema_cross_confirmed", "1/3")
     assert not _bybit_demo_signal_allowed(
         True, "ema_cross_confirmed", "2/3"
     )
+
+
+def test_app_gate_uses_same_conditional_third_slot(monkeypatch):
+    monkeypatch.setenv("BYBIT_DEMO_OVERHEATED_EARLY_PROMOTED", "1")
+    assert _bybit_demo_signal_allowed(False, "overheated_early", None)
+    assert not _bybit_demo_signal_allowed(
+        False, "ema_cross_confirmed", "1/3"
+    )
+    assert not _bybit_demo_signal_allowed(True, "overheated_early", None)
+
+
+def test_missing_timestamp_is_uncertain_not_a_leak():
+    metadata = classify_gate_metadata(1, None)
+    assert metadata["pre_gate_exception"] == 0
+    assert metadata["post_fix_leak"] == 0
+    assert metadata["gate_classification_uncertain"] == 1
+
+
+def test_shadow_source_is_blocked_before_ledger_and_external_order():
+    conn = _db()
+    client = FakeTradingClient()
+    result = submit_signal(
+        conn,
+        threading.Lock(),
+        client,
+        strategy="ema_cross_confirmed",
+        confirmation_level="1/3",
+        source_demo_position_id=99,
+        signal_ts=1_700_000_000,
+        symbol="BTCUSDT",
+        direction="LONG",
+        signal_price=100,
+        entry_price=100,
+        sl_price=95,
+        tp_price=110,
+        source_is_shadow=True,
+    )
+    assert result == {"status": "filtered", "reason": "shadow_source"}
+    assert client.create_calls == []
+    assert conn.execute("SELECT COUNT(*) FROM bybit_demo_positions").fetchone()[0] == 0
+
+
+def test_backfill_prefers_source_fact_and_marks_timestamp_fallback_uncertain():
+    conn = _db()
+    conn.execute(
+        """
+        INSERT INTO bybit_demo_positions (
+            signal_key, signal_ts, strategy, confirmation_level, symbol, direction,
+            source_demo_position_id, signal_price, entry_price, sl_price, tp_price,
+            order_link_id, ts_created, ts_submitted
+        ) VALUES ('legacy-source', 10, 'ema_cross_confirmed', '1/3', 'ZKCUSDT',
+                  'LONG', 7, 100, 100, 95, 110, 'link-source', ?, ?)
+        """,
+        (BYBIT_DEMO_SHADOW_GATE_FIX_TS - 100, BYBIT_DEMO_SHADOW_GATE_FIX_TS - 50),
+    )
+    conn.execute(
+        """
+        INSERT INTO bybit_demo_positions (
+            signal_key, signal_ts, strategy, confirmation_level, symbol, direction,
+            signal_price, entry_price, sl_price, tp_price, order_link_id, ts_created
+        ) VALUES ('legacy-fallback', 10, 'ema_cross_confirmed', '1/3', 'BTCUSDT',
+                  'LONG', 100, 100, 95, 110, 'link-fallback', ?)
+        """,
+        (BYBIT_DEMO_SHADOW_GATE_FIX_TS + 50,),
+    )
+    backfill_gate_metadata(conn, {7: 1})
+    source_row = conn.execute(
+        """
+        SELECT shadow_origin, pre_gate_exception, post_fix_leak,
+               gate_classification_uncertain, fallback_pre_gate_exception,
+               fallback_post_fix_leak
+        FROM bybit_demo_positions WHERE signal_key='legacy-source'
+        """
+    ).fetchone()
+    fallback_row = conn.execute(
+        """
+        SELECT shadow_origin, pre_gate_exception, post_fix_leak,
+               gate_classification_uncertain, fallback_pre_gate_exception,
+               fallback_post_fix_leak
+        FROM bybit_demo_positions WHERE signal_key='legacy-fallback'
+        """
+    ).fetchone()
+    assert source_row == (1, 1, 0, 0, 0, 0)
+    assert fallback_row == (None, 0, 0, 1, 0, 1)
+
+
+def test_status_exposes_post_fix_leak_identity_without_secrets():
+    conn = _db()
+    conn.execute(
+        """
+        INSERT INTO bybit_demo_positions (
+            signal_key, signal_ts, strategy, confirmation_level, symbol, direction,
+            signal_price, entry_price, sl_price, tp_price, order_link_id, ts_created,
+            shadow_origin, post_fix_leak
+        ) VALUES ('post-fix', 10, 'ema_cross_confirmed', '1/3', 'LEAKUSDT',
+                  'LONG', 100, 100, 95, 110, 'link-post-fix', ?, 1, 1)
+        """,
+        (BYBIT_DEMO_SHADOW_GATE_FIX_TS + 1,),
+    )
+    snapshot = status_snapshot(conn, threading.Lock(), FakeTradingClient())
+    assert snapshot["post_fix_leak_count"] == 1
+    assert snapshot["post_fix_leak_alert"] is True
+    assert snapshot["post_fix_leak_latest"]["symbol"] == "LEAKUSDT"
+    assert snapshot["post_fix_leak_latest"]["timestamp"] == BYBIT_DEMO_SHADOW_GATE_FIX_TS + 1
+    assert "api_secret" not in json.dumps(snapshot).lower()
 
 
 def test_quantity_rounds_down_to_step_and_never_exceeds_requested_notional():
@@ -156,6 +283,7 @@ def test_submit_signal_is_idempotent_and_keeps_paper_table_separate():
         entry_price=100,
         sl_price=95,
         tp_price=110,
+        source_is_shadow=False,
     )
 
     first = submit_signal(conn, db_lock, client, **args)
@@ -165,11 +293,12 @@ def test_submit_signal_is_idempotent_and_keeps_paper_table_separate():
     assert second["status"] == "duplicate"
     assert len(client.create_calls) == 1
     row = conn.execute(
-        "SELECT strategy, confirmation_level, status, order_id, qty "
+        "SELECT strategy, confirmation_level, status, order_id, qty, shadow_origin "
         "FROM bybit_demo_positions"
     ).fetchone()
     assert row[:4] == ("ema_cross_confirmed", "1/3", "submitted", "order-1")
     assert row[4] == pytest.approx(0.5)
+    assert row[5] == 0
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='demo_positions'"
     ).fetchone() is None

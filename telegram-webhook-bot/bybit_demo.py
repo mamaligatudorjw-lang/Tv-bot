@@ -30,6 +30,11 @@ BYBIT_DEMO_REQUEST_TIMEOUT = 8.0
 BYBIT_DEMO_MAX_POLL_ROWS = 25
 BYBIT_RELAY_URL_ENV = "BYBIT_RELAY_URL"
 BYBIT_RELAY_TOKEN_ENV = "BYBIT_RELAY_TOKEN"
+BYBIT_DEMO_EARLY_PROMOTED_ENV = "BYBIT_DEMO_OVERHEATED_EARLY_PROMOTED"
+# Effective boundary for the unified shadow gate.  Existing orders were
+# created before this implementation was activated and are classified as
+# historical exceptions during the startup backfill.
+BYBIT_DEMO_SHADOW_GATE_FIX_TS = 1_788_081_470
 
 _TERMINAL_STATUSES = {"closed", "rejected"}
 _POLL_STATUSES = {
@@ -41,11 +46,35 @@ _POLL_STATUSES = {
     "unknown",
 }
 
-_ALLOWED_STRATEGIES = {
-    "overheated_24h": None,
-    "overheated_confirmed": "1/3",
-    "ema_cross_confirmed": "1/3",
-}
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def overheated_early_promoted() -> bool:
+    """Return the single configured decision for the third whitelist slot."""
+    return _env_flag(BYBIT_DEMO_EARLY_PROMOTED_ENV, False)
+
+
+def allowed_signal_variants(
+    *,
+    overheated_early_is_promoted: bool | None = None,
+) -> dict[str, str | None]:
+    """Return exactly three Bybit variants for the current policy state."""
+    promoted = (
+        overheated_early_promoted()
+        if overheated_early_is_promoted is None
+        else bool(overheated_early_is_promoted)
+    )
+    return {
+        "overheated_24h": None,
+        "overheated_confirmed": "1/3",
+        "overheated_early" if promoted else "ema_cross_confirmed": (
+            None if promoted else "1/3"
+        ),
+    }
 
 
 class BybitDemoError(RuntimeError):
@@ -117,12 +146,69 @@ def normalize_price(price: float, tick_size: float | str, *, direction: str, is_
     return float(normalized)
 
 
-def is_allowed_signal(strategy: str | None, confirmation_level: str | None) -> bool:
+def is_allowed_signal(
+    strategy: str | None,
+    confirmation_level: str | None,
+    *,
+    overheated_early_is_promoted: bool | None = None,
+) -> bool:
     """Apply the explicit three-strategy Bybit whitelist."""
-    if strategy not in _ALLOWED_STRATEGIES:
+    variants = allowed_signal_variants(
+        overheated_early_is_promoted=overheated_early_is_promoted
+    )
+    if strategy not in variants:
         return False
-    required = _ALLOWED_STRATEGIES[strategy]
+    required = variants[strategy]
     return required is None or confirmation_level == required
+
+
+def classify_gate_metadata(
+    shadow_origin: int | bool | None,
+    placement_ts: int | float | None,
+    *,
+    cutoff_ts: int = BYBIT_DEMO_SHADOW_GATE_FIX_TS,
+) -> dict[str, int]:
+    """Classify a ledger row, preferring source fact over timestamp fallback."""
+    known_shadow = shadow_origin in (0, 1, False, True)
+    if known_shadow:
+        is_shadow = int(bool(shadow_origin))
+        uncertain = 0
+    else:
+        is_shadow = None
+        uncertain = 1
+
+    try:
+        placement_value = float(placement_ts)
+        if not math.isfinite(placement_value):
+            raise ValueError("non-finite placement timestamp")
+        before_fix: bool | None = placement_value < float(cutoff_ts)
+    except (TypeError, ValueError):
+        before_fix = None
+        uncertain = 1
+
+    if is_shadow == 1 and before_fix is not None:
+        pre_gate_exception = int(before_fix)
+        post_fix_leak = int(not before_fix)
+    elif is_shadow == 0:
+        pre_gate_exception = 0
+        post_fix_leak = 0
+    else:
+        # Time-only classification cannot prove shadow origin.  Keep the
+        # canonical leak flags clear and expose the fallback separately.
+        pre_gate_exception = 0
+        post_fix_leak = 0
+
+    return {
+        "pre_gate_exception": pre_gate_exception,
+        "post_fix_leak": post_fix_leak,
+        "gate_classification_uncertain": uncertain,
+        "fallback_pre_gate_exception": int(
+            is_shadow is None and before_fix is True
+        ),
+        "fallback_post_fix_leak": int(
+            is_shadow is None and before_fix is False
+        ),
+    }
 
 
 def make_signal_key(
@@ -502,10 +588,33 @@ def initialize_schema(conn: Any) -> None:
             last_error TEXT,
             raw_order_json TEXT,
             raw_position_json TEXT,
-            raw_execution_json TEXT
+            raw_execution_json TEXT,
+            shadow_origin INTEGER,
+            pre_gate_exception INTEGER NOT NULL DEFAULT 0,
+            post_fix_leak INTEGER NOT NULL DEFAULT 0,
+            gate_classification_uncertain INTEGER NOT NULL DEFAULT 0,
+            fallback_pre_gate_exception INTEGER NOT NULL DEFAULT 0,
+            fallback_post_fix_leak INTEGER NOT NULL DEFAULT 0
         )
         """
     )
+    # These columns were added after the first live smoke orders.  Keep the
+    # migration local to this separate ledger; demo_positions is not altered.
+    for column, definition in (
+        ("shadow_origin", "INTEGER"),
+        ("pre_gate_exception", "INTEGER NOT NULL DEFAULT 0"),
+        ("post_fix_leak", "INTEGER NOT NULL DEFAULT 0"),
+        ("gate_classification_uncertain", "INTEGER NOT NULL DEFAULT 0"),
+        ("fallback_pre_gate_exception", "INTEGER NOT NULL DEFAULT 0"),
+        ("fallback_post_fix_leak", "INTEGER NOT NULL DEFAULT 0"),
+    ):
+        try:
+            conn.execute(
+                f"ALTER TABLE bybit_demo_positions ADD COLUMN {column} {definition}"
+            )
+        except Exception as exc:
+            if "duplicate column" not in str(exc).lower():
+                raise
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_bybit_demo_status "
         "ON bybit_demo_positions(status, symbol)"
@@ -553,6 +662,11 @@ def _update_row(conn: Any, db_lock: threading.Lock, row_id: int, **fields: Any) 
         "raw_order_json",
         "raw_position_json",
         "raw_execution_json",
+        "pre_gate_exception",
+        "post_fix_leak",
+        "gate_classification_uncertain",
+        "fallback_pre_gate_exception",
+        "fallback_post_fix_leak",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -577,6 +691,177 @@ def _get_row(conn: Any, db_lock: threading.Lock, row_id: int) -> dict[str, Any] 
         )
         row = cursor.fetchone()
         return _row_dict(cursor, row) if row else None
+
+
+def _log_post_fix_leak(
+    row: dict[str, Any],
+    metadata: dict[str, int],
+    *,
+    placement_ts: int | float | None,
+) -> None:
+    if not metadata["post_fix_leak"]:
+        return
+    source = (
+        "timestamp_fallback"
+        if metadata["gate_classification_uncertain"]
+        else "source_is_shadow"
+    )
+    logger.warning(
+        "bybit_demo_post_fix_leak ledger_id=%s strategy=%s symbol=%s "
+        "source_demo_position_id=%s placement_ts=%s classification_source=%s "
+        "reason=shadow_signal_after_gate_fix",
+        row.get("id", "-"),
+        row.get("strategy", "?"),
+        row.get("symbol", "?"),
+        row.get("source_demo_position_id", "-"),
+        placement_ts if placement_ts is not None else "-",
+        source,
+    )
+
+
+def _refresh_gate_metadata(
+    conn: Any,
+    db_lock: threading.Lock,
+    row_id: int,
+    *,
+    placement_ts: int | float | None,
+) -> dict[str, int]:
+    """Recompute report flags without ever changing the shadow snapshot."""
+    with db_lock:
+        cursor = conn.execute(
+            "SELECT id, strategy, symbol, source_demo_position_id, shadow_origin, "
+            "pre_gate_exception, post_fix_leak, gate_classification_uncertain, "
+            "fallback_pre_gate_exception, fallback_post_fix_leak "
+            "FROM bybit_demo_positions WHERE id=?",
+            (row_id,),
+        )
+        fetched = cursor.fetchone()
+        row = _row_dict(cursor, fetched) if fetched else None
+    if not row:
+        return {
+            "pre_gate_exception": 0,
+            "post_fix_leak": 0,
+            "gate_classification_uncertain": 1,
+            "fallback_pre_gate_exception": 0,
+            "fallback_post_fix_leak": 0,
+        }
+    metadata = classify_gate_metadata(row.get("shadow_origin"), placement_ts)
+    changed = any(
+        int(row.get(key) or 0) != value
+        for key, value in metadata.items()
+    )
+    if changed:
+        _update_row(conn, db_lock, row_id, **metadata)
+    if metadata["post_fix_leak"] and not int(row.get("post_fix_leak") or 0):
+        _log_post_fix_leak(row, metadata, placement_ts=placement_ts)
+    return metadata
+
+
+def backfill_gate_metadata(
+    conn: Any,
+    source_shadow_by_id: dict[int, int | None],
+) -> dict[str, int]:
+    """Backfill source snapshots and report flags using source facts first.
+
+    The caller supplies the source facts so this module remains independent of
+    the paper-trading table.  A resolved source value wins over timestamps;
+    rows without a resolved source use an explicitly uncertain time fallback.
+    """
+    cursor = conn.execute(
+        "SELECT id, strategy, symbol, source_demo_position_id, shadow_origin, "
+        "ts_submitted, ts_created, pre_gate_exception, post_fix_leak, "
+        "gate_classification_uncertain, fallback_pre_gate_exception, "
+        "fallback_post_fix_leak FROM bybit_demo_positions ORDER BY id"
+    )
+    rows = [_row_dict(cursor, row) for row in cursor.fetchall()]
+    counts = {
+        "updated": 0,
+        "pre_gate_exception": 0,
+        "post_fix_leak": 0,
+        "uncertain_fallback": 0,
+    }
+    for row in rows:
+        source_id = row.get("source_demo_position_id")
+        source_known = (
+            source_id is not None
+            and int(source_id) in source_shadow_by_id
+            and source_shadow_by_id[int(source_id)] in (0, 1)
+        )
+        existing_shadow = row.get("shadow_origin")
+        shadow_origin = (
+            int(existing_shadow)
+            if existing_shadow in (0, 1, False, True)
+            else (
+                int(source_shadow_by_id[int(source_id)])
+                if source_known
+                else None
+            )
+        )
+        placement_ts = row.get("ts_submitted") or row.get("ts_created")
+        # Older polling rewrote ts_submitted on every reconciliation.  For
+        # rows created before this gate, a later value is that polling
+        # timestamp rather than the first order attempt; restore the durable
+        # creation-time boundary before classifying the historical row.
+        repaired_legacy_submission = False
+        try:
+            if (
+                row.get("ts_created") is not None
+                and row.get("ts_submitted") is not None
+                and int(row["ts_created"]) < BYBIT_DEMO_SHADOW_GATE_FIX_TS
+                and int(row["ts_submitted"]) >= BYBIT_DEMO_SHADOW_GATE_FIX_TS
+            ):
+                placement_ts = row["ts_created"]
+                repaired_legacy_submission = True
+                conn.execute(
+                    "UPDATE bybit_demo_positions SET ts_submitted=ts_created "
+                    "WHERE id=?",
+                    (row["id"],),
+                )
+        except (TypeError, ValueError):
+            pass
+        metadata = classify_gate_metadata(shadow_origin, placement_ts)
+        needs_update = (
+            (shadow_origin is not None and existing_shadow is None)
+            or repaired_legacy_submission
+            or any(int(row.get(key) or 0) != value for key, value in metadata.items())
+        )
+        if needs_update:
+            conn.execute(
+                """
+                UPDATE bybit_demo_positions
+                SET shadow_origin=?,
+                    pre_gate_exception=?,
+                    post_fix_leak=?,
+                    gate_classification_uncertain=?,
+                    fallback_pre_gate_exception=?,
+                    fallback_post_fix_leak=?
+                WHERE id=?
+                """,
+                (
+                    shadow_origin,
+                    metadata["pre_gate_exception"],
+                    metadata["post_fix_leak"],
+                    metadata["gate_classification_uncertain"],
+                    metadata["fallback_pre_gate_exception"],
+                    metadata["fallback_post_fix_leak"],
+                    row["id"],
+                ),
+            )
+            counts["updated"] += 1
+        counts["pre_gate_exception"] += metadata["pre_gate_exception"]
+        counts["post_fix_leak"] += metadata["post_fix_leak"]
+        counts["uncertain_fallback"] += (
+            metadata["fallback_pre_gate_exception"]
+            + metadata["fallback_post_fix_leak"]
+        )
+        if metadata["post_fix_leak"] and not int(row.get("post_fix_leak") or 0):
+            _log_post_fix_leak(
+                {**row, "shadow_origin": shadow_origin},
+                metadata,
+                placement_ts=placement_ts,
+            )
+    conn.commit()
+    return counts
 
 
 def _map_order_status(order_status: str | None, executed_qty: float) -> str:
@@ -658,11 +943,16 @@ def submit_signal(
     entry_price: float,
     sl_price: float,
     tp_price: float,
+    source_is_shadow: bool | None = None,
     notional_usd: float = BYBIT_DEMO_NOTIONAL_USD,
 ) -> dict[str, Any]:
     """Create one idempotent intent and submit exactly one market order."""
     if not is_allowed_signal(strategy, confirmation_level):
         return {"status": "filtered", "reason": "strategy_or_confirmation"}
+    if source_is_shadow is True:
+        # Defense in depth: the app gate runs first, but this isolated client
+        # must also refuse a shadow source before creating an intent.
+        return {"status": "filtered", "reason": "shadow_source"}
     if not client.enabled:
         return {"status": "disabled", "reason": client.disabled_reason}
     if direction not in {"LONG", "SHORT"}:
@@ -681,6 +971,7 @@ def submit_signal(
     )
     order_link_id = make_order_link_id(signal_key)
     now = int(time.time())
+    gate_metadata = classify_gate_metadata(source_is_shadow, now)
 
     with db_lock:
         initialize_schema(conn)
@@ -701,8 +992,11 @@ def submit_signal(
             INSERT INTO bybit_demo_positions (
                 signal_key, signal_ts, source_demo_position_id, strategy,
                 confirmation_level, symbol, direction, signal_price, entry_price,
-                sl_price, tp_price, notional_usd, status, order_link_id, ts_created
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?)
+                sl_price, tp_price, notional_usd, status, order_link_id, ts_created,
+                shadow_origin, pre_gate_exception, post_fix_leak,
+                gate_classification_uncertain, fallback_pre_gate_exception,
+                fallback_post_fix_leak
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'intent', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 signal_key,
@@ -719,10 +1013,27 @@ def submit_signal(
                 float(notional_usd),
                 order_link_id,
                 now,
+                source_is_shadow,
+                gate_metadata["pre_gate_exception"],
+                gate_metadata["post_fix_leak"],
+                gate_metadata["gate_classification_uncertain"],
+                gate_metadata["fallback_pre_gate_exception"],
+                gate_metadata["fallback_post_fix_leak"],
             ),
         )
         ledger_id = int(cursor.lastrowid)
         conn.commit()
+    if gate_metadata["post_fix_leak"]:
+        _log_post_fix_leak(
+            {
+                "id": ledger_id,
+                "strategy": strategy,
+                "symbol": symbol.upper(),
+                "source_demo_position_id": source_demo_position_id,
+            },
+            gate_metadata,
+            placement_ts=now,
+        )
 
     try:
         instrument = client.get_instrument_info(symbol)
@@ -820,6 +1131,17 @@ def _record_order(
 ) -> None:
     order_id = str(order.get("orderId") or "") or None
     order_link_id = str(order.get("orderLinkId") or "") or None
+    with db_lock:
+        existing_cursor = conn.execute(
+            "SELECT ts_submitted FROM bybit_demo_positions WHERE id=?",
+            (ledger_id,),
+        )
+        existing_submission = existing_cursor.fetchone()
+    first_submitted_at = (
+        int(existing_submission[0])
+        if existing_submission and existing_submission[0] is not None
+        else now
+    )
     try:
         executed_qty = float(order.get("cumExecQty") or 0)
     except (TypeError, ValueError):
@@ -835,7 +1157,7 @@ def _record_order(
         "order_status": order.get("orderStatus"),
         "executed_qty": executed_qty,
         "avg_entry_price": avg_price,
-        "ts_submitted": now,
+        "ts_submitted": first_submitted_at,
         "ts_filled": now if str(order.get("orderStatus", "")).lower() == "filled" else None,
         "last_polled": now,
         "last_error": None,
@@ -846,6 +1168,12 @@ def _record_order(
     if order_link_id:
         fields["order_link_id"] = order_link_id
     _update_row(conn, db_lock, ledger_id, **fields)
+    _refresh_gate_metadata(
+        conn,
+        db_lock,
+        ledger_id,
+        placement_ts=first_submitted_at,
+    )
 
 
 def poll_positions(
@@ -1068,10 +1396,38 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
                                        'partially_filled','open','unknown')
                        THEN 1 ELSE 0 END) AS unfinished,
               SUM(CASE WHEN status='open' THEN 1 ELSE 0 END) AS open_count,
-              MAX(last_polled) AS last_polled
+              MAX(last_polled) AS last_polled,
+              SUM(CASE WHEN post_fix_leak=1 THEN 1 ELSE 0 END)
+                AS post_fix_leak_count,
+              SUM(CASE WHEN post_fix_leak=1
+                         AND gate_classification_uncertain=0
+                       THEN 1 ELSE 0 END) AS confirmed_post_fix_leak_count,
+              SUM(CASE WHEN post_fix_leak=1
+                         AND gate_classification_uncertain=1
+                       THEN 1 ELSE 0 END) AS uncertain_post_fix_leak_count,
+              SUM(CASE WHEN fallback_pre_gate_exception=1
+                       THEN 1 ELSE 0 END) AS fallback_pre_gate_count,
+              SUM(CASE WHEN fallback_post_fix_leak=1
+                       THEN 1 ELSE 0 END) AS fallback_post_fix_count
             FROM bybit_demo_positions
             """
         ).fetchone()
+        latest_leak = conn.execute(
+            """
+            SELECT symbol, COALESCE(ts_submitted, ts_created) AS placement_ts,
+                   strategy, source_demo_position_id,
+                   gate_classification_uncertain
+            FROM bybit_demo_positions
+            WHERE post_fix_leak=1
+            ORDER BY placement_ts DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    leak_count = int(row[4] or 0)
+    confirmed_leak_count = int(row[5] or 0)
+    uncertain_leak_count = int(row[6] or 0)
+    fallback_pre_gate_count = int(row[7] or 0)
+    fallback_post_fix_count = int(row[8] or 0)
     return {
         "enabled": client.enabled,
         "configured": client.enabled,
@@ -1084,4 +1440,24 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
         "unfinished": int(row[1] or 0),
         "open": int(row[2] or 0),
         "last_polled": row[3],
+        "post_fix_leak_count": leak_count,
+        "post_fix_leak_alert": confirmed_leak_count > 0,
+        "post_fix_leak_confirmed_count": confirmed_leak_count,
+        "post_fix_leak_uncertain_count": uncertain_leak_count,
+        "gate_fallback_pre_fix_count": fallback_pre_gate_count,
+        "gate_fallback_post_fix_count": fallback_post_fix_count,
+        "post_fix_leak_latest": (
+            {
+                "timestamp": latest_leak[1],
+                "symbol": latest_leak[0],
+                "strategy": latest_leak[2],
+                "source_demo_position_id": latest_leak[3],
+                "uncertain": bool(latest_leak[4]),
+            }
+            if latest_leak
+            else None
+        ),
+        "shadow_gate_fix_ts": BYBIT_DEMO_SHADOW_GATE_FIX_TS,
+        "shadow_gate_whitelist": allowed_signal_variants(),
+        "overheated_early_promoted": overheated_early_promoted(),
     }
