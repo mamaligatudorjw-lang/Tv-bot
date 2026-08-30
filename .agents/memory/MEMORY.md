@@ -20,3 +20,4 @@
 - [Bybit submission timestamp integrity](bybit-submission-timestamp.md) — polling must preserve the first submission time; leak classification cannot use a later poll timestamp.
 - [Aggregate Bybit close allocation](bybit-aggregate-close-allocation.md) — one exchange close can cover multiple entries; allocate PnL/fees by executed quantity and use exchange event time.
 - [Bybit equity and exposure gates](bybit-equity-gates.md) — keep the $500 exposure cap separate from the $100 equity floor; small unrealized losses must not halt new orders.
+- [Private production verification](private-production-verification.md) — private VM deployments redirect unauthenticated status requests through ReplShield; use authenticated access for live endpoint checks.
