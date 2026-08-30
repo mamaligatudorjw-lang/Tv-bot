@@ -8,15 +8,15 @@
       "ready_for_bootstrap": true
     },
     "overheated_24h": {
-      "n_pairs": 72,
+      "n_pairs": 73,
       "ready_for_bootstrap": true
     }
   },
   "freeze_utc": "2026-08-26T11:50:58+00:00",
-  "generated_utc": "2026-08-30T06:16:28.813800+00:00",
+  "generated_utc": "2026-08-30T06:19:07.226695+00:00",
   "historical_candles_used": false,
   "minimum_forward_pairs_per_strategy": 20,
   "rolling_update": true,
   "source": "live_price_snapshots_from_check_demo_positions",
-  "total_resolved_pairs": 103
+  "total_resolved_pairs": 104
 }
