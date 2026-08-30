@@ -1,3 +1,3 @@
 strategy,step_pct,activation,n_pairs,minimum_pairs,status,mean_delta_r,mean_ci95_low,mean_ci95_high,bootstrap_iterations,bootstrap_seed
-overheated_24h,8.0,+0.5R,95,20,ready,-0.10656394,-0.31922362,0.08630377,20000,20260826
+overheated_24h,8.0,+0.5R,96,20,ready,-0.10557543,-0.31406966,0.08150717,20000,20260826
 ema_cross_confirmed,6.0,any_profit,41,20,ready,-0.13825489,-0.4204299,0.10091405,20000,20260827
