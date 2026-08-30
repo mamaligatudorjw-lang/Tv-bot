@@ -6828,6 +6828,11 @@ EMA_CROSS_COOLDOWN      = 21600   # 6h per symbol
 # Marker: 2026-08-15 23:00 Europe/Chisinau = 2026-08-15 20:00 UTC.
 EMA_CROSS_PRICE_FIX_TS: int = 1786912858
 
+# Effective from the first bot restart after the live price-basis fix.
+# Signal/detection price is stored separately from the entry price used to
+# derive TP/SL for every demo position producer.
+DEMO_PRICE_BASIS_FIX_TS: int = 1787422679
+
 # These are historical, strategy-specific mechanics fixes.  They are
 # intentionally kept separate from the replay query: an old profitable row
 # remains eligible for delivery, but its message explains when its mechanics
@@ -6856,6 +6861,12 @@ REPLAY_STRATEGY_FIXES: dict[str, tuple[tuple[int, str], ...]] = {
         (
             1786773650,  # 2026-08-15 06:00:50 UTC
             "проверка последней завершённой 15m свечи без текущей live-свечи",
+        ),
+    ),
+    "overheated_early": (
+        (
+            DEMO_PRICE_BASIS_FIX_TS,  # 2026-08-22 18:17:59 UTC
+            "TP/SL рассчитываются от цены входа; цена сигнала хранится отдельно",
         ),
     ),
     "ema_cross": (

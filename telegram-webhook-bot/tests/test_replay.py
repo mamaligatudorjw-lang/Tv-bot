@@ -420,3 +420,26 @@ def test_replay_fix_warning_uses_close_timestamp_not_open_timestamp(monkeypatch)
     assert "Сделка предшествует фиксу" in message
     assert "live ticker" in message
     conn.close()
+
+
+def test_replay_marks_overheated_early_before_price_basis_fix(monkeypatch):
+    conn = _replay_db()
+    first_fix_ts = app.REPLAY_STRATEGY_FIXES["overheated_early"][0][0]
+    _insert_position(
+        conn,
+        symbol="OLDEARLYUSDT",
+        status="tp",
+        pnl_usd=1.0,
+        alert_type="overheated_early",
+        ts_open=first_fix_ts - 100,
+        ts_close=first_fix_ts - 1,
+    )
+
+    monkeypatch.setattr(app, "_get_db", lambda: conn)
+    message = app._format_replay_message(
+        _fetch_position_row(conn, "OLDEARLYUSDT")
+    )
+
+    assert "Сделка предшествует фиксу" in message
+    assert "цены входа" in message
+    conn.close()
