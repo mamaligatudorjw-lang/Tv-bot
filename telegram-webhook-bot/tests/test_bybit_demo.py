@@ -170,6 +170,31 @@ def test_missing_timestamp_is_uncertain_not_a_leak():
     assert metadata["gate_classification_uncertain"] == 1
 
 
+@pytest.mark.parametrize(
+    ("shadow_origin", "placement_ts", "expected"),
+    [
+        (1, BYBIT_DEMO_SHADOW_GATE_FIX_TS - 1, (1, 0, 0, 0, 0)),
+        (1, BYBIT_DEMO_SHADOW_GATE_FIX_TS, (0, 1, 0, 0, 0)),
+        (0, BYBIT_DEMO_SHADOW_GATE_FIX_TS - 1, (0, 0, 0, 0, 0)),
+        (0, BYBIT_DEMO_SHADOW_GATE_FIX_TS, (0, 0, 0, 0, 0)),
+        (None, BYBIT_DEMO_SHADOW_GATE_FIX_TS - 1, (0, 0, 1, 1, 0)),
+        (None, BYBIT_DEMO_SHADOW_GATE_FIX_TS, (0, 0, 1, 0, 1)),
+        (None, None, (0, 0, 1, 0, 0)),
+    ],
+)
+def test_gate_classification_fact_first_and_exact_cutoff(
+    shadow_origin, placement_ts, expected
+):
+    metadata = classify_gate_metadata(shadow_origin, placement_ts)
+    assert (
+        metadata["pre_gate_exception"],
+        metadata["post_fix_leak"],
+        metadata["gate_classification_uncertain"],
+        metadata["fallback_pre_gate_exception"],
+        metadata["fallback_post_fix_leak"],
+    ) == expected
+
+
 def test_shadow_source_is_blocked_before_ledger_and_external_order():
     conn = _db()
     client = FakeTradingClient()
@@ -194,7 +219,7 @@ def test_shadow_source_is_blocked_before_ledger_and_external_order():
     assert conn.execute("SELECT COUNT(*) FROM bybit_demo_positions").fetchone()[0] == 0
 
 
-def test_backfill_prefers_source_fact_and_marks_timestamp_fallback_uncertain():
+def test_backfill_prefers_source_fact_and_logs_confirmed_post_fix_leak(caplog):
     conn = _db()
     conn.execute(
         """
@@ -202,8 +227,8 @@ def test_backfill_prefers_source_fact_and_marks_timestamp_fallback_uncertain():
             signal_key, signal_ts, strategy, confirmation_level, symbol, direction,
             source_demo_position_id, signal_price, entry_price, sl_price, tp_price,
             order_link_id, ts_created, ts_submitted
-        ) VALUES ('legacy-source', 10, 'ema_cross_confirmed', '1/3', 'ZKCUSDT',
-                  'LONG', 7, 100, 100, 95, 110, 'link-source', ?, ?)
+            ) VALUES ('legacy-source', 10, 'ema_cross_confirmed', '1/3', 'ZKCUSDT',
+                      'LONG', 6526, 100, 100, 95, 110, 'link-source', ?, ?)
         """,
         (BYBIT_DEMO_SHADOW_GATE_FIX_TS - 100, BYBIT_DEMO_SHADOW_GATE_FIX_TS - 50),
     )
@@ -217,7 +242,18 @@ def test_backfill_prefers_source_fact_and_marks_timestamp_fallback_uncertain():
         """,
         (BYBIT_DEMO_SHADOW_GATE_FIX_TS + 50,),
     )
-    backfill_gate_metadata(conn, {7: 1})
+    conn.execute(
+        """
+        INSERT INTO bybit_demo_positions (
+            signal_key, signal_ts, strategy, confirmation_level, symbol, direction,
+            source_demo_position_id, signal_price, entry_price, sl_price, tp_price,
+            order_link_id, ts_created
+        ) VALUES ('legacy-post', 10, 'overheated_confirmed', '1/3', 'ZKCUSDT',
+                  'LONG', 6527, 100, 100, 95, 110, 'link-post', ?)
+        """,
+        (BYBIT_DEMO_SHADOW_GATE_FIX_TS + 1,),
+    )
+    backfill_gate_metadata(conn, {6526: 1, 6527: 1})
     source_row = conn.execute(
         """
         SELECT shadow_origin, pre_gate_exception, post_fix_leak,
@@ -236,6 +272,16 @@ def test_backfill_prefers_source_fact_and_marks_timestamp_fallback_uncertain():
     ).fetchone()
     assert source_row == (1, 1, 0, 0, 0, 0)
     assert fallback_row == (None, 0, 0, 1, 0, 1)
+    post_row = conn.execute(
+        """
+        SELECT shadow_origin, pre_gate_exception, post_fix_leak,
+               gate_classification_uncertain
+        FROM bybit_demo_positions WHERE signal_key='legacy-post'
+        """
+    ).fetchone()
+    assert post_row == (1, 0, 1, 0)
+    assert "bybit_demo_post_fix_leak" in caplog.text
+    assert "symbol=ZKCUSDT" in caplog.text
 
 
 def test_status_exposes_post_fix_leak_identity_without_secrets():
