@@ -43,6 +43,14 @@ HISTORICAL_INTERVAL = "1h"
 HISTORICAL_INTERVAL_SEC = HOUR_SEC
 HISTORICAL_WARMUP_HOURS = 30
 DEFAULT_HISTORY_WORKERS = 3
+HISTORICAL_FEATURE_PREFIXES = (
+    "price_return_",
+    "range_",
+    "realized_vol_",
+    "volume_",
+    "momentum_",
+    "distance_to_recent_",
+)
 LOG_MATCH_WINDOWS = {
     "ema_cross": 120.0,
     "overheated_early": 120.0,
@@ -90,6 +98,11 @@ FEATURE_META = {
         "label": "Directional entry move from signal (%)",
         "provenance": "exact_persisted_derived",
         "description": "direction-adjusted entry_price vs signal_price",
+    },
+    "rsi_at_signal": {
+        "label": "RSI at signal",
+        "provenance": "exact_persisted",
+        "description": "RSI value persisted with the position at signal creation",
     },
     "ema_gap_pct_log": {
         "label": "EMA cross gap (%)",
@@ -150,6 +163,22 @@ FEATURE_META = {
         "label": "Window range, 4h (%)",
         "provenance": "reconstructed_historical_gateio_1h",
         "description": "high-low range across the last four completed 1h candles",
+    },
+    "distance_to_recent_low_24h_pct": {
+        "label": "Distance above recent low, 24h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": (
+            "latest completed close above the low of the prior 24 completed "
+            "1h candles; raw price distance, not direction-adjusted"
+        ),
+    },
+    "distance_to_recent_high_24h_pct": {
+        "label": "Distance below recent high, 24h (%)",
+        "provenance": "reconstructed_historical_gateio_1h",
+        "description": (
+            "recent 24h high above the latest completed close, divided by that "
+            "high; raw price distance, not direction-adjusted"
+        ),
     },
     "realized_vol_2h_pct": {
         "label": "Realized volatility, 2h (%)",
@@ -305,7 +334,7 @@ def load_positions(
                 f"""
                 SELECT id, ts_open, symbol, direction, entry_price, sl_price,
                        tp_price, status, ts_close, exit_price, alert_type,
-                       is_shadow, signal_price
+                       is_shadow, rsi_at_signal, signal_price
                   FROM demo_positions
                  WHERE is_shadow=1
                    AND alert_type IN (?, ?, ?, ?)
@@ -425,9 +454,7 @@ def historical_features(
     ]
     feature_fields = [
         field for field in FEATURE_META
-        if field.startswith((
-            "price_return_", "range_", "realized_vol_", "volume_", "momentum_"
-        ))
+        if field.startswith(HISTORICAL_FEATURE_PREFIXES)
     ]
     missing = {field: None for field in feature_fields}
     missing["historical_feature_status"] = (
@@ -463,6 +490,18 @@ def historical_features(
         "price_return_2h_pct": returns[2],
         "price_return_4h_pct": returns[4],
     })
+    recent_window = _contiguous_window(completed, 24)
+    if recent_window is not None:
+        recent_low = min(float(candle["l"]) for candle in recent_window)
+        recent_high = max(float(candle["h"]) for candle in recent_window)
+        if recent_low > 0:
+            features["distance_to_recent_low_24h_pct"] = (
+                (latest - recent_low) / recent_low * 100.0
+            )
+        if recent_high > 0:
+            features["distance_to_recent_high_24h_pct"] = (
+                (recent_high - latest) / recent_high * 100.0
+            )
 
     for bars in (2, 4):
         window = windows[bars]
@@ -758,6 +797,24 @@ def _bootstrap_delta_ci(
     )
 
 
+def _bootstrap_mean_diff_ci(
+    tp_values: list[float], sl_values: list[float], rng: random.Random
+) -> tuple[float | None, float | None]:
+    """Percentile CI for the unpaired TP-mean minus SL-mean difference."""
+    if not tp_values or not sl_values:
+        return None, None
+    sampled = []
+    for _ in range(BOOTSTRAP_ITERATIONS):
+        tp = [rng.choice(tp_values) for _ in tp_values]
+        sl = [rng.choice(sl_values) for _ in sl_values]
+        sampled.append(mean(tp) - mean(sl))
+    sampled.sort()
+    return (
+        round(sampled[int(0.025 * len(sampled))], 6),
+        round(sampled[int(0.975 * len(sampled))], 6),
+    )
+
+
 def _permutation_p_value(
     tp_values: list[float], sl_values: list[float], rng: random.Random
 ) -> float | None:
@@ -801,11 +858,20 @@ def compare_feature(
             if tp_desc["median"] is not None and sl_desc["median"] is not None
             else None
         ),
+        "mean_diff_tp_minus_sl": (
+            round(mean(tp_values) - mean(sl_values), 6)
+            if tp_values and sl_values
+            else None
+        ),
         "cliffs_delta_tp_higher": None,
+        "bootstrap_mean_diff_95ci": [None, None],
         "bootstrap_95ci": [None, None],
         "permutation_p_two_sided": None,
     }
     if result["comparison_allowed"]:
+        result["bootstrap_mean_diff_95ci"] = list(
+            _bootstrap_mean_diff_ci(tp_values, sl_values, rng)
+        )
         result["cliffs_delta_tp_higher"] = round(
             _cliffs_delta(tp_values, sl_values), 6
         )
@@ -1029,12 +1095,6 @@ def feature_coverage(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Report availability overall and by strategy/outcome, never imputing data."""
     result: dict[str, Any] = {}
     for field in FEATURE_META:
-        if not (
-            field.startswith((
-                "price_return_", "range_", "realized_vol_", "volume_", "momentum_"
-            ))
-        ):
-            continue
         available = [
             row for row in rows
             if row.get(field) not in (None, "")
@@ -1197,7 +1257,8 @@ def write_outputs(
     fields = [
         "id", "ts_open", "ts_open_utc", "symbol", "direction", "alert_type",
         "status", "outcome", "entry_price", "sl_price", "tp_price", "exit_price",
-        "result_r", "risk_pct", "reward_pct", "reward_risk", "signal_price",
+        "result_r", "risk_pct", "reward_pct", "reward_risk", "rsi_at_signal",
+        "signal_price",
         "entry_vs_signal_pct", "log_match_ts", "log_match_delta_sec",
         "ema_gap_pct_log", "overheated_pct24_log", "overheated_rsi_log",
         "confirmation_volume_ratio_log", "confirmation_number_log",
@@ -1206,9 +1267,7 @@ def write_outputs(
         "historical_last_candle_utc",
         *[
             field for field in FEATURE_META
-            if field.startswith((
-                "price_return_", "range_", "realized_vol_", "volume_", "momentum_"
-            ))
+            if field.startswith(HISTORICAL_FEATURE_PREFIXES)
         ],
     ]
     with (output_dir / "rows.csv").open("w", newline="", encoding="utf-8") as handle:
