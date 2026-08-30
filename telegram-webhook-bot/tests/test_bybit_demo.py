@@ -7,6 +7,7 @@ import time
 
 import pytest
 
+import app
 from app import _bybit_demo_signal_allowed
 from bybit_relay import create_app as create_bybit_relay_app
 from bybit_demo import (
@@ -15,7 +16,11 @@ from bybit_demo import (
     BybitDemoSizingError,
     BYBIT_DEMO_EQUITY_RESERVE_ENV,
     BYBIT_DEMO_MAX_EXPOSURE_ENV,
+    BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV,
+    BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV,
+    BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV,
     BYBIT_DEMO_SHADOW_GATE_FIX_TS,
+    _reset_reserve_health_for_tests,
     allowed_signal_variants,
     backfill_gate_metadata,
     calculate_linear_quantity,
@@ -23,8 +28,11 @@ from bybit_demo import (
     initialize_schema,
     is_allowed_signal,
     poll_positions,
+    record_reserve_health,
     reserve_preflight,
     reserve_config,
+    reserve_health_config,
+    reserve_health_status,
     status_snapshot,
     submit_signal,
 )
@@ -406,6 +414,116 @@ def test_reserve_preflight_invalid_environment_fails_closed(monkeypatch):
     assert result["decision"] == "error"
     assert result["reason"] == "configuration_invalid"
     assert client.create_calls == []
+
+
+def test_reserve_health_uses_real_time_window_and_resets_on_success(monkeypatch):
+    monkeypatch.setenv(BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV, "600")
+    monkeypatch.setenv(BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV, "3")
+    _reset_reserve_health_for_tests()
+
+    first = record_reserve_health(success=False, error="relay_error", now=100)
+    second = record_reserve_health(success=False, error="relay_error", now=200)
+    third = record_reserve_health(success=False, error="relay_error", now=300)
+
+    assert first["failure_count"] == 1
+    assert first["alert_triggered"] is False
+    assert second["failure_count"] == 2
+    assert second["alert_triggered"] is False
+    assert third["failure_count"] == 3
+    assert third["alert_triggered"] is True
+    assert third["alert_active"] is True
+
+    repeated = record_reserve_health(
+        success=False,
+        error="relay_error",
+        now=301,
+    )
+    assert repeated["failure_count"] == 4
+    assert repeated["alert_triggered"] is False
+
+    healthy = record_reserve_health(
+        success=True,
+        snapshot={
+            "open_exposure_usd": 100.0,
+            "balance_usd": 1000.0,
+            "unrealized_pnl_usd": -1.0,
+            "equity_usd": 999.0,
+        },
+        now=302,
+    )
+    assert healthy["failure_count"] == 0
+    assert healthy["alert_active"] is False
+    assert healthy["last_error"] is None
+    assert healthy["latest"]["equity_usd"] == 999.0
+    assert reserve_health_status()["failure_count"] == 0
+    _reset_reserve_health_for_tests()
+
+
+def test_reserve_health_invalid_env_uses_safe_defaults(monkeypatch):
+    monkeypatch.setenv(BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV, "0")
+    monkeypatch.setenv(BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV, "bad")
+    monkeypatch.setenv(BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV, "-1")
+
+    config = reserve_health_config()
+
+    assert config["interval_sec"] == 60
+    assert config["window_sec"] == 600
+    assert config["threshold"] == 3
+    assert set(config["configuration_fallback"]) == {
+        BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV,
+        BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_ENV,
+        BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD_ENV,
+    }
+
+
+def test_reserve_probe_is_noop_when_bybit_client_is_disabled(monkeypatch):
+    _reset_reserve_health_for_tests()
+    client = FakeTradingClient()
+    client.enabled = False
+    monkeypatch.setattr(
+        app.BybitDemoClient,
+        "from_env",
+        classmethod(lambda _cls: client),
+    )
+
+    def unexpected_read(_client):
+        raise AssertionError("disabled probe must not read Bybit")
+
+    monkeypatch.setattr(app, "read_bybit_reserve_snapshot", unexpected_read)
+    app._run_bybit_demo_reserve_probe()
+
+    assert reserve_health_status()["failure_count"] == 0
+    _reset_reserve_health_for_tests()
+
+
+def test_reserve_probe_records_enabled_read_without_order_decision(monkeypatch):
+    _reset_reserve_health_for_tests()
+    client = FakeTradingClient()
+    observed = {
+        "open_exposure_usd": 150.0,
+        "balance_usd": 1000.0,
+        "unrealized_pnl_usd": -2.0,
+        "equity_usd": 998.0,
+    }
+    monkeypatch.setattr(
+        app.BybitDemoClient,
+        "from_env",
+        classmethod(lambda _cls: client),
+    )
+    monkeypatch.setattr(
+        app,
+        "read_bybit_reserve_snapshot",
+        lambda _client: observed,
+    )
+
+    app._run_bybit_demo_reserve_probe()
+
+    health = reserve_health_status()
+    assert health["failure_count"] == 0
+    assert health["alert_active"] is False
+    assert health["latest"] == observed
+    assert client.create_calls == []
+    _reset_reserve_health_for_tests()
 
 
 def test_blocked_reserve_preflight_records_observed_values_and_never_posts():

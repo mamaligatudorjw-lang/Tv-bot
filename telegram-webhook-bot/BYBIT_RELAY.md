@@ -17,6 +17,12 @@ Set these values as environment secrets on the bot:
   new order; defaults to `500`.
 - `BYBIT_DEMO_EQUITY_RESERVE_USD` — minimum account equity for a new order;
   defaults to `100`.
+- `BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_SEC` — periodic reserve-read probe
+  interval; defaults to `60`.
+- `BYBIT_DEMO_PREFLIGHT_ERROR_WINDOW_SEC` — real-time failure window for the
+  operator alert; defaults to `600`.
+- `BYBIT_DEMO_PREFLIGHT_ERROR_THRESHOLD` — failures in that window required to
+  alert; defaults to `3`.
 
 The existing `BYBIT_DEMO_API_KEY` and `BYBIT_DEMO_API_SECRET` remain the
 Bybit credentials. They are signed by the bot and forwarded only to the
@@ -73,6 +79,13 @@ incomplete account/position responses fail closed and do not send
 `/v5/order/create`. The decision and observed numeric values are recorded in
 the separate `bybit_demo_positions` ledger and safe status snapshot; no raw
 Bybit payload or credential is exposed.
+
+The health probe runs only while the Bybit client is fully enabled
+(credentials and relay configuration are valid). It records transport/API
+failures from both periodic probes and real order preflights in one in-memory
+counter. A successful read clears the active warning. The probe never creates
+an intent, evaluates whether a signal is admissible, or replaces the fresh
+preflight performed immediately before an order.
 
 An upstream timeout or relay `502/504` is treated as an uncertain result for
 order submission. The ledger records the failure and the bot does not

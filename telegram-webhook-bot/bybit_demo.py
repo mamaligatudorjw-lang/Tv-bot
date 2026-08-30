@@ -2078,6 +2078,7 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
             "max_exposure_usd": config["max_exposure_usd"],
             "equity_reserve_usd": config["equity_reserve_usd"],
             "configuration_error": config["configuration_error"],
+            "health": reserve_health_status(),
             "latest": (
                 {
                     "timestamp": latest_preflight[0],
