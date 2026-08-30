@@ -55,3 +55,10 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_b
 type = "table"
 title = "WR35 paired bootstrap CSV"
 description = "Табличный экспорт всех bootstrap-метрик для дальнейшей проверки."
+
+[[outputs]]
+id = "CUjOdYKyLMczWSXGfh_fW"
+uri = "file://telegram-webhook-bot/outcome_overheated_early_bootstrap/report.md"
+type = "text"
+title = "Overheated early post-fix bootstrap report"
+description = "Read-only 20,000-iteration unique-signal bootstrap with JSON, CSV, and per-signal cohort files in the workspace."

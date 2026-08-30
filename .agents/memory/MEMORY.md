@@ -21,3 +21,4 @@
 - [Aggregate Bybit close allocation](bybit-aggregate-close-allocation.md) — one exchange close can cover multiple entries; allocate PnL/fees by executed quantity and use exchange event time.
 - [Bybit equity and exposure gates](bybit-equity-gates.md) — keep the $500 exposure cap separate from the $100 equity floor; small unrealized losses must not halt new orders.
 - [Private production verification](private-production-verification.md) — private VM deployments redirect unauthenticated status requests through ReplShield; use authenticated access for live endpoint checks.
+- [Overheated early bootstrap provenance](overheated-early-bootstrap-provenance.md) — the historical n=121 headline is only reproducible from a frozen backup via ts_close; do not relabel it as the causal ts_open audit.

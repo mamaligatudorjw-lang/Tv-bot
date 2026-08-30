@@ -1,0 +1,2 @@
+cohort,n,wins,losses,wr_pct,breakeven_wr_pct,delta_wr_minus_breakeven_pp,avg_r,avg_r_ci_low,avg_r_ci_high,wr_ci_low_pct,wr_ci_high_pct,delta_ci_low_pp,delta_ci_high_pp,avg_r_ci_crosses_zero,delta_ci_crosses_zero,bootstrap_iterations,bootstrap_seed
+post_fix_by_ts_close,121,44,77,36.36363636363637,33.333333333333336,3.030303030303031,0.08770832527274451,-0.19088496056707793,0.374356566986423,28.09917355371901,45.45454545454545,-5.234159779614327,12.121212121212118,True,True,20000,20260830
