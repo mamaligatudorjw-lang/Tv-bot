@@ -1,0 +1,98 @@
+{
+  "audit": {
+    "name": "forward_ema_confirmed_sl_audit",
+    "strategy": "ema_cross_confirmed",
+    "cohorts": [
+      "overall",
+      "LONG"
+    ],
+    "threshold_pct": 3.567173,
+    "rule": "risk_pct <= 3.567173% is the frozen small-SL candidate; larger SL is control",
+    "minimum_n_per_outcome": 20,
+    "bootstrap_iterations": 800,
+    "permutation_iterations": 800,
+    "seed": 171,
+    "verdict_rule": "INSUFFICIENT unless TP and SL each have n>=20; CONFIRMED only when TP mean risk is lower, its 95% bootstrap CI excludes zero, and permutation p<=0.05; otherwise NO_SUPPORT"
+  },
+  "cutoff": {
+    "ts": 1788107484,
+    "utc": "2026-08-30T16:31:24+00:00",
+    "exploratory_cutoff_utc": "2026-08-30T16:31:24+00:00",
+    "source": "last ema_cross_confirmed ts_open in the exploratory snapshot; post-cutoff rows only"
+  },
+  "generated_ts": 1788113777,
+  "generated_utc": "2026-08-30T18:16:17+00:00",
+  "scope": "Resolved is_shadow=1 ema_cross_confirmed demo_positions with ts_open > frozen cutoff; overall and LONG only. SHORT is excluded because the exploratory SHORT cohort was insufficient.",
+  "production_changes": false,
+  "cohorts": {
+    "overall": {
+      "n_total": 0,
+      "candidate_small_sl": {
+        "n": 0,
+        "tp": 0,
+        "sl": 0,
+        "resolved_n": 0,
+        "tp_rate_pct": null,
+        "avg_r": null
+      },
+      "control_large_sl": {
+        "n": 0,
+        "tp": 0,
+        "sl": 0,
+        "resolved_n": 0,
+        "tp_rate_pct": null,
+        "avg_r": null
+      },
+      "tp_rate_diff_candidate_minus_control_pp": null,
+      "outcome_risk_effect": {
+        "tp_n": 0,
+        "sl_n": 0,
+        "tp_mean_risk_pct": null,
+        "sl_mean_risk_pct": null,
+        "mean_diff_tp_minus_sl": null,
+        "bootstrap_mean_diff_95ci": [
+          null,
+          null
+        ],
+        "permutation_p_two_sided": null
+      },
+      "verdict": "INSUFFICIENT",
+      "verdict_reason": "Requires at least 20 TP and 20 SL forward outcomes; observed TP=0, SL=0."
+    },
+    "LONG": {
+      "n_total": 0,
+      "candidate_small_sl": {
+        "n": 0,
+        "tp": 0,
+        "sl": 0,
+        "resolved_n": 0,
+        "tp_rate_pct": null,
+        "avg_r": null
+      },
+      "control_large_sl": {
+        "n": 0,
+        "tp": 0,
+        "sl": 0,
+        "resolved_n": 0,
+        "tp_rate_pct": null,
+        "avg_r": null
+      },
+      "tp_rate_diff_candidate_minus_control_pp": null,
+      "outcome_risk_effect": {
+        "tp_n": 0,
+        "sl_n": 0,
+        "tp_mean_risk_pct": null,
+        "sl_mean_risk_pct": null,
+        "mean_diff_tp_minus_sl": null,
+        "bootstrap_mean_diff_95ci": [
+          null,
+          null
+        ],
+        "permutation_p_two_sided": null
+      },
+      "verdict": "INSUFFICIENT",
+      "verdict_reason": "Requires at least 20 TP and 20 SL forward outcomes; observed TP=0, SL=0."
+    }
+  },
+  "rows": []
+}

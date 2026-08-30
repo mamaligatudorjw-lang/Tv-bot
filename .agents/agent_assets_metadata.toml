@@ -69,3 +69,10 @@ uri = "file://telegram-webhook-bot/outcome_tp_vs_sl_multihour/report.md"
 type = "text"
 title = "Refreshed TP-vs-SL factor report"
 description = "Task #146 read-only report with exact RSI coverage, reconstructed 24h low/high proxies, mean-difference bootstrap CIs, JSON provenance, and per-signal CSV."
+
+[[outputs]]
+id = "7tzlzRdOoYYCQbDO-O7nx"
+uri = "file://telegram-webhook-bot/outcome_forward_ema_confirmed_sl/report.md"
+type = "text"
+title = "Forward-shadow ema_cross_confirmed SL audit"
+description = "Read-only forward validation with frozen threshold 3.567173%, exploratory cutoff 2026-08-30 16:31:24 UTC, overall and LONG cohorts, bootstrap CI, permutation p-value, and explicit insufficiency verdict."
