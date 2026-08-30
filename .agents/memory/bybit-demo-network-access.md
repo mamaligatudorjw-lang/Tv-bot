@@ -14,3 +14,9 @@ For credential diagnosis, an invalid key can make `/v5/order/realtime` return an
 **Why:** The empty 401 is indistinguishable from relay authentication failure unless the relay health check and a minimal authenticated Bybit endpoint are tested separately.
 
 **How to apply:** First confirm token-protected relay health, then call `/v5/user/query-api` directly from the allowed relay host. Do not attempt an order until that endpoint returns `retCode=0`.
+
+Bybit's `retMsg` for signature error `10004` can echo the API key inside its `origin_string`.
+
+**Why:** Printing the full diagnostic message can expose credential material even though the API Secret is not included.
+
+**How to apply:** Log only the HTTP status and `retCode`; never print or persist authenticated Bybit `retMsg`. A direct `10004` with synchronized time and standard V5 HMAC signing indicates a mismatched or incorrectly copied key/secret pair.
