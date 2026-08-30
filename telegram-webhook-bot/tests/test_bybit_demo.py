@@ -95,12 +95,13 @@ def test_bybit_signature_uses_v5_payload_and_never_changes_for_get():
 
     method, url, kwargs = session.calls[0]
     assert method == "GET"
-    assert url.endswith("/v5/order/realtime")
-    params = kwargs["params"]
-    query = "&".join(
-        f"{key}={value}" for key, value in sorted(params.items())
+    expected_query = "category=linear&orderLinkId=bdabc&symbol=BTCUSDT"
+    assert url == (
+        "https://api-demo.bybit.com/v5/order/realtime?"
+        + expected_query
     )
-    payload = str(1_700_000_000_000) + "api-key" + "5000" + query
+    assert "params" not in kwargs
+    payload = str(1_700_000_000_000) + "api-key" + "5000" + expected_query
     expected = hmac.new(
         b"api-secret", payload.encode(), hashlib.sha256
     ).hexdigest()
@@ -262,7 +263,11 @@ def test_client_uses_https_relay_and_keeps_relay_token_out_of_url():
 
     method, url, kwargs = session.calls[0]
     assert method == "GET"
-    assert url == "https://relay.example.test/v5/order/realtime"
+    assert url == (
+        "https://relay.example.test/v5/order/realtime"
+        "?category=linear&orderLinkId=bdabc&symbol=BTCUSDT"
+    )
+    assert "params" not in kwargs
     assert kwargs["headers"]["X-Bybit-Relay-Token"] == "relay-secret"
     assert "relay-secret" not in url
 

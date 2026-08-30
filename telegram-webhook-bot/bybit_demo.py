@@ -279,6 +279,11 @@ class BybitDemoClient:
             "Content-Type": "application/json",
         }
         request_url = f"{self.relay_url if self.relay_url else self.base_url}{endpoint}"
+        if method == "GET" and query:
+            # Send the exact byte sequence used for the HMAC payload. Passing
+            # the original dict via requests' params= would preserve insertion
+            # order, which can differ from the sorted query signed above.
+            request_url = f"{request_url}?{query}"
         if self.relay_url:
             headers["X-Bybit-Relay-Token"] = self.relay_token
 
@@ -288,7 +293,6 @@ class BybitDemoClient:
                 response = self.session.request(
                     method,
                     request_url,
-                    params=clean_params if method == "GET" else None,
                     data=body_text if method != "GET" else None,
                     headers=headers,
                     timeout=self.timeout,
