@@ -19,3 +19,4 @@
 - [Bybit Demo network access](bybit-demo-network-access.md) — the current Replit runtime receives CloudFront HTTP 403 country blocking from api-demo.bybit.com.
 - [Bybit submission timestamp integrity](bybit-submission-timestamp.md) — polling must preserve the first submission time; leak classification cannot use a later poll timestamp.
 - [Aggregate Bybit close allocation](bybit-aggregate-close-allocation.md) — one exchange close can cover multiple entries; allocate PnL/fees by executed quantity and use exchange event time.
+- [Bybit equity and exposure gates](bybit-equity-gates.md) — keep the $500 exposure cap separate from the $100 equity floor; small unrealized losses must not halt new orders.
