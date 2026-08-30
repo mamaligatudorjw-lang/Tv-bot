@@ -1,0 +1,22 @@
+#167 — Условный выбор третьей стратегии Bybit Demo + аудит shadow-фильтра
+
+What & Why:
+Whitelist Bybit Demo auto-trade сейчас содержит ровно 3 стратегии (overheated_24h, overheated_confirmed confirm 1/3, ema_cross_confirmed confirm 1/3) — численно совпадает с #160. Но третий слот выбран не по условию, а хардкодом:
+- По #160 ema_cross_confirmed должен попадать в whitelist только как временная замена overheated_early, пока не принято решение по её score-порогам (чек-лист, 26.08).
+- В текущем коде такой связи нет: overheated_early остаётся в shadow-эксперименте независимо, а ema_cross_confirmed включён безусловно.
+- Риск: если/когда overheated_early будет промотирована из shadow, whitelist не переключится сам — получится 4 активных стратегии одновременно вместо 3, без отдельного решения об этом.
+
+Дополнительно: ema_cross_confirmed проходит в Bybit whitelist несмотря на shadow-происхождение родительского сигнала — gate для подтверждённых стратегий не блокирует is_shadow. Формулировка предполагает, что это может касаться и других confirmed-стратегий.
+
+Требует подтверждения от исполнителя (до кода):
+Распространяется ли тот же пробел на overheated_confirmed? Ранее в живых примерах (BLESSUSDT confirm 1/3, HNTUSDT confirm 3/3) сигналы overheated_confirmed были помечены SHADOW. Если тот же gate используется для обеих confirmed-стратегий — значит shadow-сигналы уже сейчас могут открывать реальные demo-ордера на Bybit под видом overheated_confirmed 1/3. Нужен явный ответ: да/нет — и если да, это тоже входит в scope #167.
+
+Done looks like:
+- Единый источник правды для статуса overheated_early (флаг/дата решения из чек-листа), а не независимые хардкоды в bybit_demo.py и gate app.py.
+- Whitelist читает этот флаг: overheated_early не промотирована — третий слот ema_cross_confirmed 1/3; промотирована — третий слот overheated_early, ema_cross_confirmed исключается.
+- Explicit non-shadow фильтр применяется одинаково ко всем трём слотам (сейчас он явно есть только у overheated_24h).
+- Тесты: overheated_early не промотирована — whitelist = [overheated_24h, overheated_confirmed 1/3, ema_cross_confirmed 1/3]; overheated_early промотирована — whitelist = [overheated_24h, overheated_confirmed 1/3, overheated_early], ema_cross_confirmed не проходит; shadow-сигнал по любой из трёх стратегий не создаёт ордер на Bybit; в whitelist никогда не больше 3 вариантов одновременно.
+
+Out of scope:
+- Само решение о промотировании overheated_early (отдельный чек-лист-пункт от 26.08).
+- Изменение состава топ-3 сверх уже одобренного в #160.
