@@ -1,0 +1,71 @@
+#167 (номер уточнить у дева) — Условный выбор третьей стратегии Bybit Demo + единый shadow-gate + fact-first ledger-разметка + observability
+
+Консолидация всей переписки по мотивам разбора whitelist Bybit Demo auto-trade после активации #165/#166.
+
+What & Why:
+Три отдельные, но связанные проблемы в текущей реализации whitelist Bybit Demo auto-trade:
+
+1. Третий слот whitelist выбран хардкодом, а не по условию. По #160 ema_cross_confirmed должен быть временной заменой overheated_early, пока не принято решение по её score-порогам (чек-лист, 26.08). В коде эта связь отсутствует: overheated_early живёт в shadow-эксперименте независимо, ema_cross_confirmed включён безусловно. Если overheated_early будет промотирована, whitelist не переключится сам — получится 4 активные стратегии без отдельного решения об этом.
+
+2. Shadow-фильтр применяется не ко всем слотам whitelist. _bybit_demo_signal_allowed() проверяет is_shadow только для overheated_24h. Подтверждено кодом и тестами, что overheated_confirmed 1/3 и ema_cross_confirmed 1/3 проходят в Bybit ledger независимо от shadow-статуса источника. Так уже прошла реальная сделка ZKCUSDT (ema_cross_confirmed 1/3, источник — shadow ema_cross).
+
+3. Нет механизма отличить исторические (уже случившиеся) shadow-утечки от будущего рецидива того же бага после фикса.
+
+Confirmed:
+- Whitelist всегда должен содержать ровно 3 стратегии, не больше.
+- demo_positions.is_shadow фиксируется один раз при INSERT и штатным кодом никогда не меняется (проверено по коду: close обновляет только status/ts_close/exit_price/pnl_usd/wick_close/exit_method; миграции не трогают is_shadow; механизма промоции нет).
+- Позицию ZKCUSDT и её TP/SL на бирже не трогаем ни при каком сценарии этой задачи — только разметка в собственном ledger.
+
+Часть 1 — условный выбор третьей стратегии:
+- Единый источник правды для статуса overheated_early (флаг/дата решения из чек-листа), а не независимые хардкоды в bybit_demo.py и gate app.py.
+- overheated_early не промотирована — третий слот ema_cross_confirmed 1/3.
+- overheated_early промотирована — третий слот overheated_early, ema_cross_confirmed исключается.
+- Тест: в whitelist никогда не больше 3 вариантов одновременно, в обоих состояниях флага.
+
+Часть 2 — единый shadow-gate:
+- Explicit non-shadow фильтр применяется одинаково ко всем трём слотам (сейчас есть только у overheated_24h).
+- Блокируется shadow overheated_confirmed 1/3.
+- Блокируется shadow ema_cross_confirmed 1/3.
+- Тесты: shadow-сигнал по любой из трёх стратегий/уровней не создаёт ордер на Bybit, независимо от confirmation level.
+
+Часть 3 — fact-first разметка ledger (bybit_demo_positions):
+
+Модель данных:
+- shadow_origin (1/0/NULL) — неизменяемый снимок факта источника в момент попытки размещения, а не live-запрос к demo_positions при отчёте. Передаётся в submit_signal() из app.py вместе с source_demo_position_id — bybit_demo.py не должен сам зависеть от таблицы demo_positions.
+- pre_gate_exception = 1, если shadow_origin=1 и размещение произошло до cutoff (даты деплоя фикса из частей 1-2).
+- post_fix_leak = 1, если shadow_origin=1 и размещение произошло после cutoff. Это не историческое исключение — это подозрение на рецидив бага, не смешивается с pre_gate_exception.
+- Для строк без source_demo_position_id (источник не найден) — timestamp-fallback (ts_submitted, иначе ts_created), явно помеченный как fallback/uncertain, а не как подтверждённый факт.
+
+Backfill: существующие строки, включая ZKCUSDT (source_demo_position_id=6526, is_shadow=1) — размечаются по факту через join, попадают в pre_gate_exception=1.
+
+Тесты:
+- is_shadow=True источник + timestamp после cutoff — post_fix_leak=1 (не pre_gate_exception).
+- is_shadow=False источник + timestamp до cutoff — оба флага 0.
+- источник отсутствует + timestamp до cutoff — fallback pre_gate_exception, помечен uncertain.
+- источник отсутствует + timestamp после cutoff — fallback post_fix_leak, помечен uncertain.
+- источник с is_shadow=NULL — timestamp fallback, помечен uncertain.
+- backfill ZKCUSDT — pre_gate_exception=1, post_fix_leak=0.
+
+Часть 4 — observability для post_fix_leak (обязательная часть scope, не опциональная):
+post_fix_leak=1 не должен быть пассивной колонкой в базе — иначе рецидив легко пропустить.
+
+Канал 1 — лог при создании/backfill такой строки:
+- ledger ID, strategy, symbol, source_demo_position_id, timestamp, причина shadow_signal_after_gate_fix.
+- Без секретов и содержимого Bybit API-ответов в логе.
+
+Канал 2 — существующий status endpoint:
+- количество post_fix_leak;
+- флаг тревоги, если больше нуля;
+- timestamp и symbol последнего случая.
+- Важно: enabled=true / route=relay (здоровье соединения) и целостность gate — разные измерения и должны отображаться раздельно. Relay может быть полностью здоров, а gate — уже скомпрометирован; текущий статус не должен маскировать это.
+
+Тесты: лог формируется с нужными полями и без утечки секретов; счётчик и флаг тревоги в status endpoint корректно считаются; relay-health и gate-integrity отображаются независимо друг от друга.
+
+Done looks like:
+Все части 1-4 реализованы, покрыты тестами, ZKCUSDT размечен как pre_gate_exception, TP/SL и статус позиции на бирже не изменены.
+
+Out of scope:
+- Само решение о промотировании overheated_early (отдельный чек-лист-пункт от 26.08).
+- Изменение состава топ-3 сверх уже одобренного в #160.
+- Закрытие/изменение существующих открытых позиций на Bybit.
+- Отключение relay.
