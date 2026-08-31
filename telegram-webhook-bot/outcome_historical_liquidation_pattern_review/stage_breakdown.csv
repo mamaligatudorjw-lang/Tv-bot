@@ -1,0 +1,6 @@
+cohort,stage,count
+primary,correction_not_found_in_12h,78
+primary,liquidation_burst_stage,154
+primary,large_5m_flow_stage,16
+primary,resolved_outcome,6
+control,correction_not_found_in_12h,1

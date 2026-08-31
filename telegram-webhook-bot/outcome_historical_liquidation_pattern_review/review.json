@@ -1,6 +1,6 @@
 {
-  "generated_ts": 1788169702,
-  "generated_utc": "2026-08-31T09:48:22+00:00",
+  "generated_ts": 1788170450,
+  "generated_utc": "2026-08-31T10:00:50+00:00",
   "source_report_generated_utc": "2026-08-31T09:47:19+00:00",
   "resolved_denominator_definition": "n counts only success_continuation, success_retest_hold, and failure_breakdown; no_outcome_in_window is excluded",
   "cohorts": {
@@ -25,6 +25,17 @@
       "unresolved_precondition_n": 1,
       "success_rate": null,
       "sufficiency": "controls_any_n"
+    }
+  },
+  "stage_breakdown": {
+    "primary": {
+      "correction_not_found_in_12h": 78,
+      "liquidation_burst_stage": 154,
+      "large_5m_flow_stage": 16,
+      "resolved_outcome": 6
+    },
+    "control": {
+      "correction_not_found_in_12h": 1
     }
   }
 }

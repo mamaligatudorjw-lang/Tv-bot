@@ -36,10 +36,49 @@ REVIEW_FIELDS = [
     "success_rate",
     "sufficiency",
 ]
+STAGE_FIELDS = ["cohort", "stage", "count"]
 
 
 class ReviewError(RuntimeError):
     """The scan is not safe to interpret."""
+
+
+def _stage_for_row(row: Mapping[str, Any]) -> str:
+    outcome = row.get("outcome")
+    reason = str(row.get("reason") or "")
+    if outcome in RESOLVED_OUTCOMES:
+        return "resolved_outcome"
+    if outcome == "no_outcome_in_window":
+        return "no_outcome_in_window"
+    if reason == "correction_not_found_in_12h":
+        return "correction_not_found_in_12h"
+    if (
+        reason == "long_liquidation_threshold_not_met"
+        or reason == "missing_15m_hour_notional"
+        or reason.startswith("liquidation_coverage_")
+        or reason.startswith("liquidation_fetch_error")
+    ):
+        return "liquidation_burst_stage"
+    if (
+        reason == "large_5m_flow_not_found"
+        or reason.startswith("missing_5m_")
+        or reason.startswith("candle_fetch_error")
+    ):
+        return "large_5m_flow_stage"
+    return "other_unresolved"
+
+
+def _stage_breakdown(
+    events: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, int]]:
+    breakdown: dict[str, dict[str, int]] = {}
+    for row in events:
+        cohort = str(row.get("cohort") or "unknown")
+        stage = _stage_for_row(row)
+        breakdown.setdefault(cohort, {})[stage] = (
+            breakdown.setdefault(cohort, {}).get(stage, 0) + 1
+        )
+    return breakdown
 
 
 def load_completed_scan_report(report_dir: Path) -> dict[str, Any]:
@@ -123,6 +162,7 @@ def build_review(report: Mapping[str, Any]) -> dict[str, Any]:
         "primary": _cohort_summary(events, "primary"),
         "control": _cohort_summary(events, "control"),
     }
+    stage_breakdown = _stage_breakdown(events)
     generated_ts = int(time.time())
     return {
         "generated_ts": generated_ts,
@@ -133,12 +173,28 @@ def build_review(report: Mapping[str, Any]) -> dict[str, Any]:
             "and failure_breakdown; no_outcome_in_window is excluded"
         ),
         "cohorts": cohorts,
+        "stage_breakdown": stage_breakdown,
     }
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=REVIEW_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _write_stage_csv(
+    path: Path,
+    stage_breakdown: Mapping[str, Mapping[str, int]],
+) -> None:
+    rows = [
+        {"cohort": cohort, "stage": stage, "count": count}
+        for cohort, stages in stage_breakdown.items()
+        for stage, count in stages.items()
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=STAGE_FIELDS)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -155,6 +211,10 @@ def write_review(report_dir: Path, output_dir: Path) -> dict[str, Any]:
     )
     rows = list(review["cohorts"].values())
     _write_csv(output_dir / "review.csv", rows)
+    _write_stage_csv(
+        output_dir / "stage_breakdown.csv",
+        review["stage_breakdown"],
+    )
     lines = [
         "# Historical liquidation pattern review",
         "",
@@ -175,6 +235,20 @@ def write_review(report_dir: Path, output_dir: Path) -> dict[str, Any]:
         "",
         "`no_outcome_in_window` is excluded from resolved n and is never "
         "reclassified as success or failure.",
+        "",
+        "## Unresolved precondition stages",
+        "",
+        "| Cohort | Stage | Count |",
+        "|---|---|---:|",
+    ]
+    for cohort, stages in review["stage_breakdown"].items():
+        for stage, count in stages.items():
+            lines.append(f"| {cohort} | {stage} | {count} |")
+    lines += [
+        "",
+        "`liquidation_burst_stage` includes the $100,000 / 2% threshold and "
+        "any incomplete liquidation-hour coverage. "
+        "`large_5m_flow_stage` includes missing 5m coverage and not-found flow.",
         "",
     ]
     (output_dir / "review.md").write_text("\n".join(lines), encoding="utf-8")

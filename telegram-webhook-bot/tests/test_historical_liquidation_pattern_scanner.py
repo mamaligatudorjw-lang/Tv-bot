@@ -273,7 +273,14 @@ def test_failed_preflight_never_creates_scan_outputs(tmp_path):
     assert "ABORTED" in (tmp_path / "report.md").read_text()
 
 
-def test_event_sequence_reaches_flow_and_support_success():
+@pytest.mark.parametrize(
+    ("long_size_sign", "liquidation_size"),
+    [(-1, "-10000"), (1, "10000")],
+)
+def test_event_sequence_reaches_flow_and_support_success(
+    long_size_sign,
+    liquidation_size,
+):
     candles_15m = [_candle(index * 900) for index in range(32)]
     candles_15m.extend(
         [
@@ -300,7 +307,7 @@ def test_event_sequence_reaches_flow_and_support_success():
     class Client:
         def fetch_liquidations(self, _contract, _start, _end):
             return [
-                {"size": "-10000", "fill_price": "100", "time": _start}
+                {"size": liquidation_size, "fill_price": "100", "time": _start}
             ], FetchStatus("complete", count=1)
 
     events, coverage = scan_symbol_events(
@@ -310,7 +317,7 @@ def test_event_sequence_reaches_flow_and_support_success():
         Client(),
         cohort="primary",
         size_field="size",
-        long_size_sign=-1,
+        long_size_sign=long_size_sign,
     )
 
     assert len(events) == 1
@@ -380,3 +387,37 @@ def test_review_reports_control_rate_even_with_small_resolved_sample():
     assert control["resolved_n"] == 2
     assert control["success_rate"] == 0.5
     assert control["sufficiency"] == "controls_any_n"
+
+
+def test_review_breaks_unresolved_rows_by_stage():
+    review = build_review(
+        {
+            "production_changes": False,
+            "generated_utc": "2026-08-30T00:00:00+00:00",
+            "preflight": {"ok": True},
+            "events": [
+                {
+                    "cohort": "primary",
+                    "outcome": "not_reached",
+                    "reason": "correction_not_found_in_12h",
+                },
+                {
+                    "cohort": "primary",
+                    "outcome": "not_reached",
+                    "reason": "long_liquidation_threshold_not_met",
+                },
+                {
+                    "cohort": "primary",
+                    "outcome": "not_reached",
+                    "reason": "missing_5m_candle:123",
+                },
+            ],
+            "coverage": [],
+        }
+    )
+
+    assert review["stage_breakdown"]["primary"] == {
+        "correction_not_found_in_12h": 1,
+        "liquidation_burst_stage": 1,
+        "large_5m_flow_stage": 1,
+    }

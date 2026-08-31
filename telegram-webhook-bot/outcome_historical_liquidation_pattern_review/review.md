@@ -9,3 +9,15 @@
 | control | 1 | 0 | 0 | 0 | 0 | 1 | — | controls_any_n |
 
 `no_outcome_in_window` is excluded from resolved n and is never reclassified as success or failure.
+
+## Unresolved precondition stages
+
+| Cohort | Stage | Count |
+|---|---|---:|
+| primary | correction_not_found_in_12h | 78 |
+| primary | liquidation_burst_stage | 154 |
+| primary | large_5m_flow_stage | 16 |
+| primary | resolved_outcome | 6 |
+| control | correction_not_found_in_12h | 1 |
+
+`liquidation_burst_stage` includes the $100,000 / 2% threshold and any incomplete liquidation-hour coverage. `large_5m_flow_stage` includes missing 5m coverage and not-found flow.
