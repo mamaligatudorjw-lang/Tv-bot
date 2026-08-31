@@ -8,6 +8,7 @@ import time
 import pytest
 
 import app
+import bybit_demo
 from app import _bybit_demo_signal_allowed
 from bybit_relay import create_app as create_bybit_relay_app
 from bybit_demo import (
@@ -69,6 +70,7 @@ class FakeTradingClient:
     def __init__(self):
         self.create_calls = []
         self.order = []
+        self.executions = []
         self.positions = []
         self.closed = []
         self.wallet_balance = [{"totalWalletBalance": "1000"}]
@@ -102,7 +104,7 @@ class FakeTradingClient:
         return list(self.closed)
 
     def get_executions(self, symbol, order_id=None):
-        return []
+        return list(self.executions)
 
 
 def _db():
@@ -694,6 +696,88 @@ def test_polling_closes_filled_position_from_closed_pnl():
     ).fetchone()
     assert polled["closed"] == 1
     assert row == ("closed", 110.0, 4.75, 0.2, "tp")
+
+
+def test_first_observed_fill_is_immutable_and_poll_time_is_separate(
+    monkeypatch, caplog
+):
+    conn = _db()
+    db_lock = threading.Lock()
+    client = FakeTradingClient()
+    result = submit_signal(
+        conn,
+        db_lock,
+        client,
+        strategy="overheated_24h",
+        confirmation_level=None,
+        source_demo_position_id=70,
+        signal_ts=1_700_000_000,
+        symbol="BTCUSDT",
+        direction="LONG",
+        signal_price=100,
+        entry_price=100,
+        sl_price=95,
+        tp_price=110,
+    )
+    assert result["status"] == "submitted"
+    conn.execute(
+        "UPDATE bybit_demo_positions SET ts_submitted=?",
+        (1_700_000_000,),
+    )
+    conn.commit()
+
+    client.order = [{
+        "orderId": "order-1",
+        "orderStatus": "Filled",
+        "cumExecQty": "0.5",
+        "avgPrice": "100",
+        "createdTime": "1700000000123",
+    }]
+    client.executions = [{"execTime": "1700000000456"}]
+    caplog.set_level("INFO", logger="bybit_demo")
+
+    monkeypatch.setattr(bybit_demo.time, "time", lambda: 1_700_000_100)
+    first = poll_positions(conn, db_lock, client)
+    first_row = conn.execute(
+        """
+        SELECT status, ts_submitted, ts_filled, exchange_created_time,
+               exchange_exec_time, last_polled
+        FROM bybit_demo_positions
+        """
+    ).fetchone()
+
+    monkeypatch.setattr(bybit_demo.time, "time", lambda: 1_700_000_120)
+    second = poll_positions(conn, db_lock, client)
+    second_row = conn.execute(
+        """
+        SELECT status, ts_submitted, ts_filled, exchange_created_time,
+               exchange_exec_time, last_polled
+        FROM bybit_demo_positions
+        """
+    ).fetchone()
+
+    assert first["polled"] == 1
+    assert second["polled"] == 1
+    assert first_row == (
+        "submitted",
+        1_700_000_000,
+        1_700_000_100,
+        1_700_000_000123,
+        1_700_000_000456,
+        1_700_000_100,
+    )
+    assert second_row == (
+        "submitted",
+        1_700_000_000,
+        1_700_000_100,
+        1_700_000_000123,
+        1_700_000_000456,
+        1_700_000_120,
+    )
+    assert caplog.text.count("bybit_demo_fill_observed") == 1
+    assert "order_id=order-1" in caplog.text
+    assert "symbol=BTCUSDT" in caplog.text
+    assert "latency_sec=100.000" in caplog.text
 
 
 def test_polling_allocates_aggregate_exchange_close_across_entries():

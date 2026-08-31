@@ -814,6 +814,8 @@ def initialize_schema(conn: Any) -> None:
             ts_created INTEGER NOT NULL,
             ts_submitted INTEGER,
             ts_filled INTEGER,
+            exchange_created_time INTEGER,
+            exchange_exec_time INTEGER,
             ts_closed INTEGER,
             last_polled INTEGER,
             last_error TEXT,
@@ -848,6 +850,8 @@ def initialize_schema(conn: Any) -> None:
         ("gate_classification_uncertain", "INTEGER NOT NULL DEFAULT 0"),
         ("fallback_pre_gate_exception", "INTEGER NOT NULL DEFAULT 0"),
         ("fallback_post_fix_leak", "INTEGER NOT NULL DEFAULT 0"),
+        ("exchange_created_time", "INTEGER"),
+        ("exchange_exec_time", "INTEGER"),
         ("preflight_decision", "TEXT"),
         ("preflight_reason", "TEXT"),
         ("preflight_open_exposure_usd", "REAL"),
@@ -907,6 +911,8 @@ def _update_row(conn: Any, db_lock: threading.Lock, row_id: int, **fields: Any) 
         "exit_reason",
         "ts_submitted",
         "ts_filled",
+        "exchange_created_time",
+        "exchange_exec_time",
         "ts_closed",
         "last_polled",
         "last_error",
@@ -1425,6 +1431,27 @@ def _exchange_order_created_ms(row: dict[str, Any]) -> int | None:
     return created if created > 0 else None
 
 
+def _exchange_time_ms(value: Any) -> int | None:
+    """Parse a positive Bybit millisecond timestamp without inventing one."""
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _latest_execution_time_ms(executions: list[dict[str, Any]]) -> int | None:
+    """Return the latest exchange execution timestamp from fill records."""
+    timestamps = [
+        parsed
+        for item in executions
+        if isinstance(item, dict)
+        for parsed in [_exchange_time_ms(item.get("execTime"))]
+        if parsed is not None
+    ]
+    return max(timestamps) if timestamps else None
+
+
 def _latest_closed_pnl(
     closed_rows: list[dict[str, Any]], row: dict[str, Any]
 ) -> dict[str, Any] | None:
@@ -1747,14 +1774,21 @@ def _record_order(
     order_link_id = str(order.get("orderLinkId") or "") or None
     with db_lock:
         existing_cursor = conn.execute(
-            "SELECT ts_submitted FROM bybit_demo_positions WHERE id=?",
+            "SELECT status, symbol, ts_submitted, ts_filled "
+            "FROM bybit_demo_positions WHERE id=?",
             (ledger_id,),
         )
         existing_submission = existing_cursor.fetchone()
     first_submitted_at = (
-        int(existing_submission[0])
-        if existing_submission and existing_submission[0] is not None
+        int(existing_submission[2])
+        if existing_submission and existing_submission[2] is not None
         else now
+    )
+    existing_status = str(existing_submission[0] or "") if existing_submission else ""
+    existing_filled_at = (
+        int(existing_submission[3])
+        if existing_submission and existing_submission[3] is not None
+        else None
     )
     try:
         executed_qty = float(order.get("cumExecQty") or 0)
@@ -1765,6 +1799,23 @@ def _record_order(
     except (TypeError, ValueError):
         avg_price = None
     status = _map_order_status(order.get("orderStatus"), executed_qty)
+    is_filled = str(order.get("orderStatus", "")).lower() == "filled"
+    first_observed_filled_at = existing_filled_at
+    newly_observed_filled = (
+        is_filled
+        and first_observed_filled_at is None
+        and existing_status in {
+            "intent",
+            "submitting",
+            "submitted",
+            "partially_filled",
+            "unknown",
+        }
+    )
+    if is_filled and first_observed_filled_at is None:
+        first_observed_filled_at = now
+    exchange_created_time = _exchange_time_ms(order.get("createdTime"))
+    exchange_exec_time = _exchange_time_ms(order.get("execTime"))
     fields = {
         "status": status,
         "order_id": order_id,
@@ -1772,11 +1823,15 @@ def _record_order(
         "executed_qty": executed_qty,
         "avg_entry_price": avg_price,
         "ts_submitted": first_submitted_at,
-        "ts_filled": now if str(order.get("orderStatus", "")).lower() == "filled" else None,
+        "ts_filled": first_observed_filled_at,
         "last_polled": now,
         "last_error": None,
         "raw_order_json": _json(order),
     }
+    if exchange_created_time is not None:
+        fields["exchange_created_time"] = exchange_created_time
+    if exchange_exec_time is not None:
+        fields["exchange_exec_time"] = exchange_exec_time
     # The create-order acknowledgement may omit orderLinkId.  The local
     # deterministic link is authoritative and must remain NOT NULL.
     if order_link_id:
@@ -1788,6 +1843,21 @@ def _record_order(
         ledger_id,
         placement_ts=first_submitted_at,
     )
+    if newly_observed_filled:
+        latency_sec = max(0.0, float(now) - float(first_submitted_at))
+        logger.info(
+            "bybit_demo_fill_observed ledger_id=%d order_id=%s symbol=%s "
+            "ts_submitted=%s ts_filled=%s latency_sec=%.3f "
+            "exchange_created_time=%s exchange_exec_time=%s",
+            ledger_id,
+            order_id or "-",
+            existing_submission[1] if existing_submission else "-",
+            first_submitted_at,
+            first_observed_filled_at,
+            latency_sec,
+            exchange_created_time or "-",
+            exchange_exec_time or "-",
+        )
 
 
 def poll_positions(
@@ -1860,12 +1930,13 @@ def poll_positions(
                     )
                 executions = execution_cache[execution_key]
                 if executions:
-                    _update_row(
-                        conn,
-                        db_lock,
-                        row_id,
-                        raw_execution_json=_json({"executions": executions}),
-                    )
+                    execution_fields = {
+                        "raw_execution_json": _json({"executions": executions})
+                    }
+                    execution_time = _latest_execution_time_ms(executions)
+                    if execution_time is not None:
+                        execution_fields["exchange_exec_time"] = execution_time
+                    _update_row(conn, db_lock, row_id, **execution_fields)
 
             symbol = str(row["symbol"]).upper()
             if symbol not in position_cache:
@@ -1887,7 +1958,6 @@ def poll_positions(
                     status="open",
                     position_size=position_size,
                     avg_entry_price=avg_entry or row.get("avg_entry_price"),
-                    ts_filled=row.get("ts_filled") or now,
                     last_polled=now,
                     raw_position_json=_json(position),
                     last_error=None,
