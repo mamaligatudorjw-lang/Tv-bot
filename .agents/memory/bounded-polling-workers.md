@@ -53,3 +53,18 @@ the result from entering the signal pipeline.
 **How to apply:** Test both the late-valid discard path for results that are
 actually consumed after a hard deadline and the unreachable path for futures
 that finish after collection timeout.
+
+The final Gate.io range-breakout scan is especially sensitive to this rule: it
+performs one sequential 1h/200-candle request per liquid symbol and has no
+cancellation check inside the request loop. A timeout therefore commonly leaves
+the daemon worker alive for several more minutes, producing the next-cycle
+overlap.
+
+**Why:** A measured per-request latency around 0.8 seconds multiplied across
+roughly 459 liquid symbols is several minutes, while the cycle only has the
+remaining deadline budget when this late shadow stage starts.
+
+**How to apply:** Treat range-stage timeout→overlap pairs as one slow-worker
+incident, not two independent API failures; preserve active-strategy checks
+before this shadow stage and instrument per-symbol/request progress before
+choosing a fix.
