@@ -91,3 +91,13 @@ def test_http_status_requires_dedicated_token_and_returns_operational_fields(mon
     assert isinstance(payload["polling_stale"], bool)
     assert isinstance(payload["active_whitelist"], list)
     assert isinstance(payload["open_positions"], list)
+
+
+def test_http_status_missing_token_configuration_is_auth_failure(monkeypatch):
+    monkeypatch.delenv("STATUS_API_TOKEN", raising=False)
+
+    client = app.app.test_client()
+    response = client.get("/bot-api/status")
+
+    assert response.status_code == 401
+    assert response.get_json() == {"error": "unauthorized"}

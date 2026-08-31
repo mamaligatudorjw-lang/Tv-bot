@@ -17119,7 +17119,7 @@ def _status_auth_error():
     expected = (os.environ.get(STATUS_API_TOKEN_ENV) or "").strip()
     supplied = (request.headers.get("X-Status-Token") or "").strip()
     if not expected:
-        return jsonify({"error": "status authentication is not configured"}), 503
+        return jsonify({"error": "unauthorized"}), 401
     if not supplied or not hmac.compare_digest(supplied, expected):
         return jsonify({"error": "unauthorized"}), 401
     return None
