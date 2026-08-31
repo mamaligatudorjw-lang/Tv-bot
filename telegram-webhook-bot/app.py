@@ -14067,6 +14067,43 @@ MONITOR_SLIPPAGE_PCT  = 5.0         # re-verify if price moves >5 % in one tick
 _active_monitors: dict[int, "PositionMonitor"] = {}
 _monitors_lock = threading.Lock()
 
+
+def _monitor_slot_usage(monitors=None) -> dict[str, tuple[int, int]]:
+    """Return active PositionMonitor counts and caps for each direction."""
+    if monitors is None:
+        with _monitors_lock:
+            monitors = list(_active_monitors.values())
+    return {
+        "LONG": (
+            sum(1 for monitor in monitors if monitor.direction == "LONG"),
+            MAX_OPEN_LONG_POSITIONS,
+        ),
+        "SHORT": (
+            sum(1 for monitor in monitors if monitor.direction == "SHORT"),
+            MAX_OPEN_SHORT_POSITIONS,
+        ),
+    }
+
+
+def _format_monitor_slot_summary(monitors=None) -> str:
+    """Format directional monitor capacity for Telegram status messages."""
+    usage = _monitor_slot_usage(monitors)
+    lines = ["<b>🧭 Слоты сигналов:</b>"]
+    for direction, icon in (("LONG", "📈"), ("SHORT", "📉")):
+        used, cap = usage[direction]
+        remaining = max(0, cap - used)
+        if used >= cap:
+            availability = "⛔ квота заполнена"
+        elif remaining <= 3:
+            availability = f"⚠️ осталось {remaining}"
+        else:
+            availability = f"осталось {remaining}"
+        lines.append(
+            f"  {icon} {direction}: <b>{used}/{cap}</b> ({availability})"
+        )
+    return "\n".join(lines)
+
+
 # In-memory price cache — refreshed every 10 s by _refresh_price_cache() via APScheduler
 # (one GET /tickers call covers all symbols).  PositionMonitor threads and
 # check_demo_positions use this cache for O(1) lookups instead of per-symbol HTTP calls.
@@ -14890,6 +14927,7 @@ def handle_status_command(chat_id: int) -> None:
         {"inline_keyboard": [[{"text": "🔓 Разглушить всё", "callback_data": "unmute_all"}]]}
         if has_mutes else None
     )
+    monitor_slots = _format_monitor_slot_summary()
     # ────────────────────────────────────────────────────────────────────────
 
     msg = (
@@ -14899,6 +14937,7 @@ def handle_status_command(chat_id: int) -> None:
         f"<b>Отслеживается пар:</b> {tracked} USDT\n"
         f"<b>Ликвидных пар:</b> {liquid} (≥${MIN_VOLUME_USDT:,.0f} объёма)\n"
         f"<b>Активный хост:</b> <code>{active_host}</code>\n\n"
+        f"{monitor_slots}\n\n"
         f"<b>Последняя проверка:</b> {last_run}\n"
         f"<b>Время цикла:</b> {elapsed}с\n\n"
          f"{replay_status_line}\n\n"
@@ -15604,9 +15643,13 @@ def handle_positions_command(chat_id: int) -> None:
     """Show currently active position monitors with live PnL (max 20)."""
     with _monitors_lock:
         monitors = list(_active_monitors.values())
+    monitor_slots = _format_monitor_slot_summary(monitors)
 
     if not monitors:
-        _telegram_send(chat_id, "📭 <b>Нет открытых позиций</b>")
+        _telegram_send(
+            chat_id,
+            f"📭 <b>Нет открытых позиций</b>\n\n{monitor_slots}",
+        )
         return
 
     monitors = sorted(monitors, key=lambda x: x.ts_open)
@@ -15650,6 +15693,8 @@ def handle_positions_command(chat_id: int) -> None:
 
     lines = [
         f"📊 <b>Открытые позиции: {total}</b>",
+        "",
+        monitor_slots,
         "",
     ]
     if short_block:
