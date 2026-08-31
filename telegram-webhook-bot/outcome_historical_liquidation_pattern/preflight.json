@@ -1,0 +1,37 @@
+{
+  "ok": true,
+  "size_field": "size",
+  "examples": [
+    {
+      "symbol": "BTC_USDT",
+      "ts": 1780538400,
+      "utc": "2026-06-04T02:00:00+00:00",
+      "expected_side": "long",
+      "observed_size_sign": 1,
+      "notional_by_sign_usd": {
+        "+1": 121027206458.95905,
+        "-1": 15512180031.56202
+      },
+      "record_count": 1369,
+      "coverage": {
+        "status": "complete",
+        "count": 1369,
+        "reason": "",
+        "requests": 3,
+        "overflow_splits": 1
+      },
+      "rationale": "Market-wide long liquidation cascade on 2026-06-04. BTC fell to ~$61,300-61,384 (lowest since Feb 2026), with the most severe drop reported at 02:00 UTC. Approximately 85% of ~$1.7-1.73B in 24h liquidations were long positions; BTC specifically accounted for ~$750-777M of liquidations. Figures independently corroborated by two separate outlets with consistent numbers (within ~3%).",
+      "sources": [
+        "https://www.coindesk.com/markets/2026/06/04/bitcoin-steadies-above-usd60-000-while-derivatives-send-an-unambiguous-warning",
+        "https://bitcoinfoundation.org/news/bitcoin/liquidations-4-june/"
+      ]
+    }
+  ],
+  "sign_to_side": {
+    "1": "long"
+  },
+  "reason": "inferred from 1 externally-verified events",
+  "created_at_ts": 1788167751,
+  "inference_basis": "inferred from 1 externally-verified events",
+  "created_at": "2026-08-31T09:15:51+00:00"
+}
