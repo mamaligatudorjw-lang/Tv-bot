@@ -1,0 +1,832 @@
+{
+  "report_type": "historical_liquidation_pattern_scan_comparison",
+  "generated_utc": "2026-08-31T14:21:19.828724+00:00",
+  "baseline": {
+    "scan_dir": "outcome_historical_liquidation_pattern",
+    "sensitivity_dir": "outcome_historical_liquidation_pattern_sensitivity",
+    "report_sha256": "86acbeb4ae0d5488782e5871877857f27717d49a89aef81a18c8ea05b4213e4a",
+    "sensitivity_report_sha256": "b197d72b2c1347c085beed6b30e13f44c89cd37a32059d4dfe9e7d1c6a7b03da",
+    "generated_utc": "2026-08-31T09:47:19+00:00",
+    "start_ts": 1780305300,
+    "end_ts": 1788167700,
+    "event_rows": 255,
+    "primary_contracts": 25
+  },
+  "rerun": {
+    "scan_dir": "outcome_historical_liquidation_pattern_rerun_20260831T1400Z",
+    "sensitivity_dir": "outcome_historical_liquidation_pattern_sensitivity_rerun_20260831T1400Z",
+    "report_sha256": "75969e7ba47b0eeee68891646c24c8f62ff4d31fc9be2b0f1d2e0e531cc800c1",
+    "sensitivity_report_sha256": "1116f62d59e54803be14d18060b87209676883d714e0abb7693d37bdd410c644",
+    "generated_utc": "2026-08-31T14:14:25+00:00",
+    "start_ts": 1780305300,
+    "end_ts": 1788184800,
+    "event_rows": 181,
+    "primary_contracts": 24
+  },
+  "fixed_grid": [
+    {
+      "id": "soft_25k_0_5pct",
+      "label": "$25,000 / 0.5%",
+      "min_usd": 25000.0,
+      "hourly_fraction": 0.005
+    },
+    {
+      "id": "soft_50k_1pct",
+      "label": "$50,000 / 1%",
+      "min_usd": 50000.0,
+      "hourly_fraction": 0.01
+    },
+    {
+      "id": "baseline_100k_2pct",
+      "label": "$100,000 / 2% (baseline)",
+      "min_usd": 100000.0,
+      "hourly_fraction": 0.02
+    },
+    {
+      "id": "strict_150k_3pct",
+      "label": "$150,000 / 3%",
+      "min_usd": 150000.0,
+      "hourly_fraction": 0.03
+    }
+  ],
+  "universe_delta": {
+    "primary_added": [
+      "BE_USDT"
+    ],
+    "primary_removed": [
+      "AKE_USDT",
+      "TAO_USDT"
+    ],
+    "primary_unchanged_count": 23
+  },
+  "semantic_event_compare": {
+    "key_fields": [
+      "symbol",
+      "cohort",
+      "pump_ts"
+    ],
+    "baseline_keys": 255,
+    "rerun_keys": 181,
+    "unchanged_keys": 176,
+    "added_keys": 5,
+    "removed_keys": 79,
+    "changed_keys": 0,
+    "added_by_symbol": {
+      "BEUSDT": 4,
+      "PROMUSDT": 1
+    },
+    "removed_by_symbol": {
+      "AKEUSDT": 77,
+      "TAOUSDT": 2
+    },
+    "changed_by_symbol": {},
+    "added_keys_detail": [
+      [
+        "BEUSDT",
+        "primary",
+        1782849600
+      ],
+      [
+        "BEUSDT",
+        "primary",
+        1785276000
+      ],
+      [
+        "BEUSDT",
+        "primary",
+        1785283200
+      ],
+      [
+        "BEUSDT",
+        "primary",
+        1785417300
+      ],
+      [
+        "PROMUSDT",
+        "primary",
+        1788019200
+      ]
+    ],
+    "removed_keys_detail": [
+      [
+        "AKEUSDT",
+        "primary",
+        1781960400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1783074600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784090700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784138400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784143800
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784169000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784171700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784174400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784179800
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784196900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784213100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784214900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784223900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784276100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784306700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784308500
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784310300
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784313000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784328300
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784340000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784348100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784354400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784370600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784403900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784405700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784413800
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784415600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784423700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784507400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784601000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784801700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784805300
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784817900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784822400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784831400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784836800
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784888100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784910600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784958300
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784961000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784964600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784967300
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784970900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1784972700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785132000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785141000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785168000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785189600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785222900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785226500
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785330900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785334500
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785336300
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785339900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785344400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785414600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785528000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785530700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785536100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785596400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785600900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785635100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785681900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785683700
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1785706200
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786616100
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786671000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786674600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786685400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786694400
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786696200
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1786701600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1787058000
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1787061600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1787799600
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1787895900
+      ],
+      [
+        "AKEUSDT",
+        "primary",
+        1787944500
+      ],
+      [
+        "TAOUSDT",
+        "primary",
+        1781349300
+      ],
+      [
+        "TAOUSDT",
+        "primary",
+        1781356500
+      ]
+    ],
+    "changed_keys_detail": []
+  },
+  "sensitivity": {
+    "baseline_source_report_sha256": "86acbeb4ae0d5488782e5871877857f27717d49a89aef81a18c8ea05b4213e4a",
+    "rerun_source_report_sha256": "75969e7ba47b0eeee68891646c24c8f62ff4d31fc9be2b0f1d2e0e531cc800c1",
+    "baseline_decision": "descriptive_only_no_threshold_optimization",
+    "rerun_decision": "descriptive_only_no_threshold_optimization",
+    "baseline_primary_cumulative": [
+      {
+        "threshold_id": "soft_25k_0_5pct",
+        "threshold_label": "$25,000 / 0.5%",
+        "cohort": "primary",
+        "event_rows": 254,
+        "resolved_n": 13,
+        "success_n": 13,
+        "success_continuation_n": 12,
+        "success_retest_hold_n": 1,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 241,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 78,
+          "large_5m_flow_stage": 24,
+          "liquidation_burst_stage": 139,
+          "resolved_outcome": 13
+        }
+      },
+      {
+        "threshold_id": "soft_50k_1pct",
+        "threshold_label": "$50,000 / 1%",
+        "cohort": "primary",
+        "event_rows": 254,
+        "resolved_n": 12,
+        "success_n": 12,
+        "success_continuation_n": 12,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 242,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 78,
+          "large_5m_flow_stage": 18,
+          "liquidation_burst_stage": 146,
+          "resolved_outcome": 12
+        }
+      },
+      {
+        "threshold_id": "baseline_100k_2pct",
+        "threshold_label": "$100,000 / 2% (baseline)",
+        "cohort": "primary",
+        "event_rows": 254,
+        "resolved_n": 6,
+        "success_n": 6,
+        "success_continuation_n": 6,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 248,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 78,
+          "large_5m_flow_stage": 16,
+          "liquidation_burst_stage": 154,
+          "resolved_outcome": 6
+        }
+      },
+      {
+        "threshold_id": "strict_150k_3pct",
+        "threshold_label": "$150,000 / 3%",
+        "cohort": "primary",
+        "event_rows": 254,
+        "resolved_n": 5,
+        "success_n": 5,
+        "success_continuation_n": 5,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 249,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 78,
+          "large_5m_flow_stage": 15,
+          "liquidation_burst_stage": 156,
+          "resolved_outcome": 5
+        }
+      }
+    ],
+    "rerun_primary_cumulative": [
+      {
+        "threshold_id": "soft_25k_0_5pct",
+        "threshold_label": "$25,000 / 0.5%",
+        "cohort": "primary",
+        "event_rows": 180,
+        "resolved_n": 14,
+        "success_n": 14,
+        "success_continuation_n": 13,
+        "success_retest_hold_n": 1,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 166,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 74,
+          "large_5m_flow_stage": 24,
+          "liquidation_burst_stage": 68,
+          "resolved_outcome": 14
+        }
+      },
+      {
+        "threshold_id": "soft_50k_1pct",
+        "threshold_label": "$50,000 / 1%",
+        "cohort": "primary",
+        "event_rows": 180,
+        "resolved_n": 13,
+        "success_n": 13,
+        "success_continuation_n": 13,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 167,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 74,
+          "large_5m_flow_stage": 18,
+          "liquidation_burst_stage": 75,
+          "resolved_outcome": 13
+        }
+      },
+      {
+        "threshold_id": "baseline_100k_2pct",
+        "threshold_label": "$100,000 / 2% (baseline)",
+        "cohort": "primary",
+        "event_rows": 180,
+        "resolved_n": 7,
+        "success_n": 7,
+        "success_continuation_n": 7,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 173,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 74,
+          "large_5m_flow_stage": 16,
+          "liquidation_burst_stage": 83,
+          "resolved_outcome": 7
+        }
+      },
+      {
+        "threshold_id": "strict_150k_3pct",
+        "threshold_label": "$150,000 / 3%",
+        "cohort": "primary",
+        "event_rows": 180,
+        "resolved_n": 5,
+        "success_n": 5,
+        "success_continuation_n": 5,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 175,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "stage_counts": {
+          "correction_not_found_in_12h": 74,
+          "large_5m_flow_stage": 15,
+          "liquidation_burst_stage": 86,
+          "resolved_outcome": 5
+        }
+      }
+    ],
+    "baseline_primary_incremental": [
+      {
+        "threshold_id": "soft_25k_0_5pct",
+        "threshold_label": "$25,000 / 0.5%",
+        "cohort": "primary",
+        "event_rows": 7,
+        "resolved_n": 1,
+        "success_n": 1,
+        "success_continuation_n": 0,
+        "success_retest_hold_n": 1,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 6,
+        "success_rate": 1.0,
+        "sufficiency": "case_log_only",
+        "incremental_quality": "not_clearly_better",
+        "stage_counts": {
+          "large_5m_flow_stage": 6,
+          "resolved_outcome": 1
+        }
+      },
+      {
+        "threshold_id": "soft_50k_1pct",
+        "threshold_label": "$50,000 / 1%",
+        "cohort": "primary",
+        "event_rows": 8,
+        "resolved_n": 6,
+        "success_n": 6,
+        "success_continuation_n": 6,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 2,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "incremental_quality": "not_clearly_better",
+        "stage_counts": {
+          "large_5m_flow_stage": 2,
+          "resolved_outcome": 6
+        }
+      },
+      {
+        "threshold_id": "baseline_100k_2pct",
+        "threshold_label": "$100,000 / 2% (baseline)",
+        "cohort": "primary",
+        "event_rows": 2,
+        "resolved_n": 1,
+        "success_n": 1,
+        "success_continuation_n": 1,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 1,
+        "success_rate": 1.0,
+        "sufficiency": "case_log_only",
+        "incremental_quality": "not_clearly_better",
+        "stage_counts": {
+          "large_5m_flow_stage": 1,
+          "resolved_outcome": 1
+        }
+      }
+    ],
+    "rerun_primary_incremental": [
+      {
+        "threshold_id": "soft_25k_0_5pct",
+        "threshold_label": "$25,000 / 0.5%",
+        "cohort": "primary",
+        "event_rows": 7,
+        "resolved_n": 1,
+        "success_n": 1,
+        "success_continuation_n": 0,
+        "success_retest_hold_n": 1,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 6,
+        "success_rate": 1.0,
+        "sufficiency": "case_log_only",
+        "incremental_quality": "not_clearly_better",
+        "stage_counts": {
+          "large_5m_flow_stage": 6,
+          "resolved_outcome": 1
+        }
+      },
+      {
+        "threshold_id": "soft_50k_1pct",
+        "threshold_label": "$50,000 / 1%",
+        "cohort": "primary",
+        "event_rows": 8,
+        "resolved_n": 6,
+        "success_n": 6,
+        "success_continuation_n": 6,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 2,
+        "success_rate": 1.0,
+        "sufficiency": "descriptive_only",
+        "incremental_quality": "not_clearly_better",
+        "stage_counts": {
+          "large_5m_flow_stage": 2,
+          "resolved_outcome": 6
+        }
+      },
+      {
+        "threshold_id": "baseline_100k_2pct",
+        "threshold_label": "$100,000 / 2% (baseline)",
+        "cohort": "primary",
+        "event_rows": 3,
+        "resolved_n": 2,
+        "success_n": 2,
+        "success_continuation_n": 2,
+        "success_retest_hold_n": 0,
+        "failure_n": 0,
+        "no_outcome_n": 0,
+        "unresolved_precondition_n": 1,
+        "success_rate": 1.0,
+        "sufficiency": "case_log_only",
+        "incremental_quality": "not_clearly_better",
+        "stage_counts": {
+          "large_5m_flow_stage": 1,
+          "resolved_outcome": 2
+        }
+      }
+    ],
+    "coverage": {
+      "replay_count": 15,
+      "five_minute_complete": 8,
+      "five_minute_incomplete": 7,
+      "outcome_15m_complete": 7,
+      "outcome_15m_incomplete": 0,
+      "outcome_15m_not_requested": 8,
+      "incomplete_reasons": {
+        "candle_fetch_error:Gate request failed for /candlesticks: 400 Client Error: Bad Request for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=TRUMP_USDT&interval=5m&from=1781188200&to=1781296199": 1,
+        "candle_fetch_error:Gate request failed for /candlesticks: 400 Client Error: Bad Request for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=TRUMP_USDT&interval=5m&from=1781205300&to=1781313299": 1,
+        "candle_fetch_error:Gate request failed for /candlesticks: 400 Client Error: Bad Request for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=WLD_USDT&interval=5m&from=1780455600&to=1780563599": 2,
+        "candle_fetch_error:Gate request failed for /candlesticks: 400 Client Error: Bad Request for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=WLD_USDT&interval=5m&from=1780517700&to=1780625699": 1,
+        "candle_fetch_error:Gate request failed for /candlesticks: 400 Client Error: Bad Request for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=WLD_USDT&interval=5m&from=1780521300&to=1780629299": 1,
+        "candle_fetch_error:Gate request failed for /candlesticks: 400 Client Error: Bad Request for url: https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=ZHIPU_USDT&interval=5m&from=1782009900&to=1782117899": 1
+      }
+    }
+  },
+  "decision": {
+    "production_threshold_changed": false,
+    "reason": "All resolved cohorts remain descriptive-only; every adjacent incremental band is not_clearly_better.",
+    "baseline_remains": "$100,000 / 2%"
+  }
+}
