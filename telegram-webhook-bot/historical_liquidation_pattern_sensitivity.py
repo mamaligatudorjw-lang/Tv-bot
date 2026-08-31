@@ -134,6 +134,13 @@ INCREMENTAL_EVENT_FIELDS = [
     "reason",
     "stage",
 ]
+STAGE_BREAKDOWN_FIELDS = [
+    "threshold_id",
+    "threshold_label",
+    "cohort",
+    "stage",
+    "count",
+]
 
 
 class SensitivityError(RuntimeError):
@@ -486,6 +493,8 @@ def build_sensitivity(
             base_cohort = "primary" if cohort == "primary" else "control"
             cumulative.append(
                 {
+                    "threshold_id": spec["id"],
+                    "threshold_label": spec["label"],
                     **spec,
                     **_summary(cohort_events, base_cohort, label=cohort),
                 }
@@ -600,6 +609,17 @@ def build_sensitivity(
         "thresholds": list(THRESHOLD_GRID),
         "cumulative": cumulative,
         "incremental": incremental,
+        "stage_breakdown": [
+            {
+                "threshold_id": row["threshold_id"],
+                "threshold_label": row["threshold_label"],
+                "cohort": row["cohort"],
+                "stage": stage,
+                "count": count,
+            }
+            for row in cumulative
+            for stage, count in row["stage_counts"].items()
+        ],
         "threshold_decisions": threshold_decisions,
         "global_decision": global_decision,
         "incremental_events": incremental_events,
@@ -726,6 +746,11 @@ def write_sensitivity(
         for row in cumulative
     ]
     _write_csv(output_dir / "cumulative.csv", cumulative_csv, CUMULATIVE_FIELDS)
+    _write_csv(
+        output_dir / "stage_breakdown.csv",
+        result["stage_breakdown"],
+        STAGE_BREAKDOWN_FIELDS,
+    )
     incremental_csv = [
         {
             **row,
