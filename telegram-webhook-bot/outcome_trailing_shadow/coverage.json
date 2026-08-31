@@ -13,7 +13,7 @@
     }
   },
   "freeze_utc": "2026-08-26T11:50:58+00:00",
-  "generated_utc": "2026-08-31T09:02:56.153244+00:00",
+  "generated_utc": "2026-08-31T09:06:35.738997+00:00",
   "historical_candles_used": false,
   "minimum_forward_pairs_per_strategy": 20,
   "rolling_update": true,

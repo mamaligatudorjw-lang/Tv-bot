@@ -526,14 +526,13 @@ def detect_pump_episodes(
         last_index = group[-1]
         window_start = max(0, first_index - lookback_bars)
         window = ordered[window_start : last_index + 1]
-        support = ordered[first_index - lookback_bars].close
         pump_high = max(candle.high for candle in window)
         episodes.append(
             PumpEpisode(
                 symbol=symbol,
                 first_ts=ordered[first_index].ts,
                 last_candidate_ts=ordered[last_index].ts,
-                support=support,
+                support=None,
                 pump_high=pump_high,
             )
         )
@@ -557,6 +556,20 @@ def correction_for_episode(
     return next((candle for candle in after if candle.low <= target), None)
 
 
+def flush_low_for_episode(
+    correction: Candle,
+    candles: Sequence[Candle],
+) -> float | None:
+    """Return the lowest completed 15m low during correction/liquidations."""
+    end_ts = correction.ts + ONE_HOUR
+    lows = [
+        candle.low
+        for candle in candles
+        if correction.ts <= candle.ts < end_ts
+    ]
+    return min(lows) if lows else None
+
+
 def dominant_size_sign(
     records: Iterable[Mapping[str, Any]],
     *,
@@ -575,22 +588,44 @@ def dominant_size_sign(
     return sign, totals
 
 
+def _validated_sources(value: Any) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise PreflightError("each sign example needs one or more source URLs")
+    sources = [str(item).strip() for item in value]
+    if any(
+        not source.startswith(("http://", "https://"))
+        for source in sources
+    ):
+        raise PreflightError("sign example sources must be HTTP(S) URLs")
+    return sources
+
+
 def validate_sign_preflight(
     examples: Sequence[Mapping[str, Any]],
     fetch_fn: Callable[[str, int, int], tuple[list[dict[str, Any]], FetchStatus]],
     *,
+    created_at_ts: int | float | None,
     size_field: str = "size",
+    now_fn: Callable[[], float] = time.time,
 ) -> SignPreflight:
-    """Validate the sign mapping from manually supplied external examples.
+    """Discover the sign mapping from externally labeled examples.
 
     Each example must contain ``symbol``, ``ts``, ``expected_side`` and
-    ``expected_size_sign``.  The expected values are operator-supplied from
-    an independently recognizable historical example; the API response is
-    then checked against them.  This prevents silently inheriting an
-    undocumented convention from production code.
+    substantive ``rationale`` and ``sources``.  The expected side comes from
+    independently recognizable external evidence.  Gate's observed dominant
+    sign is recorded as an inference; it is never supplied as an expected
+    input or inherited from production code.
     """
     if not 1 <= len(examples) <= 2:
         raise PreflightError("provide exactly one or two sign examples")
+    if created_at_ts is None:
+        raise PreflightError("sign examples need top-level created_at")
+    try:
+        created_at = float(created_at_ts)
+    except (TypeError, ValueError) as exc:
+        raise PreflightError("created_at must be a finite timestamp") from exc
+    if not math.isfinite(created_at) or created_at < 0:
+        raise PreflightError("created_at must be a finite timestamp")
     observed: list[dict[str, Any]] = []
     mapping: dict[str, str] = {}
     for index, example in enumerate(examples, start=1):
@@ -598,14 +633,31 @@ def validate_sign_preflight(
             symbol = gate_contract(str(example["symbol"]))
             ts = parse_ts(example["ts"])
             expected_side = str(example["expected_side"]).lower()
-            expected_sign = int(example["expected_size_sign"])
         except (KeyError, TypeError, ValueError) as exc:
             raise PreflightError(f"invalid sign example #{index}: {exc}") from exc
-        if expected_side not in {"long", "short"} or expected_sign not in {-1, 1}:
+        if "expected_size_sign" in example:
             raise PreflightError(
-                f"sign example #{index} needs expected_side long/short and "
-                "expected_size_sign -1/1"
+                "expected_size_sign is not accepted; the sign is discovered "
+                "from Gate records"
             )
+        if expected_side not in {"long", "short"}:
+            raise PreflightError(
+                f"sign example #{index} needs expected_side long or short"
+            )
+        rationale = str(example.get("rationale") or "").strip()
+        if len(rationale) < MIN_RATIONALE_LENGTH:
+            raise PreflightError(
+                f"sign example #{index} needs substantive rationale "
+                f"(at least {MIN_RATIONALE_LENGTH} characters)"
+            )
+        sources = _validated_sources(example.get("sources"))
+        if index == 1:
+            request_started = now_fn()
+            if created_at >= request_started:
+                raise PreflightError(
+                    "sign examples created_at must precede the first "
+                    "liq_orders request"
+                )
         records, status = fetch_fn(symbol, ts - 30 * 60, ts + 30 * 60)
         if status.status != "complete":
             raise PreflightError(
@@ -615,16 +667,19 @@ def validate_sign_preflight(
         sign, totals = dominant_size_sign(records, size_field=size_field)
         if sign is None:
             raise PreflightError(f"sign example #{index} has no dominant sign")
-        if sign != expected_sign:
-            raise PreflightError(
-                f"sign example #{index} observed sign {sign}, expected "
-                f"{expected_sign}; refusing to scan"
-            )
         key = str(sign)
         previous = mapping.get(key)
         if previous is not None and previous != expected_side:
             raise PreflightError(
                 f"sign examples contradict each other for size sign {sign}"
+            )
+        if any(
+            known_sign != key and known_side == expected_side
+            for known_sign, known_side in mapping.items()
+        ):
+            raise PreflightError(
+                f"sign examples disagree on the observed sign for "
+                f"{expected_side} liquidation"
             )
         mapping[key] = expected_side
         observed.append(
@@ -633,21 +688,27 @@ def validate_sign_preflight(
                 "ts": ts,
                 "utc": utc(ts),
                 "expected_side": expected_side,
-                "expected_size_sign": expected_sign,
                 "observed_size_sign": sign,
                 "notional_by_sign_usd": totals,
                 "record_count": len(records),
                 "coverage": status.as_dict(),
+                "rationale": rationale,
+                "sources": sources,
             }
         )
     if "long" not in mapping.values():
         raise PreflightError("preflight must validate the long-liquidation sign")
+    inference_basis = (
+        f"inferred from {len(observed)} externally-verified events"
+    )
     return SignPreflight(
         ok=True,
         size_field=size_field,
         examples=observed,
         sign_to_side=mapping,
-        reason="manual sign examples validated",
+        reason=inference_basis,
+        created_at_ts=int(created_at),
+        inference_basis=inference_basis,
     )
 
 
@@ -655,16 +716,30 @@ def classify_support_retest(
     candles: Sequence[Candle],
     *,
     support: float,
+    flow_high: float,
     start_ts: int,
     end_ts: int,
 ) -> tuple[str, int | None, str]:
-    if support <= 0 or end_ts <= start_ts:
-        return "invalid", None, "invalid_support_or_outcome_window"
+    if support <= 0 or flow_high <= 0 or end_ts <= start_ts:
+        return "invalid", None, "invalid_support_flow_or_outcome_window"
     for candle in sorted(candles, key=lambda item: item.ts):
-        if start_ts <= candle.ts < end_ts and candle.low <= support <= candle.high:
-            if candle.close >= support:
-                return "success", candle.ts, "support_touched_and_15m_closed_above"
-    return "failure", None, "support_not_retested_and_held"
+        if not start_ts <= candle.ts < end_ts:
+            continue
+        if candle.high > flow_high:
+            return (
+                "success_continuation",
+                candle.ts,
+                "continuation_high_above_large_flow_candle",
+            )
+        if candle.low <= support and candle.close >= support:
+            return (
+                "success_retest_hold",
+                candle.ts,
+                "flush_low_retested_and_15m_closed_above",
+            )
+        if candle.close < support:
+            return "failure_breakdown", candle.ts, "closed_below_flush_low"
+    return "no_outcome_in_window", None, "no_terminal_outcome_in_24h"
 
 
 def find_large_flow(
@@ -747,6 +822,18 @@ def scan_symbol_events(
                 )
             )
             continue
+        support = flush_low_for_episode(correction, candles_15m)
+        if support is None:
+            events.append(
+                _event_row(
+                    symbol,
+                    cohort,
+                    episode,
+                    correction=correction,
+                    reason="flush_low_not_available",
+                )
+            )
+            continue
         liq_start = correction.ts
         liq_end = liq_start + ONE_HOUR
         records, liq_status = client.fetch_liquidations(
@@ -760,6 +847,7 @@ def scan_symbol_events(
                     cohort,
                     episode,
                     correction=correction,
+                    support=support,
                     reason=f"liquidation_coverage_{liq_status.status}:"
                     f"{liq_status.reason}",
                 )
@@ -781,6 +869,7 @@ def scan_symbol_events(
                     cohort,
                     episode,
                     correction=correction,
+                    support=support,
                     long_liq=long_liq,
                     reason=hour_status,
                 )
@@ -797,6 +886,7 @@ def scan_symbol_events(
                     cohort,
                     episode,
                     correction=correction,
+                    support=support,
                     long_liq=long_liq,
                     hour_notional=hour_notional,
                     threshold=threshold,
@@ -821,6 +911,7 @@ def scan_symbol_events(
                     cohort,
                     episode,
                     correction=correction,
+                    support=support,
                     long_liq=long_liq,
                     hour_notional=hour_notional,
                     threshold=threshold,
@@ -836,9 +927,10 @@ def scan_symbol_events(
         baseline_median = statistics.median(baseline) if baseline else 0.0
         support_start = flow.ts + FIVE_MINUTES
         outcome_end = support_start + OUTCOME_HOURS * 60 * 60
-        outcome, retest_ts, outcome_reason = classify_support_retest(
+        outcome, outcome_ts, outcome_reason = classify_support_retest(
             candles_15m,
-            support=episode.support,
+            support=support,
+            flow_high=flow.high,
             start_ts=support_start,
             end_ts=outcome_end,
         )
@@ -848,13 +940,19 @@ def scan_symbol_events(
                 cohort,
                 episode,
                 correction=correction,
+                support=support,
                 long_liq=long_liq,
                 hour_notional=hour_notional,
                 threshold=threshold,
                 flow=flow,
                 baseline_median=baseline_median,
                 outcome=outcome,
-                retest_ts=retest_ts,
+                outcome_ts=outcome_ts,
+                retest_ts=(
+                    outcome_ts
+                    if outcome == "success_retest_hold"
+                    else None
+                ),
                 reason=outcome_reason,
             )
         )
@@ -867,12 +965,14 @@ def _event_row(
     episode: PumpEpisode,
     *,
     correction: Candle | None = None,
+    support: float | None = None,
     long_liq: float | None = None,
     hour_notional: float | None = None,
     threshold: float | None = None,
     flow: Candle | None = None,
     baseline_median: float | None = None,
     outcome: str = "not_reached",
+    outcome_ts: int | None = None,
     retest_ts: int | None = None,
     reason: str = "",
 ) -> dict[str, Any]:
@@ -882,7 +982,7 @@ def _event_row(
         "pump_ts": episode.first_ts,
         "pump_utc": utc(episode.first_ts),
         "pump_episode_end_ts": episode.last_candidate_ts,
-        "support": episode.support,
+        "support": support if support is not None else episode.support,
         "pump_high": episode.pump_high,
         "correction_ts": correction.ts if correction else None,
         "correction_utc": utc(correction.ts) if correction else None,
@@ -900,6 +1000,8 @@ def _event_row(
             if baseline_median is not None
             else None
         ),
+        "outcome_ts": outcome_ts,
+        "outcome_utc": utc(outcome_ts),
         "support_retest_ts": retest_ts,
         "support_retest_utc": utc(retest_ts),
         "outcome": outcome,
@@ -907,16 +1009,28 @@ def _event_row(
     }
 
 
-def load_sign_examples(path: Path) -> list[dict[str, Any]]:
+def load_sign_examples(path: Path) -> SignExamplesFile:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise PreflightError(f"cannot read sign examples: {exc}") from exc
-    if isinstance(payload, dict):
-        payload = payload.get("examples")
-    if not isinstance(payload, list):
-        raise PreflightError("sign examples file must contain a JSON list")
-    return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        raise PreflightError(
+            "sign examples file must be an object with created_at and examples"
+        )
+    try:
+        created_at_ts = parse_ts(payload["created_at"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PreflightError(f"invalid sign examples created_at: {exc}") from exc
+    examples = payload.get("examples")
+    if not isinstance(examples, list) or not all(
+        isinstance(item, dict) for item in examples
+    ):
+        raise PreflightError("sign examples examples must be a list of objects")
+    return SignExamplesFile(
+        created_at_ts=created_at_ts,
+        examples=list(examples),
+    )
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> None:
@@ -950,6 +1064,7 @@ def build_markdown(report: Mapping[str, Any]) -> str:
         f"- Calibrated field: `{preflight.get('size_field')}`",
         f"- Mapping: `{preflight.get('sign_to_side')}`",
         f"- Reason: {preflight.get('reason')}",
+        f"- Pre-registration created: **{preflight.get('created_at')}**",
         "",
         "The mapping is calibrated from operator-supplied, independently "
         "recognizable examples. It is not inherited from production code.",
@@ -965,14 +1080,22 @@ def build_markdown(report: Mapping[str, Any]) -> str:
         "- Liquidation threshold: `max($100,000, 2% × hourly futures notional)`.",
         "- `large_5m_flow`: 5m quote notional at least **3×** the previous 24h "
         "median and `close > open`; this is not proof of one large buyer.",
-        "- Support: close immediately before the 8h pump window.",
-        "- Success: within 24h after flow, a completed 15m candle touches support "
-        "and closes at or above it.",
+        "- Support: flush low, the minimum completed 15m low from the correction "
+        "candle through the end of the one-hour liquidation window.",
+        "- Success: within 24h after the end of the large-flow candle, either a "
+        "15m high exceeds that flow candle's high (continuation), or price "
+        "touches flush low and closes at or above it (retest-and-hold).",
+        "- Failure: a completed 15m candle closes below flush low before either "
+        "success condition.",
+        "- `no_outcome_in_window`: the 24h window ends without continuation, "
+        "retest-and-hold, or breakdown; it is not success or failure.",
         "",
         "## Aggregate results",
         "",
         f"- Pump episodes: **{len(events)}**",
-        f"- Successful support retests: **{sum(row.get('outcome') == 'success' for row in events)}**",
+        f"- Successful outcomes: **{sum(row.get('outcome') in SUCCESS_OUTCOMES for row in events)}**",
+        f"- Resolved outcomes (denominator for #178): **{sum(row.get('outcome') in RESOLVED_OUTCOMES for row in events)}**",
+        f"- No outcome in window: **{sum(row.get('outcome') == 'no_outcome_in_window' for row in events)}**",
         f"- Primary events: **{sum(row.get('cohort') == 'primary' for row in events)}**",
         f"- Control events: **{sum(row.get('cohort') == 'control' for row in events)}**",
         "",
@@ -1029,6 +1152,7 @@ def run_scan(
     client: GateClient,
     *,
     sign_examples: Sequence[Mapping[str, Any]],
+    sign_examples_created_at_ts: int | float | None,
     output_dir: Path,
     start_ts: int,
     end_ts: int,
@@ -1048,6 +1172,7 @@ def run_scan(
     preflight = validate_sign_preflight(
         sign_examples,
         lambda symbol, left, right: client.fetch_liquidations(symbol, left, right),
+        created_at_ts=sign_examples_created_at_ts,
         size_field=size_field,
     )
     long_signs = [
@@ -1231,6 +1356,8 @@ def run_scan(
                     preflight.sign_to_side, sort_keys=True
                 ),
                 "example_count": len(preflight.examples),
+                "created_at": utc(preflight.created_at_ts),
+                "inference_basis": preflight.inference_basis,
             }
         ],
         PREFLIGHT_FIELDS,
@@ -1240,8 +1367,19 @@ def run_scan(
         [
             {"metric": "event_rows", "value": len(events)},
             {
-                "metric": "successful_support_retests",
-                "value": sum(row.get("outcome") == "success" for row in events),
+                "metric": "successful_outcomes",
+                "value": sum(row.get("outcome") in SUCCESS_OUTCOMES for row in events),
+            },
+            {
+                "metric": "resolved_event_rows",
+                "value": sum(row.get("outcome") in RESOLVED_OUTCOMES for row in events),
+            },
+            {
+                "metric": "no_outcome_in_window",
+                "value": sum(
+                    row.get("outcome") == "no_outcome_in_window"
+                    for row in events
+                ),
             },
             {
                 "metric": "primary_events",
@@ -1340,6 +1478,8 @@ def write_failed_preflight(output_dir: Path, error: Exception) -> None:
                 "reason": str(error),
                 "sign_to_side": "{}",
                 "example_count": 0,
+                "created_at": "",
+                "inference_basis": "",
             }
         ],
         PREFLIGHT_FIELDS,
@@ -1360,8 +1500,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         required=True,
         help=(
-            "JSON list of 1-2 manual examples with symbol, ts, expected_side "
-            "(long/short), and independently verified expected_size_sign (-1/1)"
+            "JSON object with created_at and 1-2 externally verified examples "
+            "containing symbol, ts, expected_side, rationale, and sources"
         ),
     )
     parser.add_argument("--out", type=Path, default=Path("outcome_historical_liquidation_pattern"))
@@ -1380,10 +1520,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         else end_ts - args.lookback_days * DAY
     )
     try:
-        examples = load_sign_examples(args.sign_examples)
+        sign_file = load_sign_examples(args.sign_examples)
         report = run_scan(
             GateClient(base_url=args.api_base),
-            sign_examples=examples,
+            sign_examples=sign_file.examples,
+            sign_examples_created_at_ts=sign_file.created_at_ts,
             output_dir=args.out,
             start_ts=start_ts,
             end_ts=end_ts,
