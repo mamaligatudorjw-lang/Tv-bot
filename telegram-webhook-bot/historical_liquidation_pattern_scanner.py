@@ -8,22 +8,26 @@ for the exploratory pattern:
     pump -> correction -> long liquidations -> large_5m_flow -> support retest
 
 The liquidation sign mapping is never assumed.  A caller must provide one or
-two manually selected examples in ``--sign-examples`` before a scan can run.
+two externally verified examples in ``--sign-examples`` before a scan can run.
 
 The examples file is a JSON list such as::
 
-    [
-      {
-        "symbol": "BTCUSDT",
-        "ts": "2026-08-30T12:00:00Z",
-        "expected_side": "long",
-        "expected_size_sign": -1
-      }
-    ]
+    {
+      "created_at": "2026-08-30T12:00:00Z",
+      "examples": [
+        {
+          "symbol": "BTCUSDT",
+          "ts": "2026-06-04T02:00:00Z",
+          "expected_side": "long",
+          "rationale": "Externally documented long-squeeze event ...",
+          "sources": ["https://example.invalid/source"]
+        }
+      ]
+    }
 
-``expected_side`` and ``expected_size_sign`` must come from the operator's
-independent evidence for that historical example; they must not be copied
-from the production liquidation veto convention.
+``expected_side`` must come from independent evidence for that historical
+example.  The size sign is discovered from the complete Gate response and is
+never copied from production code or supplied as an expected input.
 """
 
 from __future__ import annotations
@@ -88,6 +92,8 @@ EVENT_FIELDS = [
     "flow_notional_usd",
     "flow_baseline_median_usd",
     "flow_threshold_usd",
+    "outcome_ts",
+    "outcome_utc",
     "support_retest_ts",
     "support_retest_utc",
     "outcome",
@@ -109,8 +115,21 @@ COVERAGE_FIELDS = [
     "flow_5m_status",
     "reason",
 ]
-PREFLIGHT_FIELDS = ["ok", "size_field", "reason", "sign_to_side", "example_count"]
+PREFLIGHT_FIELDS = [
+    "ok",
+    "size_field",
+    "reason",
+    "sign_to_side",
+    "example_count",
+    "created_at",
+    "inference_basis",
+]
 SUMMARY_FIELDS = ["metric", "value"]
+RESOLVED_OUTCOMES = frozenset(
+    {"success_continuation", "success_retest_hold", "failure_breakdown"}
+)
+SUCCESS_OUTCOMES = frozenset({"success_continuation", "success_retest_hold"})
+MIN_RATIONALE_LENGTH = 40
 
 
 class ScanError(RuntimeError):
@@ -214,7 +233,7 @@ class PumpEpisode:
     symbol: str
     first_ts: int
     last_candidate_ts: int
-    support: float
+    support: float | None
     pump_high: float
 
 
@@ -225,11 +244,20 @@ class SignPreflight:
     examples: list[dict[str, Any]]
     sign_to_side: dict[str, str]
     reason: str
+    created_at_ts: int
+    inference_basis: str
 
     def as_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["sign_to_side"] = dict(self.sign_to_side)
+        payload["created_at"] = utc(self.created_at_ts)
         return payload
+
+
+@dataclass(frozen=True)
+class SignExamplesFile:
+    created_at_ts: int
+    examples: list[dict[str, Any]]
 
 
 class GateClient:
