@@ -1,0 +1,16 @@
+threshold_id,threshold_label,stricter_threshold_id,stricter_threshold_label,cohort,event_rows,resolved_n,success_n,success_continuation_n,success_retest_hold_n,failure_n,no_outcome_n,unresolved_precondition_n,success_rate,sufficiency,incremental_quality,stage_counts
+soft_25k_0_5pct,"$25,000 / 0.5%",soft_50k_1pct,"$50,000 / 1%",primary,7,1,1,0,1,0,0,6,1.0,case_log_only,not_clearly_better,"{""large_5m_flow_stage"": 6, ""resolved_outcome"": 1}"
+soft_25k_0_5pct,"$25,000 / 0.5%",soft_50k_1pct,"$50,000 / 1%",control,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_25k_0_5pct,"$25,000 / 0.5%",soft_50k_1pct,"$50,000 / 1%",control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_25k_0_5pct,"$25,000 / 0.5%",soft_50k_1pct,"$50,000 / 1%",control:ETHUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_25k_0_5pct,"$25,000 / 0.5%",soft_50k_1pct,"$50,000 / 1%",control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_50k_1pct,"$50,000 / 1%",baseline_100k_2pct,"$100,000 / 2% (baseline)",primary,8,6,6,6,0,0,0,2,1.0,descriptive_only,not_clearly_better,"{""large_5m_flow_stage"": 2, ""resolved_outcome"": 6}"
+soft_50k_1pct,"$50,000 / 1%",baseline_100k_2pct,"$100,000 / 2% (baseline)",control,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_50k_1pct,"$50,000 / 1%",baseline_100k_2pct,"$100,000 / 2% (baseline)",control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_50k_1pct,"$50,000 / 1%",baseline_100k_2pct,"$100,000 / 2% (baseline)",control:ETHUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+soft_50k_1pct,"$50,000 / 1%",baseline_100k_2pct,"$100,000 / 2% (baseline)",control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+baseline_100k_2pct,"$100,000 / 2% (baseline)",strict_150k_3pct,"$150,000 / 3%",primary,3,2,2,2,0,0,0,1,1.0,case_log_only,not_clearly_better,"{""large_5m_flow_stage"": 1, ""resolved_outcome"": 2}"
+baseline_100k_2pct,"$100,000 / 2% (baseline)",strict_150k_3pct,"$150,000 / 3%",control,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+baseline_100k_2pct,"$100,000 / 2% (baseline)",strict_150k_3pct,"$150,000 / 3%",control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+baseline_100k_2pct,"$100,000 / 2% (baseline)",strict_150k_3pct,"$150,000 / 3%",control:ETHUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}
+baseline_100k_2pct,"$100,000 / 2% (baseline)",strict_150k_3pct,"$150,000 / 3%",control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,controls_not_pooled,{}

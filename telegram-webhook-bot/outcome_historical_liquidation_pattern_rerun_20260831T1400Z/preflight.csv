@@ -1,0 +1,2 @@
+ok,size_field,reason,sign_to_side,example_count,created_at,inference_basis
+True,size,inferred from 1 externally-verified events,"{""1"": ""long""}",1,2026-08-31T09:15:51+00:00,inferred from 1 externally-verified events

@@ -1,0 +1,25 @@
+threshold_id,threshold_label,cohort,stage,count
+soft_25k_0_5pct,"$25,000 / 0.5%",primary,correction_not_found_in_12h,74
+soft_25k_0_5pct,"$25,000 / 0.5%",primary,large_5m_flow_stage,24
+soft_25k_0_5pct,"$25,000 / 0.5%",primary,liquidation_burst_stage,68
+soft_25k_0_5pct,"$25,000 / 0.5%",primary,resolved_outcome,14
+soft_25k_0_5pct,"$25,000 / 0.5%",control,correction_not_found_in_12h,1
+soft_25k_0_5pct,"$25,000 / 0.5%",control:ETHUSDT,correction_not_found_in_12h,1
+soft_50k_1pct,"$50,000 / 1%",primary,correction_not_found_in_12h,74
+soft_50k_1pct,"$50,000 / 1%",primary,large_5m_flow_stage,18
+soft_50k_1pct,"$50,000 / 1%",primary,liquidation_burst_stage,75
+soft_50k_1pct,"$50,000 / 1%",primary,resolved_outcome,13
+soft_50k_1pct,"$50,000 / 1%",control,correction_not_found_in_12h,1
+soft_50k_1pct,"$50,000 / 1%",control:ETHUSDT,correction_not_found_in_12h,1
+baseline_100k_2pct,"$100,000 / 2% (baseline)",primary,correction_not_found_in_12h,74
+baseline_100k_2pct,"$100,000 / 2% (baseline)",primary,large_5m_flow_stage,16
+baseline_100k_2pct,"$100,000 / 2% (baseline)",primary,liquidation_burst_stage,83
+baseline_100k_2pct,"$100,000 / 2% (baseline)",primary,resolved_outcome,7
+baseline_100k_2pct,"$100,000 / 2% (baseline)",control,correction_not_found_in_12h,1
+baseline_100k_2pct,"$100,000 / 2% (baseline)",control:ETHUSDT,correction_not_found_in_12h,1
+strict_150k_3pct,"$150,000 / 3%",primary,correction_not_found_in_12h,74
+strict_150k_3pct,"$150,000 / 3%",primary,large_5m_flow_stage,15
+strict_150k_3pct,"$150,000 / 3%",primary,liquidation_burst_stage,86
+strict_150k_3pct,"$150,000 / 3%",primary,resolved_outcome,5
+strict_150k_3pct,"$150,000 / 3%",control,correction_not_found_in_12h,1
+strict_150k_3pct,"$150,000 / 3%",control:ETHUSDT,correction_not_found_in_12h,1

@@ -1,0 +1,21 @@
+threshold_id,threshold_label,min_usd,hourly_fraction,cohort,event_rows,resolved_n,success_n,success_continuation_n,success_retest_hold_n,failure_n,no_outcome_n,unresolved_precondition_n,success_rate,sufficiency,stage_counts
+soft_25k_0_5pct,"$25,000 / 0.5%",25000.0,0.005,primary,180,14,14,13,1,0,0,166,1.0,descriptive_only,"{""correction_not_found_in_12h"": 74, ""large_5m_flow_stage"": 24, ""liquidation_burst_stage"": 68, ""resolved_outcome"": 14}"
+soft_25k_0_5pct,"$25,000 / 0.5%",25000.0,0.005,control,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+soft_25k_0_5pct,"$25,000 / 0.5%",25000.0,0.005,control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+soft_25k_0_5pct,"$25,000 / 0.5%",25000.0,0.005,control:ETHUSDT,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+soft_25k_0_5pct,"$25,000 / 0.5%",25000.0,0.005,control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+soft_50k_1pct,"$50,000 / 1%",50000.0,0.01,primary,180,13,13,13,0,0,0,167,1.0,descriptive_only,"{""correction_not_found_in_12h"": 74, ""large_5m_flow_stage"": 18, ""liquidation_burst_stage"": 75, ""resolved_outcome"": 13}"
+soft_50k_1pct,"$50,000 / 1%",50000.0,0.01,control,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+soft_50k_1pct,"$50,000 / 1%",50000.0,0.01,control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+soft_50k_1pct,"$50,000 / 1%",50000.0,0.01,control:ETHUSDT,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+soft_50k_1pct,"$50,000 / 1%",50000.0,0.01,control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+baseline_100k_2pct,"$100,000 / 2% (baseline)",100000.0,0.02,primary,180,7,7,7,0,0,0,173,1.0,descriptive_only,"{""correction_not_found_in_12h"": 74, ""large_5m_flow_stage"": 16, ""liquidation_burst_stage"": 83, ""resolved_outcome"": 7}"
+baseline_100k_2pct,"$100,000 / 2% (baseline)",100000.0,0.02,control,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+baseline_100k_2pct,"$100,000 / 2% (baseline)",100000.0,0.02,control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+baseline_100k_2pct,"$100,000 / 2% (baseline)",100000.0,0.02,control:ETHUSDT,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+baseline_100k_2pct,"$100,000 / 2% (baseline)",100000.0,0.02,control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+strict_150k_3pct,"$150,000 / 3%",150000.0,0.03,primary,180,5,5,5,0,0,0,175,1.0,descriptive_only,"{""correction_not_found_in_12h"": 74, ""large_5m_flow_stage"": 15, ""liquidation_burst_stage"": 86, ""resolved_outcome"": 5}"
+strict_150k_3pct,"$150,000 / 3%",150000.0,0.03,control,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+strict_150k_3pct,"$150,000 / 3%",150000.0,0.03,control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}
+strict_150k_3pct,"$150,000 / 3%",150000.0,0.03,control:ETHUSDT,1,0,0,0,0,0,0,1,,controls_any_n,"{""correction_not_found_in_12h"": 1}"
+strict_150k_3pct,"$150,000 / 3%",150000.0,0.03,control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n,{}

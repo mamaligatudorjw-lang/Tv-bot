@@ -1,0 +1,30 @@
+{
+  "thresholds": [
+    {
+      "id": "soft_25k_0_5pct",
+      "label": "$25,000 / 0.5%",
+      "min_usd": 25000.0,
+      "hourly_fraction": 0.005
+    },
+    {
+      "id": "soft_50k_1pct",
+      "label": "$50,000 / 1%",
+      "min_usd": 50000.0,
+      "hourly_fraction": 0.01
+    },
+    {
+      "id": "baseline_100k_2pct",
+      "label": "$100,000 / 2% (baseline)",
+      "min_usd": 100000.0,
+      "hourly_fraction": 0.02
+    },
+    {
+      "id": "strict_150k_3pct",
+      "label": "$150,000 / 3%",
+      "min_usd": 150000.0,
+      "hourly_fraction": 0.03
+    }
+  ],
+  "baseline_threshold_id": "baseline_100k_2pct",
+  "source_report_sha256": "75969e7ba47b0eeee68891646c24c8f62ff4d31fc9be2b0f1d2e0e531cc800c1"
+}

@@ -1,0 +1,9 @@
+metric,value
+event_rows,181
+successful_outcomes,7
+resolved_event_rows,7
+no_outcome_in_window,0
+primary_events,180
+control_events,1
+coverage_rows,27
+excluded_top_universe_symbols,23
