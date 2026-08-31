@@ -29,6 +29,7 @@ BYBIT_DEMO_NOTIONAL_USD = 50.0
 BYBIT_DEMO_RECV_WINDOW = 5_000
 BYBIT_DEMO_REQUEST_TIMEOUT = 8.0
 BYBIT_DEMO_MAX_POLL_ROWS = 25
+BYBIT_DEMO_POLL_STALE_AFTER_SEC = 120
 BYBIT_RELAY_URL_ENV = "BYBIT_RELAY_URL"
 BYBIT_RELAY_TOKEN_ENV = "BYBIT_RELAY_TOKEN"
 BYBIT_DEMO_EARLY_PROMOTED_ENV = "BYBIT_DEMO_OVERHEATED_EARLY_PROMOTED"
@@ -161,6 +162,40 @@ _reserve_health_last_error: str | None = None
 _reserve_health_last_error_ts: int | None = None
 _reserve_health_last_success_ts: int | None = None
 _reserve_health_latest: dict[str, Any] | None = None
+
+_POLL_HEALTH_LOCK = threading.Lock()
+_poll_health_last_success_ts: int | None = None
+
+
+def record_successful_poll(now: float | None = None) -> int:
+    """Record the completion of a successful Bybit reconciliation cycle."""
+    global _poll_health_last_success_ts
+    timestamp = int(time.time() if now is None else now)
+    with _POLL_HEALTH_LOCK:
+        _poll_health_last_success_ts = timestamp
+    return timestamp
+
+
+def polling_health_status(now: float | None = None) -> dict[str, Any]:
+    """Return the poll heartbeat and its explicit freshness decision."""
+    current_ts = float(time.time() if now is None else now)
+    with _POLL_HEALTH_LOCK:
+        last_success = _poll_health_last_success_ts
+    stale = (
+        last_success is None
+        or current_ts - float(last_success) > BYBIT_DEMO_POLL_STALE_AFTER_SEC
+    )
+    return {
+        "last_successful_poll_at": last_success,
+        "polling_stale": stale,
+        "polling_stale_after_sec": BYBIT_DEMO_POLL_STALE_AFTER_SEC,
+    }
+
+
+def _reset_poll_health_for_tests() -> None:
+    global _poll_health_last_success_ts
+    with _POLL_HEALTH_LOCK:
+        _poll_health_last_success_ts = None
 
 
 def _reserve_health_snapshot_values(
@@ -2076,7 +2111,36 @@ def poll_positions(
             )
             polled += 1
 
+    if polled:
+        record_successful_poll()
     return {"status": "ok", "polled": polled, "closed": closed}
+
+
+def active_whitelist() -> list[dict[str, Any]]:
+    """Return the three configured Bybit slots and the early-slot decision."""
+    promoted = overheated_early_promoted()
+    variants = allowed_signal_variants(overheated_early_is_promoted=promoted)
+    third_strategy = "overheated_early" if promoted else "ema_cross_confirmed"
+    return [
+        {
+            "slot": 1,
+            "strategy": "overheated_24h",
+            "confirmation_level": variants["overheated_24h"],
+            "status": "active",
+        },
+        {
+            "slot": 2,
+            "strategy": "overheated_confirmed",
+            "confirmation_level": variants["overheated_confirmed"],
+            "status": "active",
+        },
+        {
+            "slot": 3,
+            "strategy": third_strategy,
+            "confirmation_level": variants[third_strategy],
+            "status": "active",
+        },
+    ]
 
 
 def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient) -> dict[str, Any]:
@@ -2130,12 +2194,24 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
             LIMIT 1
             """
         ).fetchone()
+        open_positions = conn.execute(
+            """
+            SELECT strategy, symbol,
+                   COALESCE(ts_filled, ts_submitted, ts_created) AS opened_at
+            FROM bybit_demo_positions
+            WHERE status='open'
+              AND (position_size IS NULL OR position_size > 0)
+            ORDER BY opened_at ASC, id ASC
+            """
+        ).fetchall()
     leak_count = int(row[4] or 0)
     confirmed_leak_count = int(row[5] or 0)
     uncertain_leak_count = int(row[6] or 0)
     fallback_pre_gate_count = int(row[7] or 0)
     fallback_post_fix_count = int(row[8] or 0)
     config = reserve_config()
+    poll_health = polling_health_status()
+    early_promoted = overheated_early_promoted()
     return {
         "enabled": client.enabled,
         "configured": client.enabled,
@@ -2170,6 +2246,21 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
         "unfinished": int(row[1] or 0),
         "open": int(row[2] or 0),
         "last_polled": row[3],
+        **poll_health,
+        "active_whitelist": active_whitelist(),
+        "overheated_early_decision": {
+            "status": "promoted" if early_promoted else "not_promoted",
+            "active": early_promoted,
+            "strategy": "overheated_early",
+        },
+        "open_positions": [
+            {
+                "strategy": position[0],
+                "symbol": position[1],
+                "opened_at": position[2],
+            }
+            for position in open_positions
+        ],
         "post_fix_leak_count": leak_count,
         "post_fix_leak_alert": confirmed_leak_count > 0,
         "post_fix_leak_confirmed_count": confirmed_leak_count,
@@ -2189,5 +2280,5 @@ def status_snapshot(conn: Any, db_lock: threading.Lock, client: BybitDemoClient)
         ),
         "shadow_gate_fix_ts": BYBIT_DEMO_SHADOW_GATE_FIX_TS,
         "shadow_gate_whitelist": allowed_signal_variants(),
-        "overheated_early_promoted": overheated_early_promoted(),
+        "overheated_early_promoted": early_promoted,
     }

@@ -3,6 +3,7 @@ import math
 import time
 import html
 import base64
+import hmac
 import logging
 import json
 from datetime import datetime, timezone
@@ -37,6 +38,8 @@ from bybit_demo import (
     is_allowed_signal as is_bybit_demo_signal_allowed,
     initialize_schema as initialize_bybit_demo_schema,
     poll_positions as poll_bybit_demo_positions,
+    polling_health_status as bybit_demo_polling_health_status,
+    record_successful_poll as record_bybit_demo_poll_success,
     read_reserve_snapshot as read_bybit_reserve_snapshot,
     record_reserve_health,
     reserve_health_config,
@@ -402,6 +405,7 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "890707423")
+STATUS_API_TOKEN_ENV = "STATUS_API_TOKEN"
 
 # Global Binance cluster endpoints — tried in order until one succeeds
 BINANCE_HOSTS = [
