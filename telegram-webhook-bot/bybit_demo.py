@@ -183,7 +183,7 @@ def polling_health_status(now: float | None = None) -> dict[str, Any]:
         last_success = _poll_health_last_success_ts
     stale = (
         last_success is None
-        or current_ts - float(last_success) > BYBIT_DEMO_POLL_STALE_AFTER_SEC
+        or current_ts - float(last_success) >= BYBIT_DEMO_POLL_STALE_AFTER_SEC
     )
     return {
         "last_successful_poll_at": last_success,
@@ -1920,9 +1920,16 @@ def poll_positions(
 
     polled = 0
     closed = 0
+    successful_requests = 0
     position_cache: dict[str, list[dict[str, Any]]] = {}
     closed_cache: dict[str, list[dict[str, Any]]] = {}
     execution_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    def poll_request(fn, *args, **kwargs):
+        nonlocal successful_requests
+        result = fn(*args, **kwargs)
+        successful_requests += 1
+        return result
 
     for row in rows:
         row_id = int(row["id"])
@@ -1930,12 +1937,14 @@ def poll_positions(
         try:
             order_items: list[dict[str, Any]] = []
             if row.get("order_id"):
-                order_items = client.get_order_realtime(
+                order_items = poll_request(
+                    client.get_order_realtime,
                     symbol=row["symbol"],
                     order_id=str(row["order_id"]),
                 )
             else:
-                order_items = client.get_order_realtime(
+                order_items = poll_request(
+                    client.get_order_realtime,
                     symbol=row["symbol"],
                     order_link_id=row["order_link_id"],
                 )
@@ -1960,7 +1969,8 @@ def poll_positions(
             if row.get("order_id"):
                 execution_key = (str(row["symbol"]).upper(), str(row["order_id"]))
                 if execution_key not in execution_cache:
-                    execution_cache[execution_key] = client.get_executions(
+                    execution_cache[execution_key] = poll_request(
+                        client.get_executions,
                         row["symbol"], str(row["order_id"])
                     )
                 executions = execution_cache[execution_key]
@@ -1975,7 +1985,7 @@ def poll_positions(
 
             symbol = str(row["symbol"]).upper()
             if symbol not in position_cache:
-                position_cache[symbol] = client.get_position(symbol)
+                position_cache[symbol] = poll_request(client.get_position, symbol)
             position = _matching_position(position_cache[symbol], symbol, row["direction"])
             if position:
                 try:
@@ -2001,7 +2011,7 @@ def poll_positions(
                 continue
 
             if symbol not in closed_cache:
-                closed_cache[symbol] = client.get_closed_pnl(symbol)
+                closed_cache[symbol] = poll_request(client.get_closed_pnl, symbol)
             closed_pnl = _latest_closed_pnl(closed_cache[symbol], row)
             if closed_pnl:
                 try:
@@ -2111,9 +2121,14 @@ def poll_positions(
             )
             polled += 1
 
-    if polled:
+    if successful_requests:
         record_successful_poll()
-    return {"status": "ok", "polled": polled, "closed": closed}
+    return {
+        "status": "ok",
+        "polled": polled,
+        "closed": closed,
+        "successful_requests": successful_requests,
+    }
 
 
 def active_whitelist() -> list[dict[str, Any]]:
@@ -2139,6 +2154,9 @@ def active_whitelist() -> list[dict[str, Any]]:
             "strategy": third_strategy,
             "confirmation_level": variants[third_strategy],
             "status": "active",
+            "overheated_early_decision": (
+                "promoted" if promoted else "not_promoted"
+            ),
         },
     ]
 

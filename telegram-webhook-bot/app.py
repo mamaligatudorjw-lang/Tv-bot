@@ -17114,8 +17114,32 @@ def api_analytics():
     })
 
 
+def _status_auth_error():
+    """Require a dedicated operational-status token without logging its value."""
+    expected = (os.environ.get(STATUS_API_TOKEN_ENV) or "").strip()
+    supplied = (request.headers.get("X-Status-Token") or "").strip()
+    if not expected:
+        return jsonify({"error": "status authentication is not configured"}), 503
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        return jsonify({"error": "unauthorized"}), 401
+    return None
+
+
+def _last_signal_at(conn) -> int | None:
+    """Read the latest generated alert without exposing its payload."""
+    try:
+        value = conn.execute("SELECT MAX(ts) FROM alerts").fetchone()[0]
+    except (sqlite3.Error, TypeError, IndexError):
+        return None
+    return int(value) if value is not None else None
+
+
 @app.route("/bot-api/status", methods=["GET"])
 def api_status():
+    auth_error = _status_auth_error()
+    if auth_error is not None:
+        return auth_error
+
     with state_lock:
         last_run_raw = state["last_run"]
     last_run_ts: int | None = None
@@ -17130,6 +17154,19 @@ def api_status():
             last_run_ts = int(dt.timestamp())
         except (ValueError, TypeError):
             last_run_ts = None
+    try:
+        with _db_lock:
+            conn = _get_db()
+            last_signal_at = _last_signal_at(conn)
+        demo_status = bybit_demo_status_snapshot(
+            conn,
+            _db_lock,
+            BybitDemoClient.from_env(),
+        )
+    except Exception as exc:
+        logger.warning("api_status operational snapshot failed: %s", type(exc).__name__)
+        return jsonify({"error": "status unavailable"}), 503
+
     with state_lock:
         return jsonify({
             "initialized": state["initialized"],
@@ -17138,21 +17175,35 @@ def api_status():
             "lastRun": last_run_ts,
             "lastRunSummary": state["last_run_summary"],
             "activeBinanceHost": BINANCE_BASE,
+            "last_signal_at": last_signal_at,
+            "last_successful_poll_at": demo_status["last_successful_poll_at"],
+            "polling_stale": demo_status["polling_stale"],
+            "polling_stale_after_sec": demo_status["polling_stale_after_sec"],
+            "active_whitelist": demo_status["active_whitelist"],
+            "overheated_early_decision": demo_status["overheated_early_decision"],
+            "open_positions": demo_status["open_positions"],
         })
 
 
 @app.route("/bot-api/bybit-demo-status", methods=["GET"])
 def api_bybit_demo_status():
     """Safe Bybit Demo health/ledger summary; never exposes credentials."""
+    auth_error = _status_auth_error()
+    if auth_error is not None:
+        return auth_error
+
     try:
         with _db_lock:
             conn = _get_db()
         return jsonify(
-            bybit_demo_status_snapshot(
-                conn,
-                _db_lock,
-                BybitDemoClient.from_env(),
-            )
+            {
+                **bybit_demo_status_snapshot(
+                    conn,
+                    _db_lock,
+                    BybitDemoClient.from_env(),
+                ),
+                "last_signal_at": _last_signal_at(conn),
+            }
         )
     except Exception as exc:
         logger.warning("api_bybit_demo_status failed: %s", type(exc).__name__)
@@ -17342,6 +17393,8 @@ def _run_bybit_demo_poll() -> None:
         with _db_lock:
             conn = _get_db()
         result = poll_bybit_demo_positions(conn, _db_lock, client)
+        if result.get("status") == "ok" and result.get("successful_requests", 0):
+            record_bybit_demo_poll_success()
         logger.info(
             "bybit_demo_poll status=%s polled=%s closed=%s",
             result.get("status"),

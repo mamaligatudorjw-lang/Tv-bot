@@ -82,8 +82,22 @@ The bot automatically cycles through these global Binance hosts if the primary i
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/health` | Status, tracked pairs, silence state, last run summary |
+| `GET` | `/bot-api/status` | Authenticated operational status and Bybit Demo diagnostics |
+| `GET` | `/bot-api/bybit-demo-status` | Authenticated Bybit Demo ledger and health snapshot |
 | `POST` | `/run-now` | Trigger an immediate check cycle |
 | `POST` | `/telegram-update` | Telegram webhook receiver (registered automatically) |
+
+`/bot-api/status` returns `last_signal_at`, `last_successful_poll_at`,
+`polling_stale`, and `polling_stale_after_sec` (120 seconds), plus an
+`active_whitelist` array of exactly three slots and an `open_positions` array
+containing only `strategy`, `symbol`, and `opened_at`. The third whitelist slot
+also reports whether `overheated_early` is `promoted` or `not_promoted`.
+Missing poll telemetry is treated as stale.
+
+The two operational endpoints require the `X-Status-Token` header matching the
+`STATUS_API_TOKEN` environment secret. Tokens are accepted only in the header
+so they do not appear in request URLs or access logs. `/health` remains
+unauthenticated for uptime monitoring.
 
 ## Environment secrets
 
@@ -91,6 +105,7 @@ The bot automatically cycles through these global Binance hosts if the primary i
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | `890707423` |
+| `STATUS_API_TOKEN` | Dedicated token for operational status endpoints |
 
 ## Running
 
