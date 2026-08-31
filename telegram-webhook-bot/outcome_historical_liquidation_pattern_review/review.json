@@ -1,0 +1,30 @@
+{
+  "generated_ts": 1788169702,
+  "generated_utc": "2026-08-31T09:48:22+00:00",
+  "source_report_generated_utc": "2026-08-31T09:47:19+00:00",
+  "resolved_denominator_definition": "n counts only success_continuation, success_retest_hold, and failure_breakdown; no_outcome_in_window is excluded",
+  "cohorts": {
+    "primary": {
+      "cohort": "primary",
+      "event_rows": 254,
+      "resolved_n": 6,
+      "success_n": 6,
+      "failure_n": 0,
+      "no_outcome_n": 0,
+      "unresolved_precondition_n": 248,
+      "success_rate": 1.0,
+      "sufficiency": "descriptive_only"
+    },
+    "control": {
+      "cohort": "control",
+      "event_rows": 1,
+      "resolved_n": 0,
+      "success_n": 0,
+      "failure_n": 0,
+      "no_outcome_n": 0,
+      "unresolved_precondition_n": 1,
+      "success_rate": null,
+      "sufficiency": "controls_any_n"
+    }
+  }
+}

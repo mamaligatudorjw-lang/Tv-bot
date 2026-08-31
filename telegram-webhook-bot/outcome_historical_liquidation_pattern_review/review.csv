@@ -1,0 +1,3 @@
+cohort,event_rows,resolved_n,success_n,failure_n,no_outcome_n,unresolved_precondition_n,success_rate,sufficiency
+primary,254,6,6,0,0,248,1.0,descriptive_only
+control,1,0,0,0,0,1,,controls_any_n
