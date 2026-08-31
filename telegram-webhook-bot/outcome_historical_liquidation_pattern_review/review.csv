@@ -1,3 +1,6 @@
-cohort,event_rows,resolved_n,success_n,failure_n,no_outcome_n,unresolved_precondition_n,success_rate,sufficiency
-primary,254,6,6,0,0,248,1.0,descriptive_only
-control,1,0,0,0,0,1,,controls_any_n
+cohort,event_rows,resolved_n,success_n,success_continuation_n,success_retest_hold_n,failure_n,no_outcome_n,unresolved_precondition_n,success_rate,sufficiency
+primary,254,6,6,6,0,0,0,248,1.0,descriptive_only
+control,1,0,0,0,0,0,0,1,,controls_any_n
+control:BTCUSDT,0,0,0,0,0,0,0,0,,controls_any_n
+control:ETHUSDT,1,0,0,0,0,0,0,1,,controls_any_n
+control:SOLUSDT,0,0,0,0,0,0,0,0,,controls_any_n

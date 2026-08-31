@@ -1,6 +1,6 @@
 {
-  "generated_ts": 1788170450,
-  "generated_utc": "2026-08-31T10:00:50+00:00",
+  "generated_ts": 1788174960,
+  "generated_utc": "2026-08-31T11:16:00+00:00",
   "source_report_generated_utc": "2026-08-31T09:47:19+00:00",
   "resolved_denominator_definition": "n counts only success_continuation, success_retest_hold, and failure_breakdown; no_outcome_in_window is excluded",
   "cohorts": {
@@ -9,6 +9,8 @@
       "event_rows": 254,
       "resolved_n": 6,
       "success_n": 6,
+      "success_continuation_n": 6,
+      "success_retest_hold_n": 0,
       "failure_n": 0,
       "no_outcome_n": 0,
       "unresolved_precondition_n": 248,
@@ -20,9 +22,52 @@
       "event_rows": 1,
       "resolved_n": 0,
       "success_n": 0,
+      "success_continuation_n": 0,
+      "success_retest_hold_n": 0,
       "failure_n": 0,
       "no_outcome_n": 0,
       "unresolved_precondition_n": 1,
+      "success_rate": null,
+      "sufficiency": "controls_any_n"
+    }
+  },
+  "control_cohorts": {
+    "BTCUSDT": {
+      "cohort": "control:BTCUSDT",
+      "event_rows": 0,
+      "resolved_n": 0,
+      "success_n": 0,
+      "success_continuation_n": 0,
+      "success_retest_hold_n": 0,
+      "failure_n": 0,
+      "no_outcome_n": 0,
+      "unresolved_precondition_n": 0,
+      "success_rate": null,
+      "sufficiency": "controls_any_n"
+    },
+    "ETHUSDT": {
+      "cohort": "control:ETHUSDT",
+      "event_rows": 1,
+      "resolved_n": 0,
+      "success_n": 0,
+      "success_continuation_n": 0,
+      "success_retest_hold_n": 0,
+      "failure_n": 0,
+      "no_outcome_n": 0,
+      "unresolved_precondition_n": 1,
+      "success_rate": null,
+      "sufficiency": "controls_any_n"
+    },
+    "SOLUSDT": {
+      "cohort": "control:SOLUSDT",
+      "event_rows": 0,
+      "resolved_n": 0,
+      "success_n": 0,
+      "success_continuation_n": 0,
+      "success_retest_hold_n": 0,
+      "failure_n": 0,
+      "no_outcome_n": 0,
+      "unresolved_precondition_n": 0,
       "success_rate": null,
       "sufficiency": "controls_any_n"
     }
@@ -36,6 +81,50 @@
     },
     "control": {
       "correction_not_found_in_12h": 1
+    }
+  },
+  "control_stage_breakdown": {
+    "BTCUSDT": {},
+    "ETHUSDT": {
+      "correction_not_found_in_12h": 1
+    },
+    "SOLUSDT": {}
+  },
+  "coverage": {
+    "coverage_rows": 28,
+    "incomplete_symbols": [
+      "AKEUSDT",
+      "BTRUSDT",
+      "DRAMUSDT",
+      "ENAUSDT",
+      "PROMUSDT",
+      "SOXLUSDT",
+      "SPCXUSDT",
+      "TRUMPUSDT",
+      "WLDUSDT",
+      "ZECUSDT",
+      "ZHIPUUSDT"
+    ],
+    "incomplete_n": 11,
+    "control_symbols": {
+      "BTCUSDT": {
+        "candle_15m_status": "complete",
+        "liquidation_status": "not_requested",
+        "flow_5m_status": "not_requested",
+        "reason": null
+      },
+      "ETHUSDT": {
+        "candle_15m_status": "complete",
+        "liquidation_status": "not_requested",
+        "flow_5m_status": "complete",
+        "reason": null
+      },
+      "SOLUSDT": {
+        "candle_15m_status": "complete",
+        "liquidation_status": "not_requested",
+        "flow_5m_status": "not_requested",
+        "reason": null
+      }
     }
   }
 }

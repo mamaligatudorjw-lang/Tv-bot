@@ -389,6 +389,49 @@ def test_review_reports_control_rate_even_with_small_resolved_sample():
     assert control["sufficiency"] == "controls_any_n"
 
 
+def test_review_keeps_each_control_and_success_bucket_separate():
+    review = build_review(
+        {
+            "production_changes": False,
+            "generated_utc": "2026-08-30T00:00:00+00:00",
+            "config": {"control_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"]},
+            "preflight": {"ok": True},
+            "events": [
+                {
+                    "symbol": "BTCUSDT",
+                    "cohort": "control",
+                    "outcome": "success_continuation",
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "cohort": "control",
+                    "outcome": "success_retest_hold",
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "cohort": "control",
+                    "outcome": "failure_breakdown",
+                },
+            ],
+            "coverage": [
+                {"symbol": "BTCUSDT", "cohort": "control"},
+                {"symbol": "ETHUSDT", "cohort": "control"},
+                {"symbol": "SOLUSDT", "cohort": "control"},
+            ],
+        }
+    )
+
+    controls = review["control_cohorts"]
+    assert set(controls) == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+    assert controls["BTCUSDT"]["success_continuation_n"] == 1
+    assert controls["BTCUSDT"]["success_retest_hold_n"] == 0
+    assert controls["ETHUSDT"]["success_continuation_n"] == 0
+    assert controls["ETHUSDT"]["success_retest_hold_n"] == 1
+    assert controls["ETHUSDT"]["failure_n"] == 1
+    assert controls["SOLUSDT"]["event_rows"] == 0
+    assert review["coverage"]["incomplete_n"] == 0
+
+
 def test_review_breaks_unresolved_rows_by_stage():
     review = build_review(
         {
