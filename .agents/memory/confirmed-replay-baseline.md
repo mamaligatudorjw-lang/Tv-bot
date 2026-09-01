@@ -7,4 +7,4 @@ Event-level continuation confirmations are not guaranteed to have their own `dem
 
 **Why:** A fixed confirmation cohort can be larger than the set of persisted confirmed rows, so dropping unmatched events or silently substituting one global distance biases the comparison.
 
-**How to apply:** Match exact confirmed rows first, then use historical ATR at the estimated parent-signal time, and only use a nearest persisted parent as an explicitly labeled last resort.
+**How to apply:** Match exact confirmed rows first; for an unmatched event, prefer a persisted parent whose signal price matches, then use historical completed 4h ATR, and label every reconstruction path explicitly.

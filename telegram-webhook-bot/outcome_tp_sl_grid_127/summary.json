@@ -7,6 +7,16 @@
     "overheated_confirmed": 40,
     "ema_cross_confirmed": 34
   },
+  "confirmed_without_own_persisted_row": {
+    "overheated_confirmed": 17,
+    "ema_cross_confirmed": 2
+  },
+  "baseline_provenance": {
+    "persisted_overheated_24h": 53,
+    "persisted_confirmed": 55,
+    "historical_4h_atr_reconstructed": 10,
+    "parent_persisted_reconstructed": 9
+  },
   "coverage": {
     "symbols_total": 60,
     "symbols_with_history": 60,
@@ -16,8 +26,8 @@
       "SKRUSDT": "gateio",
       "ZKCUSDT": "gateio",
       "HNTUSDT": "gateio",
-      "LISTAUSDT": "gateio",
       "牛来USDT": "gateio",
+      "LISTAUSDT": "gateio",
       "UAIUSDT": "gateio",
       "ZKPUSDT": "gateio",
       "MAGICUSDT": "gateio",
@@ -67,8 +77,8 @@
       "SNXXUSDT": "gateio",
       "SNDKUSDT": "gateio",
       "MUUUSDT": "gateio",
-      "OKTAUSDT": "gateio",
       "USELESSUSDT": "gateio",
+      "OKTAUSDT": "gateio",
       "MARSCOINUSDT": "gateio",
       "ONGUSDT": "gateio",
       "ARBUSDT": "gateio"
@@ -90,6 +100,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 43.47826086956522,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": 0.0
     },
     {
@@ -104,6 +115,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 38.297872340425535,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": -5.180388529139684
     },
     {
@@ -118,6 +130,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 42.0,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": -1.4782608695652186
     },
     {
@@ -132,6 +145,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 44.44444444444444,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": 0.0
     },
     {
@@ -146,6 +160,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 43.24324324324324,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": -1.2012012012012008
     },
     {
@@ -160,6 +175,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 43.58974358974359,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": -0.8547008547008517
     },
     {
@@ -174,6 +190,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 30.76923076923077,
+      "evidence_tier": "descriptive_only",
       "delta_WR_pp_vs_baseline": 0.0
     },
     {
@@ -188,6 +205,7 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 13.333333333333334,
+      "evidence_tier": "descriptive_only",
       "delta_WR_pp_vs_baseline": -17.435897435897438
     },
     {
@@ -202,7 +220,295 @@
       "ambiguous_same_candle": 0,
       "missing_coverage": 0,
       "WR_pct": 14.285714285714285,
+      "evidence_tier": "full",
       "delta_WR_pp_vs_baseline": -16.483516483516485
+    }
+  ],
+  "baseline_validation": [
+    {
+      "signal_id": "overheated_confirmed-log-1788090336.335-牛来USDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "牛来USDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T11:45:36.335000+00:00",
+      "entry_price": 0.1016,
+      "baseline_sl_pct": 14.570857907620713,
+      "baseline_tp_pct": 29.141715815241426,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 13.043799212598426,
+      "parent_check_tp_pct": 26.087598425196852,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6552
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788091184.945-HNTUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "HNTUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T11:59:44.945000+00:00",
+      "entry_price": 0.6717,
+      "baseline_sl_pct": 12.24535308868617,
+      "baseline_tp_pct": 24.49070617737234,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 7.1556179416831425,
+      "parent_check_tp_pct": 14.311235883366285,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6529
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788092186.863-UNIUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "UNIUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T12:16:26.863000+00:00",
+      "entry_price": 5.185,
+      "baseline_sl_pct": 4.615880991509671,
+      "baseline_tp_pct": 9.231761983019359,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 4.0367130458740865,
+      "parent_check_tp_pct": 8.073426091748173,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6651
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788093038.384-UNIUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "UNIUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T12:30:38.384000+00:00",
+      "entry_price": 5.2,
+      "baseline_sl_pct": 4.6025659501880085,
+      "baseline_tp_pct": 9.205131900376033,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 4.02506868131868,
+      "parent_check_tp_pct": 8.05013736263736,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6651
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788096616.531-牛来USDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "牛来USDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T13:30:16.531000+00:00",
+      "entry_price": 0.1125,
+      "baseline_sl_pct": 15.37250103135584,
+      "baseline_tp_pct": 30.745002062711663,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 13.092380952380953,
+      "parent_check_tp_pct": 26.184761904761896,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6668
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788097528.418-DOSUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "DOSUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T13:45:28.418000+00:00",
+      "entry_price": 0.3304,
+      "baseline_sl_pct": 7.874344597435173,
+      "baseline_tp_pct": 15.748689194870346,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 6.04948547215496,
+      "parent_check_tp_pct": 12.09897094430992,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6639
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788097838.304-DOSUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "DOSUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T13:50:38.304000+00:00",
+      "entry_price": 0.3304,
+      "baseline_sl_pct": 6.04948547215496,
+      "baseline_tp_pct": 12.09897094430992,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 6.04948547215496,
+      "parent_check_tp_pct": 12.09897094430992,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 6639
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788106759.967-SKRUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "SKRUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T16:19:19.967000+00:00",
+      "entry_price": 0.0165,
+      "baseline_sl_pct": 6.808441558441561,
+      "baseline_tp_pct": 13.616883116883121,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 6.808441558441561,
+      "parent_check_tp_pct": 13.616883116883121,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 6635
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788107420.360-SKRUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "SKRUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T16:30:20.360000+00:00",
+      "entry_price": 0.01676,
+      "baseline_sl_pct": 8.453481929764752,
+      "baseline_tp_pct": 16.906963859529505,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 8.453481929764752,
+      "parent_check_tp_pct": 16.906963859529505,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 6716
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788108323.029-UNIUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "UNIUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T16:45:23.029000+00:00",
+      "entry_price": 5.343,
+      "baseline_sl_pct": 4.640697551280837,
+      "baseline_tp_pct": 9.281395102561675,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": 3.917341782305285,
+      "parent_check_tp_pct": 7.83468356461057,
+      "parent_check_match": "nearest_prior_parent_only",
+      "parent_check_db_id": 6651
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788120024.139-SKRUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "SKRUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-30T20:00:24.139000+00:00",
+      "entry_price": 0.020391,
+      "baseline_sl_pct": 6.948180920153854,
+      "baseline_tp_pct": 13.896361840307708,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 6.948180920153854,
+      "parent_check_tp_pct": 13.896361840307708,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 6799
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788165001.491-CYSUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "CYSUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-31T08:30:01.491000+00:00",
+      "entry_price": 0.9399,
+      "baseline_sl_pct": 9.438462642316587,
+      "baseline_tp_pct": 18.876925284633174,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": null,
+      "parent_check_tp_pct": null,
+      "parent_check_match": null,
+      "parent_check_db_id": null
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788167741.562-HEMIUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "HEMIUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-31T09:15:41.562000+00:00",
+      "entry_price": 0.016699,
+      "baseline_sl_pct": 11.922762697509693,
+      "baseline_tp_pct": 23.845525395019386,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 11.922762697509693,
+      "parent_check_tp_pct": 23.845525395019386,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 6870
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788168640.790-CLOUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "CLOUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-31T09:30:40.790000+00:00",
+      "entry_price": 0.14378,
+      "baseline_sl_pct": 9.026811795799146,
+      "baseline_tp_pct": 18.053623591598292,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 9.026811795799146,
+      "parent_check_tp_pct": 18.053623591598292,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 6851
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788176711.940-UAIUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "UAIUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-31T11:45:11.940000+00:00",
+      "entry_price": 0.40523,
+      "baseline_sl_pct": 10.057326744837116,
+      "baseline_tp_pct": 20.114653489674232,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": null,
+      "parent_check_tp_pct": null,
+      "parent_check_match": null,
+      "parent_check_db_id": null
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788197431.662-0GUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "0GUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-31T17:30:31.662000+00:00",
+      "entry_price": 0.2344,
+      "baseline_sl_pct": 5.114882983910283,
+      "baseline_tp_pct": 10.229765967820565,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 5.114882983910283,
+      "parent_check_tp_pct": 10.229765967820565,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 7024
+    },
+    {
+      "signal_id": "overheated_confirmed-log-1788202840.023-HEMIUSDT-LONG",
+      "strategy": "overheated_confirmed",
+      "symbol": "HEMIUSDT",
+      "direction": "LONG",
+      "event_utc": "2026-08-31T19:00:40.023000+00:00",
+      "entry_price": 0.017139,
+      "baseline_sl_pct": 12.684782338567354,
+      "baseline_tp_pct": 25.369564677134708,
+      "baseline_source": "historical_4h_atr_reconstructed",
+      "parent_check_sl_pct": null,
+      "parent_check_tp_pct": null,
+      "parent_check_match": null,
+      "parent_check_db_id": null
+    },
+    {
+      "signal_id": "ema_cross_confirmed-log-1788206434.616-UBERUSDT-SHORT",
+      "strategy": "ema_cross_confirmed",
+      "symbol": "UBERUSDT",
+      "direction": "SHORT",
+      "event_utc": "2026-08-31T20:00:34.616000+00:00",
+      "entry_price": 75.62,
+      "baseline_sl_pct": 2.5000000000000036,
+      "baseline_tp_pct": 5.000000000000007,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 2.5000000000000036,
+      "parent_check_tp_pct": 5.000000000000007,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 7015
+    },
+    {
+      "signal_id": "ema_cross_confirmed-log-1788206435.278-HUSDT-SHORT",
+      "strategy": "ema_cross_confirmed",
+      "symbol": "HUSDT",
+      "direction": "SHORT",
+      "event_utc": "2026-08-31T20:00:35.278000+00:00",
+      "entry_price": 0.07295,
+      "baseline_sl_pct": 6.879534872728126,
+      "baseline_tp_pct": 13.759069745456252,
+      "baseline_source": "parent_persisted_reconstructed",
+      "parent_check_sl_pct": 6.879534872728126,
+      "parent_check_tp_pct": 13.759069745456252,
+      "parent_check_match": "signal_price_within_0.5pct",
+      "parent_check_db_id": 7016
     }
   ]
 }

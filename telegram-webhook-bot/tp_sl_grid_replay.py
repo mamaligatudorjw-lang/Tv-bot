@@ -512,6 +512,14 @@ def classify_first_touch(
     return "no_outcome_yet", None, None
 
 
+def evidence_tier(resolved: int) -> str:
+    if resolved >= 20:
+        return "full"
+    if resolved >= 5:
+        return "descriptive_only"
+    return "case_log_only"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", type=Path, default=Path("alerts.db"))
@@ -595,6 +603,10 @@ def main() -> int:
                     / float(item["entry_price"])
                     * 100.0,
                     "baseline_source": item["baseline_source"],
+                    "parent_check_sl_pct": item.get("parent_check_sl_pct"),
+                    "parent_check_tp_pct": item.get("parent_check_tp_pct"),
+                    "parent_check_match": item.get("parent_check_match"),
+                    "parent_check_db_id": item.get("parent_check_db_id"),
                     "variant": variant,
                     "scale": scale,
                     "outcome": outcome,
@@ -641,6 +653,7 @@ def main() -> int:
                     "ambiguous_same_candle": counts["ambiguous_same_candle"],
                     "missing_coverage": counts["missing_coverage"],
                     "WR_pct": wr,
+                    "evidence_tier": evidence_tier(resolved),
                 }
             )
 
@@ -657,6 +670,40 @@ def main() -> int:
             else None
         )
 
+    no_own_row = [
+        item for item in cohort
+        if item["alert_type"] != "overheated_24h"
+        and item.get("matched_db_id") is None
+    ]
+    baseline_provenance = Counter(item["baseline_source"] for item in cohort)
+    validation_rows = []
+    for item in no_own_row:
+        validation_rows.append(
+            {
+                "signal_id": item["signal_id"],
+                "strategy": item["alert_type"],
+                "symbol": item["symbol"],
+                "direction": item["direction"],
+                "event_utc": utc_iso(item["event_ts"]),
+                "entry_price": item["entry_price"],
+                "baseline_sl_pct": abs(
+                    float(item["sl_price"]) - float(item["entry_price"])
+                )
+                / float(item["entry_price"])
+                * 100.0,
+                "baseline_tp_pct": abs(
+                    float(item["tp_price"]) - float(item["entry_price"])
+                )
+                / float(item["entry_price"])
+                * 100.0,
+                "baseline_source": item["baseline_source"],
+                "parent_check_sl_pct": item.get("parent_check_sl_pct"),
+                "parent_check_tp_pct": item.get("parent_check_tp_pct"),
+                "parent_check_match": item.get("parent_check_match"),
+                "parent_check_db_id": item.get("parent_check_db_id"),
+            }
+        )
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     with (args.output_dir / "per_signal.csv").open(
         "w", encoding="utf-8", newline=""
@@ -664,6 +711,12 @@ def main() -> int:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    with (args.output_dir / "baseline_validation.csv").open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(validation_rows[0]))
+        writer.writeheader()
+        writer.writerows(validation_rows)
     (args.output_dir / "summary.json").write_text(
         json.dumps(
             {
@@ -671,8 +724,17 @@ def main() -> int:
                 "read_only": True,
                 "freeze_utc": utc_iso(FREEZE_TS),
                 "cohort_counts": dict(Counter(item["alert_type"] for item in cohort)),
+                "confirmed_without_own_persisted_row": {
+                    strategy: sum(
+                        item["alert_type"] == strategy and item.get("matched_db_id") is None
+                        for item in cohort
+                    )
+                    for strategy in ("overheated_confirmed", "ema_cross_confirmed")
+                },
+                "baseline_provenance": dict(baseline_provenance),
                 "coverage": coverage,
                 "summary": summary,
+                "baseline_validation": validation_rows,
             },
             ensure_ascii=False,
             indent=2,
@@ -685,11 +747,12 @@ def main() -> int:
         "",
         f"- Freeze: `{utc_iso(FREEZE_TS)}`",
         "- Source: Gate.io USDT futures, completed 1m candle history",
-        "- Baseline: each signal's actual persisted or parent-reconstructed TP/SL distance",
+        "- Baseline: persisted levels where available; confirmed gaps are explicitly reconstructed",
         "- narrow-1: 75% of each signal's baseline distance",
         "- narrow-2: 50% of each signal's baseline distance",
         "- WR denominator: `resolved = WIN + LOSS` only",
         "- Same-candle TP+SL: `ambiguous_same_candle`, excluded from WR",
+        "- Sufficiency tier: `full` if resolved n≥20; `descriptive_only` if 5≤n<20; `case_log_only` if n<5",
         "",
         "## Coverage",
         "",
@@ -698,8 +761,8 @@ def main() -> int:
         "",
         "## Results",
         "",
-        "| Strategy | Variant | Total | Resolved | WIN | LOSS | No outcome yet | Ambiguous | WR | ΔWR vs baseline |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | Variant | Total | Resolved | WIN | LOSS | No outcome yet | Ambiguous | WR | ΔWR vs baseline | Tier |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in summary:
         wr = "n/a" if row["WR_pct"] is None else f"{row['WR_pct']:.2f}%"
@@ -712,8 +775,70 @@ def main() -> int:
             f"| {row['strategy']} | {row['variant']} | {row['total_signals']} | "
             f"{row['resolved']} | {row['WIN']} | {row['LOSS']} | "
             f"{row['no_outcome_yet']} | {row['ambiguous_same_candle']} | "
-            f"{wr} | {delta} |"
+            f"{wr} | {delta} | {row['evidence_tier']} |"
         )
+
+    lines.extend(
+        [
+            "",
+            "## Confirmed baseline provenance",
+            "",
+            f"- Confirmed signals without their own persisted row: {len(no_own_row)}/74",
+            f"- Exact persisted confirmed levels: {baseline_provenance.get('persisted_confirmed', 0)}",
+            f"- Parent-persisted reconstruction: {baseline_provenance.get('parent_persisted_reconstructed', 0)}",
+            f"- Historical 4h ATR reconstruction: {baseline_provenance.get('historical_4h_atr_reconstructed', 0)}",
+            "",
+            "A duplicate-blocked confirmed event is still present in telemetry, but `_demo_open_position` returns before inserting its own `demo_positions` row. The exact runtime confirmed TP/SL is therefore not independently persisted for those events.",
+            "",
+            "### Five validation examples",
+            "",
+            "| Signal | Strategy | Entry | Baseline SL% | Baseline TP% | Parent check SL% | Parent check TP% | Check |",
+            "|---|---|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    preferred_examples = [
+        ("ema_cross_confirmed", "UBERUSDT"),
+        ("ema_cross_confirmed", "HUSDT"),
+        ("overheated_confirmed", "0GUSDT"),
+        ("overheated_confirmed", "SKRUSDT"),
+        ("overheated_confirmed", "DOSUSDT"),
+    ]
+    examples = []
+    for strategy, symbol in preferred_examples:
+        matches = [
+            row for row in validation_rows
+            if row["strategy"] == strategy and row["symbol"] == symbol
+        ]
+        if matches:
+            examples.append(matches[0])
+    if len(examples) < 5:
+        for row in validation_rows:
+            if row not in examples:
+                examples.append(row)
+            if len(examples) == 5:
+                break
+    for row in examples:
+        parent_sl = (
+            "n/a"
+            if row["parent_check_sl_pct"] is None
+            else f"{row['parent_check_sl_pct']:.2f}%"
+        )
+        parent_tp = (
+            "n/a"
+            if row["parent_check_tp_pct"] is None
+            else f"{row['parent_check_tp_pct']:.2f}%"
+        )
+        lines.append(
+            f"| {row['signal_id']} | {row['strategy']} | {row['entry_price']:.8g} | "
+            f"{row['baseline_sl_pct']:.2f}% | {row['baseline_tp_pct']:.2f}% | "
+            f"{parent_sl} | {parent_tp} | {row['parent_check_match'] or 'none'} |"
+        )
+    lines.extend(
+        [
+            "",
+            "The parent check is an independent comparison only when it says `signal_price_within_0.5pct`; otherwise it is a nearest-parent diagnostic, not proof of the exact runtime confirmed level.",
+        ]
+    )
     (args.output_dir / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(json.dumps({"coverage": coverage, "summary": summary}, ensure_ascii=False, indent=2))
