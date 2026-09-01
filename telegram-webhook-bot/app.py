@@ -923,6 +923,13 @@ ALERT_TYPE_SHADOW_ONLY: dict[str, bool] = {
     "oversold_24h":  False,          # всегда реальные сигналы
     "streak_1h":     False,          # всегда реальные сигналы
     "confluence":    False,          # всегда реальные сигналы
+    # Decision #186 — 2026-09-01: restore the Bybit Demo live path for the
+    # three existing whitelist slots, using baseline TP/SL only.  This is an
+    # explicit per-strategy override; SHADOW_ONLY_MODE remains globally True.
+    # Quick rollback: change only these three values back to True.
+    "overheated_24h":       False,
+    "overheated_confirmed": False,
+    "ema_cross_confirmed":  False,
     "pump_24h_fade":        PUMP_FADE_SHADOW_ONLY,       # управляется флагом стратегии (менять там)
     "breakdown_short":      BREAKDOWN_SHADOW_ONLY,       # включена 2026-08-16; переключить когда 2+ недели данных
     "high_rejection_short": True,                        # управляется HIGH_REJECTION_SHADOW_ONLY
@@ -12036,9 +12043,23 @@ def check_cont_confirmed() -> int:
                         symbol, _cp_upd_exc,
                     )
 
+            # Decision #186 — only the first confirmation of the three
+            # whitelisted strategies becomes a real Bybit-Demo source row.
+            # Repeats remain shadow rows; the shared Bybit whitelist still
+            # rejects confirmation levels other than 1/3.
+            _confirmed_is_shadow = not (
+                confirm_num_new == 1
+                and conf_atype in ALERT_TYPE_SHADOW_ONLY
+                and ALERT_TYPE_SHADOW_ONLY[conf_atype] is False
+            )
+            if not _confirmed_is_shadow and SHADOW_ONLY_MODE:
+                logger.warning(
+                    "Decision #186 live confirmed path: %s %s %s confirmation=%d/3",
+                    conf_atype, symbol, direction, confirm_num_new,
+                )
             _demo_open_position(
                 symbol, direction, entry_price, _conf_sl, _conf_tp,
-                is_shadow=True,
+                is_shadow=_confirmed_is_shadow,
                 alert_type=conf_atype,
                 signal_price=signal_price,
                 confirmation_level=(

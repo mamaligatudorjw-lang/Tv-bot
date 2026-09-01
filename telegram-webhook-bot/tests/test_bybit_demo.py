@@ -185,6 +185,36 @@ def test_app_gate_uses_same_conditional_third_slot(monkeypatch):
     assert not _bybit_demo_signal_allowed(True, "overheated_early", None)
 
 
+@pytest.mark.parametrize(
+    ("strategy", "confirmation"),
+    [
+        ("overheated_24h", None),
+        ("overheated_confirmed", "1/3"),
+        ("ema_cross_confirmed", "1/3"),
+    ],
+)
+def test_decision_186_whitelist_overrides_global_shadow_mode(
+    monkeypatch, strategy, confirmation
+):
+    monkeypatch.setattr(app, "SHADOW_ONLY_MODE", True)
+
+    # The application-level override makes the source row real, while the
+    # shared Bybit gate still receives is_shadow=False and applies its own
+    # strategy/confirmation whitelist.
+    assert app.ALERT_TYPE_SHADOW_ONLY[strategy] is False
+    assert _bybit_demo_signal_allowed(False, strategy, confirmation)
+    assert not _bybit_demo_signal_allowed(True, strategy, confirmation)
+
+
+@pytest.mark.parametrize("strategy", ["overheated_confirmed", "ema_cross_confirmed"])
+@pytest.mark.parametrize("confirmation", ["2/3", "3/3"])
+def test_decision_186_keeps_repeat_confirmations_out_of_bybit(
+    strategy, confirmation
+):
+    assert app.ALERT_TYPE_SHADOW_ONLY[strategy] is False
+    assert not _bybit_demo_signal_allowed(False, strategy, confirmation)
+
+
 def test_missing_timestamp_is_uncertain_not_a_leak():
     metadata = classify_gate_metadata(1, None)
     assert metadata["pre_gate_exception"] == 0
