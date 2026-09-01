@@ -6,6 +6,7 @@ id = "4zl1HulGwtM_cyir2yqeM"
 uri = "file://exports/app.py.txt"
 type = "text"
 title = "app.py — полный код (2360 строк)"
+logical_id = "f2d92503-3f37-4e7f-8d95-8960dcd2ecd8"
 
 [[outputs]]
 id = "PAagJ-n9_aio-d_e4IjBG"
@@ -13,6 +14,7 @@ uri = "file://telegram-webhook-bot/outcome_high_rejection_analysis/analysis.md"
 type = "text"
 title = "High rejection short analysis"
 description = "Read-only weekly, quartile, and TP-first versus SL-first condition reconciliation."
+logical_id = "7a35911d-d321-4a45-ab09-5ec005e27c8b"
 
 [[outputs]]
 id = "ibEsl7v3pBZh7_HmigClv"
@@ -20,6 +22,7 @@ uri = "file://telegram-webhook-bot/outcome_high_rejection_analysis/analysis.json
 type = "unspecified"
 title = "High rejection analysis data"
 description = "Machine-readable coverage, cohort metrics, provenance, and condition comparisons."
+logical_id = "55f02eef-51ff-45fb-8638-6ff4d30d9dd6"
 
 [[outputs]]
 id = "f1JlLoV4mgp516weGI9aN"
@@ -27,6 +30,7 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/report.json"
 type = "unspecified"
 title = "#150 report.json"
 description = "Полный JSON-отчёт read-only in-sample WR≥35% trailing-stop анализа: baseline, filtered baseline, trailing grid и filter/trailing effects."
+logical_id = "576c2fe2-4658-4e94-b836-4e83127527ed"
 
 [[outputs]]
 id = "_Ws6YTNybrXDOym4DVT_Q"
@@ -34,6 +38,7 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/analysis.md"
 type = "text"
 title = "#150 analysis.md"
 description = "Markdown-отчёт #150 с методикой, cohort counts, Σ/WR/avg R, всеми trailing steps и ограничениями in-sample."
+logical_id = "1159519c-e60d-4b48-82b3-61b1fedb8766"
 
 [[outputs]]
 id = "DhbGHXZLwCTVlkrTYnp1B"
@@ -41,6 +46,7 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_b
 type = "unspecified"
 title = "WR35 paired bootstrap JSON"
 description = "Полный 95% percentile paired-bootstrap CI по ΔavgR для всех 7 trailing steps обеих стратегий; ресемплинг по уникальному signal ID."
+logical_id = "48abb9e8-3f13-4e97-b678-56c3c97b12f2"
 
 [[outputs]]
 id = "FTb-fyOqYiPJ1Q4s5oOZc"
@@ -48,6 +54,7 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_b
 type = "text"
 title = "WR35 paired bootstrap Markdown"
 description = "Читаемый отчёт с CI по всем 14 комбинациям и консервативным сравнением выбранных шагов с соседними."
+logical_id = "dba54b03-38a9-4308-8111-a7d1bc40f5af"
 
 [[outputs]]
 id = "gGoDIODsRxgIWnZFrKP-v"
@@ -55,6 +62,7 @@ uri = "file://telegram-webhook-bot/outcome_trailing_stop_wr35/bootstrap/paired_b
 type = "table"
 title = "WR35 paired bootstrap CSV"
 description = "Табличный экспорт всех bootstrap-метрик для дальнейшей проверки."
+logical_id = "6ba019de-4bf7-4f1d-a609-781476509e33"
 
 [[outputs]]
 id = "CUjOdYKyLMczWSXGfh_fW"
@@ -62,6 +70,7 @@ uri = "file://telegram-webhook-bot/outcome_overheated_early_bootstrap/report.md"
 type = "text"
 title = "Overheated early post-fix bootstrap report"
 description = "Read-only 20,000-iteration unique-signal bootstrap with JSON, CSV, and per-signal cohort files in the workspace."
+logical_id = "692a4731-8ca1-4ba8-872c-3ac86428a3e4"
 
 [[outputs]]
 id = "UyKIZX00xbviaabS9zO6h"
@@ -69,6 +78,7 @@ uri = "file://telegram-webhook-bot/outcome_tp_vs_sl_multihour/report.md"
 type = "text"
 title = "Refreshed TP-vs-SL factor report"
 description = "Task #146 read-only report with exact RSI coverage, reconstructed 24h low/high proxies, mean-difference bootstrap CIs, JSON provenance, and per-signal CSV."
+logical_id = "5baa9f48-f15d-4dbf-8605-11b25a96bd5d"
 
 [[outputs]]
 id = "7tzlzRdOoYYCQbDO-O7nx"
@@ -76,3 +86,46 @@ uri = "file://telegram-webhook-bot/outcome_forward_ema_confirmed_sl/report.md"
 type = "text"
 title = "Forward-shadow ema_cross_confirmed SL audit"
 description = "Read-only forward validation with frozen threshold 3.567173%, exploratory cutoff 2026-08-30 16:31:24 UTC, overall and LONG cohorts, bootstrap CI, permutation p-value, and explicit insufficiency verdict."
+logical_id = "c9d40f90-215d-4bd9-893c-fce87839374e"
+
+[[outputs]]
+id = "7nkeOyd7XDDStZEmF4Kaq"
+uri = "file://telegram-webhook-bot/outcome_tp_sl_grid_127/report.md"
+type = "text"
+title = "TP/SL grid report"
+description = "Markdown summary for the frozen 127-signal read-only replay."
+logical_id = "002efb69-cca8-4373-ae97-f3dd94385779"
+content_hash = "sha256:38a8a7af1787ccd2f1c34fbb2c2952cbae352a3dc6fb7e8c85f563d10c608599"
+size = 1414
+mtime_ms = 1788249238212
+storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:46ddd2c0-c68d-4c0e-af35-b8b05c054d7b/002efb69-cca8-4373-ae97-f3dd94385779/20c27458-2ecd-40c4-85e1-8c175564cc95"
+storage_version_token = "1788249269296214"
+content_type = "text/markdown"
+
+[[outputs]]
+id = "y7AO1qGL-kiaoBvvqAfTh"
+uri = "file://telegram-webhook-bot/outcome_tp_sl_grid_127/summary.json"
+type = "unspecified"
+title = "TP/SL grid summary JSON"
+description = "Machine-readable coverage and per-strategy results."
+logical_id = "ea8957c7-74be-4e9c-9867-ebcd834da078"
+content_hash = "sha256:d5318a9d321933cc105256c08aa272950e479406968cb2fb786899ba9db02fd9"
+size = 5414
+mtime_ms = 1788249238211
+storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:46ddd2c0-c68d-4c0e-af35-b8b05c054d7b/ea8957c7-74be-4e9c-9867-ebcd834da078/ad1900a4-62e1-464e-8c56-6dc3f2089c6b"
+storage_version_token = "1788249269755653"
+content_type = "application/octet-stream"
+
+[[outputs]]
+id = "1lKg4N7Icm7kuCkSrlHfc"
+uri = "file://telegram-webhook-bot/outcome_tp_sl_grid_127/per_signal.csv"
+type = "table"
+title = "TP/SL grid per-signal CSV"
+description = "All 127 signals across baseline, narrow-1, and narrow-2 variants."
+logical_id = "d4152f5d-3303-49ce-bea3-2cd5adc1088f"
+content_hash = "sha256:869108f956020b13e7ff0cbf37ff1b84ff1e6420e8e52a9562acfccb87e4f188"
+size = 112562
+mtime_ms = 1788249238209
+storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:46ddd2c0-c68d-4c0e-af35-b8b05c054d7b/d4152f5d-3303-49ce-bea3-2cd5adc1088f/8f0e530e-1af4-4e08-a9d3-b353f8fe8a01"
+storage_version_token = "1788249270102033"
+content_type = "text/csv"

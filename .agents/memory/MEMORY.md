@@ -25,3 +25,4 @@
 - [Overheated early bootstrap provenance](overheated-early-bootstrap-provenance.md) — the historical n=121 headline is only reproducible from a frozen backup via ts_close; do not relabel it as the causal ts_open audit.
 - [Liquidation threshold sensitivity](liquidation-threshold-sensitivity.md) — threshold comparisons must preserve the frozen baseline and fail closed on incomplete downstream replay coverage.
 - [Liquidation rerun universe drift](liquidation-rerun-universe-drift.md) — rank-based top-50 reruns can lose rows; compare semantic event keys and universe deltas before interpreting counts.
+- [Confirmed replay baseline provenance](confirmed-replay-baseline.md) — event-level continuation signals may be duplicate-blocked; reconstruct barriers from historical ATR and label provenance explicitly.
