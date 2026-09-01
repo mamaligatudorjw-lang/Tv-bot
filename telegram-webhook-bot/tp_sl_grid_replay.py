@@ -211,6 +211,48 @@ def historical_atr_4h(
     return atr if math.isfinite(atr) and atr > 0 else None
 
 
+def confirmed_barriers_from_parent(
+    item: dict[str, Any],
+    parent: dict[str, Any],
+    parent_type: str,
+) -> tuple[float, float, float, str]:
+    """Rebuild continuation #1 levels from the parent's runtime ATR snapshot."""
+    entry = float(item["entry_price"])
+    parent_entry = float(parent["entry_price"])
+    parent_risk = abs(float(parent["sl_price"]) - parent_entry)
+    parent_risk_pct = parent_risk / parent_entry * 100.0
+
+    # overheated_24h can use the generic no-ATR fallback. EMA Cross requires
+    # an ATR value before it opens the parent position.
+    parent_fallback = (
+        parent_type == "overheated_24h"
+        and rel_close(parent_risk_pct, 2.5, 1e-5)
+    )
+    if parent_fallback:
+        risk = entry * (0.025 if item["direction"] == "LONG" else 0.15)
+        source = "parent_persisted_fallback_reconstructed"
+    else:
+        parent_atr_multiplier = (
+            1.5 if parent_type == "overheated_24h" else 1.0
+        )
+        parent_atr = parent_risk / parent_atr_multiplier
+        if item["direction"] == "LONG":
+            risk = 1.5 * parent_atr
+        else:
+            risk = max(2.0 * parent_atr, entry * 0.025)
+        source = "parent_persisted_reconstructed"
+
+    if item["direction"] == "LONG":
+        sl = entry - risk
+        tp = entry + risk * 2.0
+    else:
+        sl = entry + risk
+        tp = entry - risk * 2.0
+    if not valid_barriers(item["direction"], entry, sl, tp):
+        raise RuntimeError(f"Invalid parent-derived barriers for {item['signal_id']}")
+    return sl, tp, parent_risk_pct, source
+
+
 def attach_baselines(cohort: list[dict[str, Any]], db_path: Path) -> None:
     """Attach exact persisted barriers or reconstruct confirmed #1 barriers.
 
@@ -272,7 +314,7 @@ def attach_baselines(cohort: list[dict[str, Any]], db_path: Path) -> None:
                 if item["alert_type"] == "overheated_confirmed"
                 else "ema_cross"
             )
-            parent_candidates = _db_rows(
+            all_parent_candidates = _db_rows(
                 conn,
                 parent_type,
                 item["symbol"],
@@ -283,7 +325,7 @@ def attach_baselines(cohort: list[dict[str, Any]], db_path: Path) -> None:
             signal_price = float(item["signal_price"])
             parent_candidates = [
                 row
-                for row in parent_candidates
+                for row in all_parent_candidates
                 if row.get("signal_price") is not None
                 and rel_close(float(row["signal_price"]), signal_price, 0.005)
             ]
@@ -300,11 +342,52 @@ def attach_baselines(cohort: list[dict[str, Any]], db_path: Path) -> None:
                         float(row["ts_open"]) - estimated_parent_ts
                     ),
                 )
+            nearest_parent = (
+                min(
+                    all_parent_candidates,
+                    key=lambda row: abs(
+                        float(row["ts_open"]) - estimated_parent_ts
+                    ),
+                )
+                if all_parent_candidates
+                else None
+            )
+
+            # Keep an independent comparison field even when the parent is
+            # only the nearest prior row and cannot be used as the baseline.
+            if nearest_parent is not None:
+                check_sl, check_tp, _, _ = confirmed_barriers_from_parent(
+                    item, nearest_parent, parent_type
+                )
+                item["parent_check_sl_pct"] = abs(check_sl - entry) / entry * 100.0
+                item["parent_check_tp_pct"] = abs(check_tp - entry) / entry * 100.0
+                item["parent_check_db_id"] = int(nearest_parent["id"])
+                item["parent_check_match"] = (
+                    "signal_price_within_0.5pct"
+                    if parent is not None
+                    else "nearest_prior_parent_only"
+                )
+
+            # If the parent row is available, its persisted risk is the best
+            # independent record of the runtime ATR snapshot.  Prefer it over
+            # recomputing ATR from later API history.
+            if parent is not None:
+                sl, tp, parent_risk_pct, source = confirmed_barriers_from_parent(
+                    item, parent, parent_type
+                )
+                item["parent_check_sl_pct"] = abs(sl - entry) / entry * 100.0
+                item["parent_check_tp_pct"] = abs(tp - entry) / entry * 100.0
+                item["parent_check_db_id"] = int(parent["id"])
+                item["parent_check_match"] = "signal_price_within_0.5pct"
+                item["sl_price"] = sl
+                item["tp_price"] = tp
+                item["baseline_source"] = source
+                continue
 
             # A parent can itself be absent from demo_positions because the
-            # symbol/strategy duplicate guard blocked its paper row.  In that
-            # case reconstruct ATR from completed historical 4h candles,
-            # avoiding a fallback that would invent a global distance.
+            # duplicate guard blocked its paper row.  In that case reconstruct
+            # ATR from completed historical 4h candles, avoiding a generic
+            # global distance.
             parent_atr = historical_atr_4h(item["symbol"], estimated_parent_ts)
             if parent_atr is not None:
                 if item["direction"] == "LONG":
@@ -321,42 +404,10 @@ def attach_baselines(cohort: list[dict[str, Any]], db_path: Path) -> None:
                     item["baseline_source"] = "historical_4h_atr_reconstructed"
                     continue
 
-            if parent is None:
-                raise RuntimeError(
-                    "Cannot reconstruct confirmed baseline for "
-                    f"{item['signal_id']} ({item['symbol']})"
-                )
-
-            parent_entry = float(parent["entry_price"])
-            parent_risk = abs(float(parent["sl_price"]) - parent_entry)
-            parent_risk_pct = parent_risk / parent_entry * 100.0
-
-            # These exact percentages are the no-ATR fallbacks in app.py.
-            if item["direction"] == "LONG":
-                if rel_close(parent_risk_pct, 2.5, 1e-5):
-                    risk = entry * 0.025
-                else:
-                    # overheated_24h uses 1.5x ATR; ema_cross uses 1.0x ATR.
-                    parent_atr_multiplier = 1.5 if parent_type == "overheated_24h" else 1.0
-                    risk = entry * (parent_risk / parent_entry) / parent_atr_multiplier
-                sl = entry - risk
-                tp = entry + risk * 2.0
-            else:
-                if rel_close(parent_risk_pct, 15.0, 1e-5):
-                    risk = entry * 0.15
-                else:
-                    risk = entry * (parent_risk / parent_entry)
-                risk = max(risk, entry * 0.025)
-                sl = entry + risk
-                tp = entry - risk * 2.0
-            if not valid_barriers(item["direction"], entry, sl, tp):
-                raise RuntimeError(
-                    f"Invalid reconstructed barriers for {item['signal_id']}"
-                )
-            item["sl_price"] = sl
-            item["tp_price"] = tp
-            item["baseline_source"] = "nearest_parent_persisted_reconstructed"
-            item["parent_db_id"] = int(parent["id"])
+            raise RuntimeError(
+                "Cannot reconstruct confirmed baseline for "
+                f"{item['signal_id']} ({item['symbol']})"
+            )
     finally:
         conn.close()
 
