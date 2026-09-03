@@ -44,7 +44,11 @@ BYBIT_DEMO_EQUITY_RESERVE_USD = 100.0
 # exit into an open runner, so the flag is an explicit operational decision.
 BYBIT_DEMO_TRAIL_PAST_TP_ENV = "BYBIT_DEMO_TRAIL_PAST_TP"
 BYBIT_DEMO_TRAIL_STEP_PCT_ENV = "BYBIT_DEMO_TRAIL_STEP_PCT"
-BYBIT_DEMO_TRAIL_STEP_PCT = 10.0
+# 8% chosen over the in-sample-best 10%: the 2026-09-03 out-of-sample sweep
+# (150 signals, 2026-08-26 to 2026-09-03) found 10%'s CI touches zero while
+# 8% stays clear of it with a larger observed edge. See
+# outcome_partial_tp_fraction_oos/ for the run this is based on.
+BYBIT_DEMO_TRAIL_STEP_PCT = 8.0
 BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV = (
     "BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_SEC"
 )
@@ -948,6 +952,10 @@ def initialize_schema(conn: Any) -> None:
         ("trail_floor", "REAL"),
         ("trail_extreme", "REAL"),
         ("trail_stop", "REAL"),
+        # Updated on every examine, moved or not, so LIMIT-bounded polls rotate
+        # through all committed rows instead of starving whichever have the
+        # highest id.
+        ("trail_checked_ts", "INTEGER"),
     ):
         try:
             conn.execute(
@@ -1024,6 +1032,7 @@ def _update_row(conn: Any, db_lock: threading.Lock, row_id: int, **fields: Any) 
         "trail_floor",
         "trail_extreme",
         "trail_stop",
+        "trail_checked_ts",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -1971,31 +1980,60 @@ def maintain_trailing_stops(
     No orders are created — only the stop of an existing position is moved, so
     the barrier remains exchange-side and survives this process.
 
+    BYBIT_DEMO_TRAIL_PAST_TP governs only whether a *new* entry commits to this
+    (submit_signal sets trail_floor there). Once committed, a row is serviced
+    here unconditionally — flipping the flag off must not strand a position
+    that already shipped without an exchange-side take-profit.
+
+    One-way accounts net every ledger row of a symbol into a single exchange
+    position, so a symbol with more than one committed (trail_floor-set,
+    unfinished) row has no single row whose direction and floor safely
+    describe that shared position — moving the stop for one would blind the
+    others. Such symbols are skipped and logged rather than guessed at.
+
     Fidelity note: the simulation walked candle extremes, while this samples
     price once per poll, so the live trail lags the modelled one and will
     capture less of a fast move.
     """
-    if not client.enabled or not trail_past_tp_enabled():
+    if not client.enabled:
         return {"status": "disabled", "checked": 0, "moved": 0}
 
     step_pct = trail_step_pct()
+    now = int(time.time())
     with db_lock:
         cursor = conn.execute(
             """
             SELECT * FROM bybit_demo_positions
             WHERE status NOT IN ('closed', 'rejected')
               AND trail_floor IS NOT NULL
-            ORDER BY id
+            ORDER BY COALESCE(trail_checked_ts, 0) ASC, id ASC
             LIMIT ?
             """,
             (int(max_rows),),
         )
         rows = [_row_dict(cursor, row) for row in cursor.fetchall()]
 
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_symbol.setdefault(str(row["symbol"]).upper(), []).append(row)
+
     checked = 0
     moved = 0
-    for row in rows:
-        symbol = str(row["symbol"]).upper()
+    skipped_multi_row = 0
+    skipped_side_mismatch = 0
+    for symbol, symbol_rows in by_symbol.items():
+        if len(symbol_rows) > 1:
+            skipped_multi_row += len(symbol_rows)
+            logger.warning(
+                "bybit_demo_trail_skipped_multi_row symbol=%s ledger_ids=%s "
+                "reason=one_way_position_shared_by_multiple_committed_rows",
+                symbol, [row.get("id") for row in symbol_rows],
+            )
+            for row in symbol_rows:
+                _update_row(conn, db_lock, int(row["id"]), trail_checked_ts=now)
+            continue
+
+        row = symbol_rows[0]
         direction = str(row["direction"]).upper()
         floor = row["trail_floor"]
         if floor is None:
@@ -2018,11 +2056,25 @@ def maintain_trailing_stops(
         )
         if live is None:
             continue
+
+        expected_side = "Buy" if direction == "LONG" else "Sell"
+        live_side = str(live.get("side") or "")
+        if live_side != expected_side:
+            skipped_side_mismatch += 1
+            logger.warning(
+                "bybit_demo_trail_skipped_side_mismatch ledger_id=%s symbol=%s "
+                "ledger_direction=%s exchange_side=%s",
+                row.get("id"), symbol, direction, live_side or "unknown",
+            )
+            _update_row(conn, db_lock, int(row["id"]), trail_checked_ts=now)
+            continue
+
         raw_price = live.get("markPrice") or live.get("lastPrice")
         if raw_price is None:
             continue
         price = _parse_api_number(raw_price, "mark_price")
         checked += 1
+        _update_row(conn, db_lock, int(row["id"]), trail_checked_ts=now)
         floor = float(floor)
         long_side = direction == "LONG"
 
@@ -2051,6 +2103,20 @@ def maintain_trailing_stops(
                 if not improved:
                     continue
 
+        tick_size = row.get("tick_size")
+        if tick_size:
+            try:
+                new_stop = normalize_price(
+                    new_stop, tick_size, direction=direction, is_tp=False
+                )
+            except BybitDemoSizingError as exc:
+                logger.warning(
+                    "bybit_demo_trail_tick_normalize_failed ledger_id=%s "
+                    "symbol=%s reason=%s",
+                    row.get("id"), symbol, str(exc),
+                )
+                continue
+
         try:
             client.set_position_stop(symbol=symbol, stop_loss=new_stop)
         except BybitDemoError as exc:
@@ -2066,6 +2132,7 @@ def maintain_trailing_stops(
             trail_active=1,
             trail_extreme=float(extreme),
             trail_stop=float(new_stop),
+            trail_checked_ts=now,
         )
         moved += 1
         logger.info(
@@ -2073,7 +2140,13 @@ def maintain_trailing_stops(
             "floor=%.10g extreme=%.10g stop=%.10g",
             row.get("id"), symbol, direction, floor, extreme, new_stop,
         )
-    return {"status": "ok", "checked": checked, "moved": moved}
+    return {
+        "status": "ok",
+        "checked": checked,
+        "moved": moved,
+        "skipped_multi_row": skipped_multi_row,
+        "skipped_side_mismatch": skipped_side_mismatch,
+    }
 
 
 def poll_positions(
