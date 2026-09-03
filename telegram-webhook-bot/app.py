@@ -390,9 +390,20 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
         raise result["error"]
     return result.get("value")
 
+# Root for every file that must outlive the process: the ledger, its backups,
+# the runtime state and the debug logs.  Defaults to the source directory,
+# which is where the data has always lived.  Point BOT_DATA_DIR at storage that
+# survives a deployment — a published VM is replaced wholesale, and anything
+# left inside the deployed tree goes with it, stranding the positions the old
+# VM tracked and taking the logs that would explain them.
+BOT_DATA_DIR = os.environ.get("BOT_DATA_DIR", "").strip() or (
+    os.path.dirname(__file__) or "."
+)
+os.makedirs(BOT_DATA_DIR, exist_ok=True)
+
 # Also write to a persistent file so we can debug even when terminal
 # output is not captured by the workflow log viewer.
-_file_log_path = os.path.join(os.path.dirname(__file__), "bot_debug.log")
+_file_log_path = os.path.join(BOT_DATA_DIR, "bot_debug.log")
 try:
     _fh = logging.FileHandler(_file_log_path, encoding="utf-8")
     _fh.setLevel(logging.INFO)
@@ -804,22 +815,18 @@ EMA200_FETCH_LIMIT = 250
 EMA200_REFRESH_INTERVAL = 3600     # hourly
 
 # Hit-rate tracking
-HIT_RATE_DB_PATH = os.path.join(os.path.dirname(__file__) or ".", "alerts.db")
+HIT_RATE_DB_PATH = os.path.join(BOT_DATA_DIR, "alerts.db")
 
 # Rolling backup of alerts.db. Keeps the last ALERTS_DB_BACKUP_KEEP hourly
 # snapshots in a sibling directory; sufficient for short-term recovery after
 # an accidental schema change or corruption. Real durability still needs an
 # offsite copy (Object Storage / external bucket).
-ALERTS_DB_BACKUP_DIR = os.path.join(
-    os.path.dirname(__file__) or ".", "alerts_db_backups"
-)
+ALERTS_DB_BACKUP_DIR = os.path.join(BOT_DATA_DIR, "alerts_db_backups")
 ALERTS_DB_BACKUP_KEEP = 24
 
 # Persisted runtime state — currently just the last-known-good Binance host
 # so a process restart doesn't redo the 4-second 451 carousel on every boot.
-BOT_STATE_PATH = os.path.join(
-    os.path.dirname(__file__) or ".", ".bot_state.json"
-)
+BOT_STATE_PATH = os.path.join(BOT_DATA_DIR, ".bot_state.json")
 HIT_RATE_INTERVALS = (
     (180,    "3м"),
     (300,    "5м"),
@@ -14723,7 +14730,7 @@ def restore_position_monitors() -> None:
 # ---------------------------------------------------------------------------
 # Cycle logging
 # ---------------------------------------------------------------------------
-_CYCLE_LOG_PATH = os.path.join(os.path.dirname(__file__), "cycle_log.jsonl")
+_CYCLE_LOG_PATH = os.path.join(BOT_DATA_DIR, "cycle_log.jsonl")
 
 def log_cycle(summary: dict) -> None:
     line = {"ts": datetime.utcnow().isoformat(), **summary}
