@@ -38,6 +38,7 @@ from bybit_demo import (
     is_allowed_signal as is_bybit_demo_signal_allowed,
     initialize_schema as initialize_bybit_demo_schema,
     poll_positions as poll_bybit_demo_positions,
+    maintain_trailing_stops as maintain_bybit_demo_trailing_stops,
     polling_health_status as bybit_demo_polling_health_status,
     record_successful_poll as record_bybit_demo_poll_success,
     read_reserve_snapshot as read_bybit_reserve_snapshot,
@@ -17420,6 +17421,23 @@ def _run_bybit_demo_poll() -> None:
     try:
         with _db_lock:
             conn = _get_db()
+        # Installing the TP floor is time-critical — the trailing edge exists
+        # only while the stop is actually on the exchange — so it runs before
+        # reconciliation and in its own guard: a failure here must not stop the
+        # ledger from being reconciled, and vice versa.
+        try:
+            trail = maintain_bybit_demo_trailing_stops(conn, _db_lock, client)
+            if trail.get("moved"):
+                logger.info(
+                    "bybit_demo_trail status=%s checked=%s moved=%s",
+                    trail.get("status"),
+                    trail.get("checked", 0),
+                    trail.get("moved", 0),
+                )
+        except Exception as _trail_exc:
+            logger.warning(
+                "bybit_demo_trail failed: %s", type(_trail_exc).__name__
+            )
         result = poll_bybit_demo_positions(conn, _db_lock, client)
         if result.get("status") == "ok" and result.get("successful_requests", 0):
             record_bybit_demo_poll_success()

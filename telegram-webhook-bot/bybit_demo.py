@@ -37,6 +37,14 @@ BYBIT_DEMO_MAX_EXPOSURE_ENV = "BYBIT_DEMO_MAX_EXPOSURE_USD"
 BYBIT_DEMO_EQUITY_RESERVE_ENV = "BYBIT_DEMO_EQUITY_RESERVE_USD"
 BYBIT_DEMO_MAX_EXPOSURE_USD = 500.0
 BYBIT_DEMO_EQUITY_RESERVE_USD = 100.0
+# Trail-past-TP exit.  Off unless BYBIT_DEMO_TRAIL_PAST_TP is truthy, because
+# enabling it removes the exchange-side take-profit: the position no longer
+# closes by itself at TP, and the floor at TP is only in place once the poller
+# has moved the stop there.  A stalled poller therefore turns a would-be TP
+# exit into an open runner, so the flag is an explicit operational decision.
+BYBIT_DEMO_TRAIL_PAST_TP_ENV = "BYBIT_DEMO_TRAIL_PAST_TP"
+BYBIT_DEMO_TRAIL_STEP_PCT_ENV = "BYBIT_DEMO_TRAIL_STEP_PCT"
+BYBIT_DEMO_TRAIL_STEP_PCT = 10.0
 BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_ENV = (
     "BYBIT_DEMO_PREFLIGHT_HEALTH_INTERVAL_SEC"
 )
@@ -72,6 +80,19 @@ def _env_flag(name: str, default: bool = False) -> bool:
 def overheated_early_promoted() -> bool:
     """Return the single configured decision for the third whitelist slot."""
     return _env_flag(BYBIT_DEMO_EARLY_PROMOTED_ENV, False)
+
+
+def trail_past_tp_enabled() -> bool:
+    """Whether a filled position trails past TP instead of closing there."""
+    raw_value = os.environ.get(BYBIT_DEMO_TRAIL_PAST_TP_ENV) or ""
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def trail_step_pct() -> float:
+    """Trailing distance behind the best price seen since TP was reached."""
+    return _read_positive_usd_env(
+        BYBIT_DEMO_TRAIL_STEP_PCT_ENV, BYBIT_DEMO_TRAIL_STEP_PCT
+    )
 
 
 def _read_positive_usd_env(name: str, default: float) -> float:
@@ -700,7 +721,7 @@ class BybitDemoClient:
         symbol: str,
         direction: str,
         qty: float,
-        take_profit: float,
+        take_profit: float | None,
         stop_loss: float,
         order_link_id: str,
     ) -> dict[str, Any]:
@@ -714,15 +735,39 @@ class BybitDemoClient:
             "qty": _decimal_text(_decimal(qty, "qty")),
             "positionIdx": 0,
             "orderLinkId": order_link_id,
-            "takeProfit": _decimal_text(_decimal(take_profit, "take_profit")),
             "stopLoss": _decimal_text(_decimal(stop_loss, "stop_loss")),
             "tpslMode": "Full",
-            "tpOrderType": "Market",
             "slOrderType": "Market",
-            "tpTriggerBy": "MarkPrice",
             "slTriggerBy": "MarkPrice",
         }
+        # take_profit is None when the caller trails past TP instead of closing
+        # there; the stop above still ships with the entry.
+        if take_profit is not None:
+            body["takeProfit"] = _decimal_text(
+                _decimal(take_profit, "take_profit")
+            )
+            body["tpOrderType"] = "Market"
+            body["tpTriggerBy"] = "MarkPrice"
         payload = self._request("POST", "/v5/order/create", body=body)
+        result = payload.get("result") or {}
+        return result if isinstance(result, dict) else {}
+
+    def set_position_stop(self, *, symbol: str, stop_loss: float) -> dict[str, Any]:
+        """Move the exchange-side stop of an open position.
+
+        Only the stop is touched: the barrier stays on the exchange, so a
+        process that dies after this call still exits at the level set here.
+        """
+        body = {
+            "category": BYBIT_DEMO_CATEGORY,
+            "symbol": symbol.upper(),
+            "positionIdx": 0,
+            "tpslMode": "Full",
+            "stopLoss": _decimal_text(_decimal(stop_loss, "stop_loss")),
+            "slOrderType": "Market",
+            "slTriggerBy": "MarkPrice",
+        }
+        payload = self._request("POST", "/v5/position/trading-stop", body=body)
         result = payload.get("result") or {}
         return result if isinstance(result, dict) else {}
 
@@ -897,6 +942,12 @@ def initialize_schema(conn: Any) -> None:
         ("preflight_equity_usd", "REAL"),
         ("preflight_equity_reserve_usd", "REAL"),
         ("preflight_ts", "INTEGER"),
+        # Trail-past-TP state.  trail_floor is the TP the stop may never go
+        # below; trail_extreme is the best price seen since activation.
+        ("trail_active", "INTEGER NOT NULL DEFAULT 0"),
+        ("trail_floor", "REAL"),
+        ("trail_extreme", "REAL"),
+        ("trail_stop", "REAL"),
     ):
         try:
             conn.execute(
@@ -969,6 +1020,10 @@ def _update_row(conn: Any, db_lock: threading.Lock, row_id: int, **fields: Any) 
         "gate_classification_uncertain",
         "fallback_pre_gate_exception",
         "fallback_post_fix_leak",
+        "trail_active",
+        "trail_floor",
+        "trail_extreme",
+        "trail_stop",
     }
     unknown = set(fields) - allowed
     if unknown:
@@ -1750,11 +1805,18 @@ def submit_signal(
             }
 
         _update_row(conn, db_lock, ledger_id, status="submitting")
+        # Trailing past TP needs the position to survive its own target, so the
+        # exchange-side take-profit is withheld and `maintain_trailing_stops`
+        # installs a stop at TP once price gets there.  The entry stop is set
+        # either way, so the position is never unprotected.
+        trail_enabled = trail_past_tp_enabled()
+        if trail_enabled:
+            _update_row(conn, db_lock, ledger_id, trail_floor=float(aligned_tp))
         result = client.create_market_order(
             symbol=symbol,
             direction=direction,
             qty=qty,
-            take_profit=aligned_tp,
+            take_profit=None if trail_enabled else aligned_tp,
             stop_loss=aligned_sl,
             order_link_id=order_link_id,
         )
@@ -1893,6 +1955,125 @@ def _record_order(
             exchange_created_time or "-",
             exchange_exec_time or "-",
         )
+
+
+def maintain_trailing_stops(
+    conn: Any,
+    db_lock: threading.Lock,
+    client: BybitDemoClient,
+    *,
+    max_rows: int = BYBIT_DEMO_MAX_POLL_ROWS,
+) -> dict[str, int | str]:
+    """Install the TP floor and trail it, for rows opened without a TP order.
+
+    Mirrors the simulated rule: once price reaches TP the stop is placed at TP
+    and then follows the best price seen since, never dropping back below TP.
+    No orders are created — only the stop of an existing position is moved, so
+    the barrier remains exchange-side and survives this process.
+
+    Fidelity note: the simulation walked candle extremes, while this samples
+    price once per poll, so the live trail lags the modelled one and will
+    capture less of a fast move.
+    """
+    if not client.enabled or not trail_past_tp_enabled():
+        return {"status": "disabled", "checked": 0, "moved": 0}
+
+    step_pct = trail_step_pct()
+    with db_lock:
+        cursor = conn.execute(
+            """
+            SELECT * FROM bybit_demo_positions
+            WHERE status NOT IN ('closed', 'rejected')
+              AND trail_floor IS NOT NULL
+            ORDER BY id
+            LIMIT ?
+            """,
+            (int(max_rows),),
+        )
+        rows = [_row_dict(cursor, row) for row in cursor.fetchall()]
+
+    checked = 0
+    moved = 0
+    for row in rows:
+        symbol = str(row["symbol"]).upper()
+        direction = str(row["direction"]).upper()
+        floor = row["trail_floor"]
+        if floor is None:
+            continue
+        try:
+            positions = client.get_position(symbol)
+        except BybitDemoError as exc:
+            logger.warning(
+                "bybit_demo_trail_read_failed ledger_id=%s symbol=%s reason=%s",
+                row.get("id"), symbol, type(exc).__name__,
+            )
+            continue
+        live = next(
+            (
+                position
+                for position in positions
+                if _parse_api_number(position.get("size"), "size") != 0
+            ),
+            None,
+        )
+        if live is None:
+            continue
+        raw_price = live.get("markPrice") or live.get("lastPrice")
+        if raw_price is None:
+            continue
+        price = _parse_api_number(raw_price, "mark_price")
+        checked += 1
+        floor = float(floor)
+        long_side = direction == "LONG"
+
+        if not int(row.get("trail_active") or 0):
+            reached = price >= floor if long_side else price <= floor
+            if not reached:
+                continue
+            new_stop, extreme = floor, price
+        else:
+            extreme = float(row.get("trail_extreme") or price)
+            extreme = max(extreme, price) if long_side else min(extreme, price)
+            # Written exactly as `simulate_partial` computes it, so the live
+            # stop and the modelled one agree bit for bit rather than to
+            # within a rounding step.
+            candidate = (
+                extreme * (1.0 - step_pct / 100.0) if long_side
+                else extreme * (1.0 + step_pct / 100.0)
+            )
+            new_stop = max(floor, candidate) if long_side else min(floor, candidate)
+            current = row.get("trail_stop")
+            if current is not None:
+                improved = (
+                    new_stop > float(current) if long_side
+                    else new_stop < float(current)
+                )
+                if not improved:
+                    continue
+
+        try:
+            client.set_position_stop(symbol=symbol, stop_loss=new_stop)
+        except BybitDemoError as exc:
+            logger.warning(
+                "bybit_demo_trail_move_failed ledger_id=%s symbol=%s reason=%s",
+                row.get("id"), symbol, type(exc).__name__,
+            )
+            continue
+        _update_row(
+            conn,
+            db_lock,
+            int(row["id"]),
+            trail_active=1,
+            trail_extreme=float(extreme),
+            trail_stop=float(new_stop),
+        )
+        moved += 1
+        logger.info(
+            "bybit_demo_trail_moved ledger_id=%s symbol=%s direction=%s "
+            "floor=%.10g extreme=%.10g stop=%.10g",
+            row.get("id"), symbol, direction, floor, extreme, new_stop,
+        )
+    return {"status": "ok", "checked": checked, "moved": moved}
 
 
 def poll_positions(
