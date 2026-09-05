@@ -1,4 +1,4 @@
-modules = ["nodejs-24", "python-3.11"]
+modules = ["nodejs-24", "python-3.11", "postgresql-16"]
 
 [deployment]
 router = "application"
@@ -90,6 +90,11 @@ channel = "stable-25_05"
 
 [userenv.development]
 BOT_POLLING_DISABLED = "true"
+BYBIT_DEMO_TRADING_ENABLED = "false"
 
 [userenv.shared]
 BYBIT_RELAY_URL = "https://sinekdemo.duckdns.org"
+
+[userenv.production]
+BYBIT_DEMO_TRADING_ENABLED = "true"
+BYBIT_DEMO_MULTI_TP_ENABLED = "false"

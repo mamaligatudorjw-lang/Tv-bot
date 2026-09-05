@@ -1,0 +1,19 @@
+Проверил построчно — фикс закрывает все три пункта, и arithmetic по тестам сходится в этот раз без вопросов (103 = 102 + 1 новый тест, targeted 4 = 2 старых reconciliation-теста + новый cancelled-тест + `test_tp_leg_and_event_model_is_idempotent`, ровно как объяснено).
+
+**`_tp_leg_status`** — `"cancel" in normalized` корректно ловит и `Cancelled`, и `PartiallyFilledCanceled` одним условием, без необходимости перечислять оба написания. Не даёт ложных срабатываний ни на одном другом известном статусе Bybit V5 (New/PartiallyFilled/Untriggered/Rejected/Filled/Triggered/Deactivated — "cancel" как подстрока нигде больше не встречается).
+
+**`event_type` для cancelled** — новая ветка `else "tp_leg_cancelled" if status == "cancelled"` стоит корректно, до проверки `executed_qty > 0`, так что terminal-отмена с частичным исполнением теперь получает собственный тип события, а не смешивается с "ещё живой" partial fill.
+
+**Новый regression test** — прогнал сценарий вручную:
+- poll1 (`PartiallyFilled`, qty=0.1) → событие `tp_leg_partial_fill` — 1 создано.
+- poll2 (`PartiallyFilledCanceled`, qty=0.1) → статус ноги становится `cancelled`, `cancelled_ts` проставляется впервые (1_700_000_011) — это как раз ранее существовавшая, но никогда не покрытая тестом ветка `_update_tp_leg`. Idempotency-ключ меняется (`event_type`+`status` оба другие) → новое событие `tp_leg_cancelled` корректно создаётся, а не дедуплицируется под старый ключ.
+- poll3 (`terminal`) → `polled == 0`, т.к. `status='cancelled'` теперь корректно исключается из `WHERE status NOT IN ('filled','cancelled')` — это прямое доказательство, что исходная находка устранена: нога больше не опрашивается бесконечно.
+- Финальная строка `(0.1, "cancelled", 0.01, 1_700_000_011)` и лог событий `[tp_leg_partial_fill, tp_leg_cancelled]` — ровно ожидаемая последовательность.
+
+**Multi-execution fee** — filled-сценарий теперь суммирует `[0.1/0.01, 0.1/0.01]` → `0.02`, реально проверяя суммирование по нескольким execution-записям, а не переиспользуя один заранее просуммированный рекорд. Закрывает мой предыдущий нитпик по тест-фиделити.
+
+Замечаний не осталось.
+
+**Этап 3 (с фиксом) — принят.**
+
+Можно переходить к этапу 4 (reversal/recovery integration — отмена оставшихся TP-ордеров при reversal, п.7 письма). Как и раньше: сначала план на review, отдельное "да" на реализацию, затем diff+тесты на review.

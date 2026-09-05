@@ -1,0 +1,141 @@
+stdout:
+===shadowRows found=true lines=9===
+[2026-09-02T18:04:02.990Z ERROR] 2026-09-02 18:04:02,989 [INFO] cycle_id=35-1788372108616 Demo shadow: TUSDT LONG/overheated_early entry=0.004868 sl=0.00459714 tp=0.00540971 pid=35 ts=1788372242
+[2026-09-02T18:04:07.548Z ERROR] 2026-09-02 18:04:07,548 [INFO] cycle_id=35-1788372108616 Demo shadow: FONEUSDT LONG/overheated_early entry=0.0193 sl=0.0188175 tp=0.020265 pid=35 ts=1788372247
+[2026-09-02T18:04:27.142Z ERROR] 2026-09-02 18:04:27,141 [INFO] cycle_id=35-1788372108616 Demo shadow: AKEUSDT SHORT/pump_24h_fade entry=0.0151607 sl=0.01698 tp=0.0115221 pid=35 ts=1788372267
+[2026-09-02T18:05:14.929Z ERROR] 2026-09-02 18:05:14,929 [INFO] cycle_id=35-1788372108616 Demo shadow: GTUSDT LONG/bb_squeeze entry=8.005 sl=7.93335 tp=8.14831 pid=35 ts=1788372314
+[2026-09-02T18:05:40.390Z ERROR] 2026-09-02 18:05:40,390 [INFO] cycle_id=35-1788372108616 Demo shadow: ACEUSDT LONG/low_rejection_long entry=0.1888 sl=0.1852 tp=0.196 pid=35 ts=1788372340
+[2026-09-02T18:15:24.882Z ERROR] 2026-09-02 18:15:24,881 [INFO] cycle_id=35-1788372708616 Demo shadow: CPUSDT SHORT/high_rejection_short entry=0.0446 sl=0.048168 tp=0.037464 pid=35 ts=1788372924
+[2026-09-02T18:20:18.408Z ERROR] 2026-09-02 18:20:18,408 [INFO] cycle_id=35-1788373008616 Demo shadow: KITEUSDT SHORT/high_rejection_short entry=0.1419 sl=0.145841 tp=0.134017 pid=35 ts=1788373218
+[2026-09-02T18:25:17.004Z ERROR] 2026-09-02 18:25:17,004 [INFO] cycle_id=35-1788373308616 Demo shadow: SPACEHOODUSDT LONG/low_rejection_long entry=0.012223 sl=0.0112452 tp=0.0141787 pid=35 ts=1788373516
+[2026-09-02T18:29:08.797Z ERROR] 2026-09-02 18:29:08,796 [INFO] cycle_id=35-1788373608616 Demo shadow: FONEUSDT SHORT/pump_24h_fade entry=0.021921 sl=0.0245515 tp=0.01666 pid=35 ts=1788373748
+===shadowOnlyWarnings found=true lines=71===
+[2026-09-02T18:03:25.462Z ERROR] 2026-09-02 18:03:25,461 [WARNING] cycle_id=35-1788372108616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MUBARAKUSDT
+[2026-09-02T18:03:30.575Z ERROR] 2026-09-02 18:03:30,574 [WARNING] cycle_id=35-1788372108616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for EGLDUSDT
+[2026-09-02T18:03:35.757Z ERROR] 2026-09-02 18:03:35,757 [WARNING] cycle_id=35-1788372108616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MAGMAUSDT
+[2026-09-02T18:03:44.110Z ERROR] 2026-09-02 18:03:44,110 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for HNTUSDT
+[2026-09-02T18:03:50.285Z ERROR] 2026-09-02 18:03:50,284 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for CRDOUSDT
+[2026-09-02T18:03:58.684Z ERROR] 2026-09-02 18:03:58,683 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ASTEROIDUSDT
+[2026-09-02T18:04:02.990Z ERROR] 2026-09-02 18:04:02,989 [INFO] cycle_id=35-1788372108616 Demo shadow: TUSDT LONG/overheated_early entry=0.004868 sl=0.00459714 tp=0.00540971 pid=35 ts=1788372242
+[2026-09-02T18:04:07.548Z ERROR] 2026-09-02 18:04:07,548 [INFO] cycle_id=35-1788372108616 Demo shadow: FONEUSDT LONG/overheated_early entry=0.0193 sl=0.0188175 tp=0.020265 pid=35 ts=1788372247
+[2026-09-02T18:04:13.841Z ERROR] 2026-09-02 18:04:13,841 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for TUTUSDT
+[2026-09-02T18:04:19.994Z ERROR] 2026-09-02 18:04:19,994 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for STARUSDT
+[2026-09-02T18:04:26.717Z ERROR] 2026-09-02 18:04:26,710 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ROBOUSDT
+[2026-09-02T18:04:27.108Z ERROR] 2026-09-02 18:04:27,108 [INFO] pump_24h_fade SHADOW: MAGMAUSDT pct24=+40.4% rsi=74.7 score=42
+[2026-09-02T18:04:27.120Z ERROR] 2026-09-02 18:04:27,120 [INFO] pump_24h_fade SHADOW: BULLAUSDT pct24=+31.1% rsi=81.2 score=40
+[2026-09-02T18:04:27.123Z ERROR] 2026-09-02 18:04:27,123 [INFO] pump_24h_fade SHADOW: TUSDT pct24=+35.3% rsi=67.1 score=39
+[2026-09-02T18:04:27.126Z ERROR] 2026-09-02 18:04:27,126 [INFO] pump_24h_fade SHADOW: AKEUSDT pct24=+72.8% rsi=80.0 score=45
+[2026-09-02T18:04:27.142Z ERROR] 2026-09-02 18:04:27,141 [INFO] cycle_id=35-1788372108616 Demo shadow: AKEUSDT SHORT/pump_24h_fade entry=0.0151607 sl=0.01698 tp=0.0115221 pid=35 ts=1788372267
+[2026-09-02T18:04:44.840Z ERROR] 2026-09-02 18:04:44,839 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:05:14.929Z ERROR] 2026-09-02 18:05:14,929 [INFO] cycle_id=35-1788372108616 Demo shadow: GTUSDT LONG/bb_squeeze entry=8.005 sl=7.93335 tp=8.14831 pid=35 ts=1788372314
+[2026-09-02T18:05:40.390Z ERROR] 2026-09-02 18:05:40,390 [INFO] cycle_id=35-1788372108616 Demo shadow: ACEUSDT LONG/low_rejection_long entry=0.1888 sl=0.1852 tp=0.196 pid=35 ts=1788372340
+[2026-09-02T18:08:32.598Z ERROR] 2026-09-02 18:08:32,597 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for PANWUSDT
+[2026-09-02T18:08:37.888Z ERROR] 2026-09-02 18:08:37,888 [WARNING] cycle_id=35-1788372408616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for EGLDUSDT
+[2026-09-02T18:08:43.047Z ERROR] 2026-09-02 18:08:43,047 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for HNTUSDT
+[2026-09-02T18:08:49.245Z ERROR] 2026-09-02 18:08:49,245 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ENSUSDT
+[2026-09-02T18:08:53.341Z ERROR] 2026-09-02 18:08:53,341 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for STARUSDT
+[2026-09-02T18:08:58.457Z ERROR] 2026-09-02 18:08:58,456 [WARNING] cycle_id=35-1788372408616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:09:02.565Z ERROR] 2026-09-02 18:09:02,565 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for TUTUSDT
+[2026-09-02T18:09:06.689Z ERROR] 2026-09-02 18:09:06,688 [WARNING] cycle_id=35-1788372408616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MAGMAUSDT
+[2026-09-02T18:09:12.966Z ERROR] 2026-09-02 18:09:12,966 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for BTRUSDT
+[2026-09-02T18:09:18.222Z ERROR] 2026-09-02 18:09:18,221 [WARNING] cycle_id=35-1788372408616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for KITEUSDT
+[2026-09-02T18:09:24.457Z ERROR] 2026-09-02 18:09:24,457 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ROBOUSDT
+[2026-09-02T18:09:41.024Z ERROR] 2026-09-02 18:09:41,024 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:13:31.477Z ERROR] 2026-09-02 18:13:31,477 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for TUTUSDT
+[2026-09-02T18:13:35.465Z ERROR] 2026-09-02 18:13:35,464 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ENSUSDT
+[2026-09-02T18:13:43.473Z ERROR] 2026-09-02 18:13:43,473 [WARNING] cycle_id=35-1788372708616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for EGLDUSDT
+[2026-09-02T18:13:48.473Z ERROR] 2026-09-02 18:13:48,473 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for STARUSDT
+[2026-09-02T18:13:53.619Z ERROR] 2026-09-02 18:13:53,619 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for HNTUSDT
+[2026-09-02T18:13:57.727Z ERROR] 2026-09-02 18:13:57,727 [WARNING] cycle_id=35-1788372708616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MAGMAUSDT
+[2026-09-02T18:14:03.921Z ERROR] 2026-09-02 18:14:03,921 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ICXUSDT
+[2026-09-02T18:14:14.428Z ERROR] 2026-09-02 18:14:14,428 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ROBOUSDT
+[2026-09-02T18:14:33.096Z ERROR] 2026-09-02 18:14:33,095 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:15:24.882Z ERROR] 2026-09-02 18:15:24,881 [INFO] cycle_id=35-1788372708616 Demo shadow: CPUSDT SHORT/high_rejection_short entry=0.0446 sl=0.048168 tp=0.037464 pid=35 ts=1788372924
+[2026-09-02T18:18:31.828Z ERROR] 2026-09-02 18:18:31,828 [WARNING] cycle_id=35-1788373008616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for KITEUSDT
+[2026-09-02T18:18:35.934Z ERROR] 2026-09-02 18:18:35,934 [WARNING] cycle_id=35-1788373008616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MUBARAKUSDT
+[2026-09-02T18:18:40.044Z ERROR] 2026-09-02 18:18:40,044 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ROBOUSDT
+[2026-09-02T18:18:45.169Z ERROR] 2026-09-02 18:18:45,169 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for TUTUSDT
+[2026-09-02T18:18:55.584Z ERROR] 2026-09-02 18:18:55,584 [WARNING] cycle_id=35-1788373008616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MAGMAUSDT
+[2026-09-02T18:19:02.069Z ERROR] 2026-09-02 18:19:02,069 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for HNTUSDT
+[2026-09-02T18:19:08.239Z ERROR] 2026-09-02 18:19:08,238 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for STARUSDT
+[2026-09-02T18:19:25.929Z ERROR] 2026-09-02 18:19:25,929 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for OPENAIUSDT
+[2026-09-02T18:19:26.985Z ERROR] 2026-09-02 18:19:26,985 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:20:18.408Z ERROR] 2026-09-02 18:20:18,408 [INFO] cycle_id=35-1788373008616 Demo shadow: KITEUSDT SHORT/high_rejection_short entry=0.1419 sl=0.145841 tp=0.134017 pid=35 ts=1788373218
+[2026-09-02T18:23:26.102Z ERROR] 2026-09-02 18:23:26,102 [WARNING] cycle_id=35-1788373308616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:23:32.760Z ERROR] 2026-09-02 18:23:32,760 [WARNING] cycle_id=35-1788373308616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MAGMAUSDT
+[2026-09-02T18:23:39.067Z ERROR] 2026-09-02 18:23:39,066 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ENSUSDT
+[2026-09-02T18:23:43.194Z ERROR] 2026-09-02 18:23:43,194 [WARNING] cycle_id=35-1788373308616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for KITEUSDT
+[2026-09-02T18:23:48.383Z ERROR] 2026-09-02 18:23:48,383 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ROBOUSDT
+[2026-09-02T18:23:52.551Z ERROR] 2026-09-02 18:23:52,550 [WARNING] cycle_id=35-1788373308616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MUBARAKUSDT
+[2026-09-02T18:23:56.680Z ERROR] 2026-09-02 18:23:56,680 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for HNTUSDT
+[2026-09-02T18:24:00.804Z ERROR] 2026-09-02 18:24:00,804 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for STARUSDT
+[2026-09-02T18:24:20.960Z ERROR] 2026-09-02 18:24:20,960 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:25:17.004Z ERROR] 2026-09-02 18:25:17,004 [INFO] cycle_id=35-1788373308616 Demo shadow: SPACEHOODUSDT LONG/low_rejection_long entry=0.012223 sl=0.0112452 tp=0.0141787 pid=35 ts=1788373516
+[2026-09-02T18:28:29.555Z ERROR] 2026-09-02 18:28:29,555 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for HNTUSDT
+[2026-09-02T18:28:34.706Z ERROR] 2026-09-02 18:28:34,706 [WARNING] cycle_id=35-1788373608616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for MAGMAUSDT
+[2026-09-02T18:28:39.868Z ERROR] 2026-09-02 18:28:39,868 [WARNING] cycle_id=35-1788373608616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for ARBUSDT
+[2026-09-02T18:28:43.975Z ERROR] 2026-09-02 18:28:43,975 [WARNING] cycle_id=35-1788373608616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for KITEUSDT
+[2026-09-02T18:28:57.374Z ERROR] 2026-09-02 18:28:57,374 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for TUTUSDT
+[2026-09-02T18:29:04.616Z ERROR] 2026-09-02 18:29:04,616 [WARNING] SHADOW_ONLY_MODE active but 'oversold_24h' has per-strategy live flag — sending real signal for ROBOUSDT
+[2026-09-02T18:29:08.735Z ERROR] 2026-09-02 18:29:08,734 [WARNING] cycle_id=35-1788373608616 SHADOW_ONLY_MODE active but 'overheated_24h' has per-strategy live flag — sending real signal for EGLDUSDT
+[2026-09-02T18:29:08.768Z ERROR] 2026-09-02 18:29:08,768 [INFO] pump_24h_fade SHADOW: FONEUSDT pct24=+52.2% rsi=69.6 score=43
+[2026-09-02T18:29:08.797Z ERROR] 2026-09-02 18:29:08,796 [INFO] cycle_id=35-1788373608616 Demo shadow: FONEUSDT SHORT/pump_24h_fade entry=0.021921 sl=0.0245515 tp=0.01666 pid=35 ts=1788373748
+[2026-09-02T18:29:25.874Z ERROR] 2026-09-02 18:29:25,874 [WARNING] SHADOW_ONLY_MODE active but 'streak_1h' has per-strategy live flag — sending real signal for ARBUSDT
+===paperDuplicates found=true lines=3===
+[2026-09-02T18:04:27.116Z ERROR] 2026-09-02 18:04:27,116 [WARNING] cycle_id=35-1788372108616 Demo DUPLICATE BLOCKED: MAGMAUSDT SHORT/pump_24h_fade — already open id=7368 type=pump_24h_fade opened=1788336160 pid=35 ts_recv=1788372267
+[2026-09-02T18:04:27.121Z ERROR] 2026-09-02 18:04:27,121 [WARNING] cycle_id=35-1788372108616 Demo DUPLICATE BLOCKED: BULLAUSDT SHORT/pump_24h_fade — already open id=7478 type=pump_24h_fade opened=1788368876 pid=35 ts_recv=1788372267
+[2026-09-02T18:04:27.125Z ERROR] 2026-09-02 18:04:27,124 [WARNING] cycle_id=35-1788372108616 Demo DUPLICATE BLOCKED: TUSDT SHORT/pump_24h_fade — already open id=7436 type=pump_24h_fade opened=1788351325 pid=35 ts_recv=1788372267
+===bybitDuplicate found=false lines=0===
+
+===bybitRejected found=false lines=0===
+
+===bybitAny found=false lines=0===
+
+===reversal found=false lines=0===
+
+===preflightDecision found=false lines=0===
+
+===suppressed found=true lines=43===
+[2026-09-02T18:03:25.462Z ERROR] 2026-09-02 18:03:25,462 [INFO] cycle_id=35-1788372108616 Suppressed MUBARAKUSDT/overheated_24h (score=40 < min 75)
+[2026-09-02T18:03:35.758Z ERROR] 2026-09-02 18:03:35,757 [INFO] cycle_id=35-1788372108616 Suppressed MAGMAUSDT/overheated_24h — already has an open real position
+[2026-09-02T18:04:13.841Z ERROR] 2026-09-02 18:04:13,841 [INFO] Suppressed TUTUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:04:26.750Z ERROR] 2026-09-02 18:04:26,750 [INFO] Suppressed ROBOUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:04:44.841Z ERROR] 2026-09-02 18:04:44,841 [INFO] Suppressed ARBUSDT/streak_1h (score=38 < min 50)
+[2026-09-02T18:08:37.891Z ERROR] 2026-09-02 18:08:37,889 [INFO] cycle_id=35-1788372408616 Suppressed EGLDUSDT/overheated_24h (score=50 < min 75)
+[2026-09-02T18:08:49.246Z ERROR] 2026-09-02 18:08:49,246 [INFO] Suppressed ENSUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:08:53.341Z ERROR] 2026-09-02 18:08:53,341 [INFO] Suppressed STARUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:08:58.458Z ERROR] 2026-09-02 18:08:58,458 [INFO] cycle_id=35-1788372408616 Suppressed ARBUSDT/overheated_24h (score=40 < min 75)
+[2026-09-02T18:09:02.566Z ERROR] 2026-09-02 18:09:02,566 [INFO] Suppressed TUTUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:09:06.690Z ERROR] 2026-09-02 18:09:06,690 [INFO] cycle_id=35-1788372408616 Suppressed MAGMAUSDT/overheated_24h — already has an open real position
+[2026-09-02T18:09:18.224Z ERROR] 2026-09-02 18:09:18,223 [INFO] cycle_id=35-1788372408616 Suppressed KITEUSDT/overheated_24h (score=40 < min 75)
+[2026-09-02T18:09:24.458Z ERROR] 2026-09-02 18:09:24,458 [INFO] Suppressed ROBOUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:09:41.026Z ERROR] 2026-09-02 18:09:41,025 [INFO] Suppressed ARBUSDT/streak_1h (score=28 < min 50)
+[2026-09-02T18:13:31.478Z ERROR] 2026-09-02 18:13:31,477 [INFO] Suppressed TUTUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:13:35.465Z ERROR] 2026-09-02 18:13:35,465 [INFO] Suppressed ENSUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:13:43.474Z ERROR] 2026-09-02 18:13:43,474 [INFO] cycle_id=35-1788372708616 Suppressed EGLDUSDT/overheated_24h (score=50 < min 75)
+[2026-09-02T18:13:48.475Z ERROR] 2026-09-02 18:13:48,474 [INFO] Suppressed STARUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:13:57.728Z ERROR] 2026-09-02 18:13:57,728 [INFO] cycle_id=35-1788372708616 Suppressed MAGMAUSDT/overheated_24h — already has an open real position
+[2026-09-02T18:14:14.428Z ERROR] 2026-09-02 18:14:14,428 [INFO] Suppressed ROBOUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:14:33.099Z ERROR] 2026-09-02 18:14:33,096 [INFO] Suppressed ARBUSDT/streak_1h (score=28 < min 50)
+[2026-09-02T18:18:31.829Z ERROR] 2026-09-02 18:18:31,828 [INFO] cycle_id=35-1788373008616 Suppressed KITEUSDT/overheated_24h (score=41 < min 75)
+[2026-09-02T18:18:35.944Z ERROR] 2026-09-02 18:18:35,944 [INFO] cycle_id=35-1788373008616 Suppressed MUBARAKUSDT/overheated_24h (score=41 < min 75)
+[2026-09-02T18:18:40.045Z ERROR] 2026-09-02 18:18:40,045 [INFO] Suppressed ROBOUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:18:45.170Z ERROR] 2026-09-02 18:18:45,170 [INFO] Suppressed TUTUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:18:55.600Z ERROR] 2026-09-02 18:18:55,600 [INFO] cycle_id=35-1788373008616 Suppressed MAGMAUSDT/overheated_24h — already has an open real position
+[2026-09-02T18:19:08.240Z ERROR] 2026-09-02 18:19:08,239 [INFO] Suppressed STARUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:19:25.929Z ERROR] 2026-09-02 18:19:25,929 [INFO] Suppressed OPENAIUSDT/streak_1h (score=38 < min 50)
+[2026-09-02T18:19:26.986Z ERROR] 2026-09-02 18:19:26,986 [INFO] Suppressed ARBUSDT/streak_1h (score=28 < min 50)
+[2026-09-02T18:23:32.787Z ERROR] 2026-09-02 18:23:32,787 [INFO] cycle_id=35-1788373308616 Suppressed MAGMAUSDT/overheated_24h — already has an open real position
+[2026-09-02T18:23:39.068Z ERROR] 2026-09-02 18:23:39,068 [INFO] Suppressed ENSUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:23:48.384Z ERROR] 2026-09-02 18:23:48,384 [INFO] Suppressed ROBOUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:23:52.552Z ERROR] 2026-09-02 18:23:52,552 [INFO] cycle_id=35-1788373308616 Suppressed MUBARAKUSDT/overheated_24h (score=41 < min 75)
+[2026-09-02T18:24:00.806Z ERROR] 2026-09-02 18:24:00,805 [INFO] Suppressed STARUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:24:20.961Z ERROR] 2026-09-02 18:24:20,960 [INFO] Suppressed ARBUSDT/streak_1h (score=28 < min 50)
+[2026-09-02T18:28:34.707Z ERROR] 2026-09-02 18:28:34,707 [INFO] cycle_id=35-1788373608616 Suppressed MAGMAUSDT/overheated_24h — already has an open real position
+[2026-09-02T18:28:39.870Z ERROR] 2026-09-02 18:28:39,869 [INFO] cycle_id=35-1788373608616 Suppressed ARBUSDT/overheated_24h (score=41 < min 75)
+[2026-09-02T18:28:43.977Z ERROR] 2026-09-02 18:28:43,977 [INFO] cycle_id=35-1788373608616 Suppressed KITEUSDT/overheated_24h (score=41 < min 75)
+[2026-09-02T18:28:49.112Z ERROR] 2026-09-02 18:28:49,112 [INFO] Suppressed STARUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:28:57.418Z ERROR] 2026-09-02 18:28:57,417 [INFO] Suppressed TUTUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:29:04.617Z ERROR] 2026-09-02 18:29:04,617 [INFO] Suppressed ROBOUSDT/oversold_24h — already has an open real position
+[2026-09-02T18:29:08.736Z ERROR] 2026-09-02 18:29:08,736 [INFO] cycle_id=35-1788373608616 Suppressed EGLDUSDT/overheated_24h (score=51 < min 75)
+[2026-09-02T18:29:25.874Z ERROR] 2026-09-02 18:29:25,874 [INFO] Suppressed ARBUSDT/streak_1h (score=28 < min 50)

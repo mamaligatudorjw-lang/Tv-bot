@@ -1,0 +1,41 @@
+Прежде чем соглашаться на новый diff — кажется, есть способ различить две гипотезы **без деплоя вообще**. Проверю два места в коде.
+
+Проверил цепочку вызова — и это меняет вывод. Смотрю ещё два места.
+
+`BLOCKED_SIGNALS = {"confluence_neutral"}` — значит для `overheated_24h` эта ветка не срабатывает, гипотезу отбрасываю. Остаётся проверить последнюю немую точку.
+
+Ещё две ветки отпали (`Telegram send failed` логируется на ERROR — искали, 0 попаданий). Остаётся одна гипотеза, и она проверяется без деплоя. Два последних места:
+
+Проверка изменила картину — моя же более ранняя гипотеза про немой `_bybit_allowed` branch теперь **менее вероятна**, и вот почему.
+
+## Реальная цепочка вызова (app.py:10416-10435)
+
+```python
+delivered, _aid = send_alert_with_log(
+    symbol, "overheated_24h", "LONG", price, body, score, ...
+)
+if delivered:
+    ...
+    _demo_open_position(..., is_shadow=False, alert_type="overheated_24h", ...)
+```
+
+`_demo_open_position` для реального (non-shadow) пути **вызывается только при `delivered == True`**. Значит отсутствие строки в `demo_positions` означает, что `send_alert_with_log` вернула `False` — или **не вернулась вообще**. До немого `_bybit_allowed` branch дело просто не дошло: он находится внутри `_demo_open_position`, которая не вызывалась.
+
+## Что я отбросил проверкой (не предположением)
+- `BLOCKED_SIGNALS = {"confluence_neutral"}` — `overheated_24h` там нет, немая regime-ветка (7361-7371) не срабатывает. **Отбросил.**
+- `_telegram_send` логирует `"Telegram send failed"` на ERROR (строка 1028) — искали, 0 попаданий. **Отбросил.**
+- Все остальные `return (False, ...)` внутри `send_alert_with_log` либо пишут `Suppressed`, либо `polling_side_effect_blocked` — оба искали, для этих трёх 0. **Отбросил.**
+
+## Остаётся одна гипотеза — необработанное исключение после INSERT
+
+Строка в `alerts` **коммитится на 7308**, до отправки в Telegram. Дальше идёт участок 7349-7392 без единого try/except: `_build_alert_buttons`, `_conflict_direction_line`, `get_regime_label` → `get_market_regime()`, `_coin_trend_label`, `_get_signal_edge_label`. Если там вылетело исключение — строка `alerts` **остаётся закоммиченной и осиротевшей** (`delivery_ts IS NULL`), функция не возвращает значение, `delivered` не присваивается, `_demo_open_position` не вызывается. Сигнатура совпадает со всем наблюдаемым на 100%.
+
+## Важно: `/bot-api/signals/recent` мог дать ложноотрицательный ответ
+
+Тот же класс ошибки, что и с `/bot-api/positions`. Маршрут (16719-16749) делает `SELECT ... FROM alerts ORDER BY id DESC LIMIT ?` — по умолчанию **50 последних записей**. События от 18:03-18:23 UTC, а бот с тех пор проработал ещё несколько часов (`last_successful_poll_at` ≈ 19:46). 50 последних алертов почти наверняка не достают до 18:03. **«Нет совпадений в /bot-api/signals/recent» ≠ «нет строки в `alerts`».**
+
+## Два точных шага, оба без деплоя
+1. Прямой запрос к `alerts` по `symbol IN (EGLDUSDT, ARBUSDT, KITEUSDT)` и `ts` в целевых окнах — **не через `/bot-api/signals/recent`**, а с явным фильтром (или через `limit=200` + пагинацию, если другого пути нет). Если найдётся строка с `delivery_ts IS NULL` — гипотеза подтверждена, и это совсем другой корень, чем Bybit-гейт.
+2. Grep лога в тех же окнах на маркеры уровня стратегии: `send_alert_with_log insert failed`, `polling_worker_exit`, `polling_strategy cycle_id=... strategy=overheated_oversold`, плюс любые `Traceback`.
+
+Если оба дадут пусто — тогда да, расширяем forensic-эндпоинт, но уже на **`alerts` + `demo_positions`** сразу, а не только на `demo_positions`.

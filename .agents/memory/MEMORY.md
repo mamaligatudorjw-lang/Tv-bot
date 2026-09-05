@@ -20,9 +20,21 @@
 - [Bybit Demo network access](bybit-demo-network-access.md) — the current Replit runtime receives CloudFront HTTP 403 country blocking from api-demo.bybit.com.
 - [Bybit submission timestamp integrity](bybit-submission-timestamp.md) — polling must preserve the first submission time; leak classification cannot use a later poll timestamp.
 - [Aggregate Bybit close allocation](bybit-aggregate-close-allocation.md) — one exchange close can cover multiple entries; allocate PnL/fees by executed quantity and use exchange event time.
+- [One-way opposite-direction risk](one-way-opposite-direction-risk.md) — opposite signals can reduce/reverse the net position while ledger attribution remains signal-direction based.
 - [Bybit equity and exposure gates](bybit-equity-gates.md) — keep the $500 exposure cap separate from the $100 equity floor; small unrealized losses must not halt new orders.
 - [Private production verification](private-production-verification.md) — private VM deployments redirect unauthenticated status requests through ReplShield; use authenticated access for live endpoint checks.
+- [Published VM readiness](published-vm-readiness.md) — immediately after publishing, private VM healthchecks can briefly return 500 until the new Gunicorn process is ready.
+- [BE deploy observation boundary](be-deploy-observation.md) — close the disabled BE checkpoint from BE-specific telemetry; track unrelated Gate.io noise separately.
 - [Overheated early bootstrap provenance](overheated-early-bootstrap-provenance.md) — the historical n=121 headline is only reproducible from a frozen backup via ts_close; do not relabel it as the causal ts_open audit.
 - [Liquidation threshold sensitivity](liquidation-threshold-sensitivity.md) — threshold comparisons must preserve the frozen baseline and fail closed on incomplete downstream replay coverage.
 - [Liquidation rerun universe drift](liquidation-rerun-universe-drift.md) — rank-based top-50 reruns can lose rows; compare semantic event keys and universe deltas before interpreting counts.
 - [Confirmed replay baseline provenance](confirmed-replay-baseline.md) — event-level continuation signals may be duplicate-blocked; reconstruct barriers from historical ATR and label provenance explicitly.
+- [GitHub history publishing](github-history-publishing.md) — connected GitHub Git Database API can preserve local commit SHAs; validate every tree/commit before moving the branch ref.
+- [Parallel trading runtimes](parallel-trading-runtimes.md) — local SQLite state is isolated; verify external account identity and data provenance before live deployment.
+- [One-way reversal safety](bybit-reversal-lifecycle.md) — exchange position is the close truth; persist one claim per lifecycle and never retry an ambiguous close POST.
+- [Demo gap boundary interpretation](demo-gap-boundary.md) — a one-row or empty time slice cannot prove boundary continuity; report it as not applicable, not “no gaps”.
+- [Multi-level TP price basis](multi-tp-price-basis.md) — TP prices multiply the opening ATR snapshot directly; finalized SL remains validation-only.
+- [Bybit TP terminal statuses](bybit-tp-terminal-statuses.md) — PartiallyFilledCanceled is terminal and needs a distinct cancellation event even with executed quantity.
+- [Bybit fill state semantics](bybit-fill-state-semantics.md) — exchange fills use executed_qty/ts_filled; do not globally remap the ledger status during TP setup.
+- [Bybit TP/BE recovery states](bybit-tp-recovery-states.md) — deterministic TP/BE failures require manual recovery; ambiguous BE writes use bounded readback.
+- [Artifact API startup ordering](artifact-api-startup.md) — port 8080 is the routed API/proxy; a blocking Flask readiness check can prevent it opening before artifact timeout.
