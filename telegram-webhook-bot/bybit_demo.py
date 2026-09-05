@@ -67,6 +67,16 @@ BYBIT_DEMO_REVERSAL_WATCHDOG_INTERVAL_SEC = 20
 BYBIT_DEMO_TP_PLAN_VERSION = "atr_v1"
 BYBIT_DEMO_MULTI_TP_ENABLED_ENV = "BYBIT_DEMO_MULTI_TP_ENABLED"
 BYBIT_DEMO_BREAKEVEN_ENABLED_ENV = "BYBIT_DEMO_BREAKEVEN_ENABLED"
+# Last-leg trailing: the out-of-sample partial-TP sweep found the edge lives
+# in letting the winner run past a fixed target, not in how many fixed
+# targets it is split across. With this on, the final scheduled leg is never
+# placed as a fixed-price order; instead its target_price becomes the row's
+# trail_floor and maintain_trailing_stops takes over from there, exactly as
+# it already does for the (mutually exclusive) standalone
+# BYBIT_DEMO_TRAIL_PAST_TP path. Off by default: this changes accepted
+# behavior for the terminal leg, not just startup wiring.
+BYBIT_DEMO_TP_TRAIL_LAST_LEG_ENV = "BYBIT_DEMO_TP_TRAIL_LAST_LEG"
+BYBIT_DEMO_TP_LEG_STATUS_TRAILING = "trailing"
 BYBIT_DEMO_TP_COUNT = 5
 BYBIT_DEMO_TP_SETUP_DEADLINE_SEC = 60.0
 BYBIT_DEMO_BE_PENDING_TIMEOUT_SEC = 180
@@ -175,6 +185,11 @@ def bybit_demo_multi_tp_enabled() -> bool:
 def bybit_demo_breakeven_enabled() -> bool:
     """Return the explicit breakeven decision; missing values are off."""
     return _env_flag(BYBIT_DEMO_BREAKEVEN_ENABLED_ENV, False)
+
+
+def bybit_demo_tp_trail_last_leg_enabled() -> bool:
+    """Return whether the terminal TP leg trails instead of closing fixed."""
+    return _env_flag(BYBIT_DEMO_TP_TRAIL_LAST_LEG_ENV, False)
 
 
 def overheated_early_promoted() -> bool:
@@ -2084,6 +2099,41 @@ def _ensure_tp_orders_for_ledger(
             state=BYBIT_DEMO_TP_MANUAL_RECOVERY_STATE,
         )
         return {"status": "manual_recovery_required", "ledger_id": ledger_id}
+
+    # The terminal leg never gets a fixed-price order in this mode: its
+    # target_price becomes trail_floor and maintain_trailing_stops takes over
+    # from there once price reaches it, letting the position run past what
+    # would otherwise be its last fixed target. legs is ordered by leg_index
+    # (see calculate_multi_tp_plan / _ensure_tp_plan_rows), so legs[-1] is the
+    # highest-multiplier, effective-count-th leg regardless of any fallback
+    # to fewer legs.
+    if legs and bybit_demo_tp_trail_last_leg_enabled():
+        last_leg = legs[-1]
+        if not last_leg.get("order_id") and str(
+            last_leg.get("status") or ""
+        ).lower() not in {"rejected", BYBIT_DEMO_TP_LEG_STATUS_TRAILING}:
+            _update_tp_leg(
+                conn,
+                db_lock,
+                int(last_leg["id"]),
+                status=BYBIT_DEMO_TP_LEG_STATUS_TRAILING,
+                updated_ts=now,
+            )
+            last_leg["status"] = BYBIT_DEMO_TP_LEG_STATUS_TRAILING
+            _update_row(
+                conn,
+                db_lock,
+                ledger_id,
+                trail_floor=float(last_leg["target_price"]),
+            )
+            logger.info(
+                "bybit_demo_tp_last_leg_trailing ledger_id=%d leg_index=%d "
+                "floor=%.10g",
+                ledger_id,
+                int(last_leg["leg_index"]),
+                float(last_leg["target_price"]),
+            )
+
     results = [
         _place_tp_leg(
             conn,
@@ -2095,7 +2145,8 @@ def _ensure_tp_orders_for_ledger(
         )
         for leg in legs
         if not leg.get("order_id")
-        and str(leg.get("status") or "").lower() != "rejected"
+        and str(leg.get("status") or "").lower()
+        not in {"rejected", BYBIT_DEMO_TP_LEG_STATUS_TRAILING}
     ]
     if "rejected" in results:
         _tp_plan_error(
@@ -3287,11 +3338,17 @@ def reconcile_tp_legs(
             """
             SELECT *
             FROM bybit_demo_tp_legs
-            WHERE ledger_id=? AND status NOT IN ('filled', 'cancelled')
+            WHERE ledger_id=? AND status NOT IN (
+                'filled', 'cancelled', ?
+            )
             ORDER BY leg_index
             LIMIT ?
             """,
-            (ledger_id, int(max_legs or BYBIT_DEMO_MAX_POLL_ROWS)),
+            (
+                ledger_id,
+                BYBIT_DEMO_TP_LEG_STATUS_TRAILING,
+                int(max_legs or BYBIT_DEMO_MAX_POLL_ROWS),
+            ),
         )
         legs = [_row_dict(cursor, row) for row in cursor.fetchall()]
 
@@ -3857,10 +3914,11 @@ def _cancel_tp_legs_for_reversal(
             JOIN bybit_demo_positions AS positions
               ON positions.id=legs.ledger_id
             WHERE legs.ledger_id IN ({placeholders})
-              AND legs.status NOT IN ('filled', 'cancelled')
+              AND legs.status NOT IN ('filled', 'cancelled', ?)
             ORDER BY legs.ledger_id, legs.leg_index
             """,
-            tuple(int(ledger_id) for ledger_id in source_ledger_ids),
+            tuple(int(ledger_id) for ledger_id in source_ledger_ids)
+            + (BYBIT_DEMO_TP_LEG_STATUS_TRAILING,),
         )
         legs = [_row_dict(cursor, row) for row in cursor.fetchall()]
     result["legs_seen"] = len(legs)

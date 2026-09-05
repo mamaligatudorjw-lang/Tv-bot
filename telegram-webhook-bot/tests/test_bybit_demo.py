@@ -1969,6 +1969,73 @@ def test_multi_tp_ambiguous_leg_retries_to_completion_without_duplicate(
     ).fetchone() == ("armed",)
 
 
+def test_multi_tp_trail_last_leg_skips_fixed_order_for_final_leg(monkeypatch):
+    monkeypatch.setenv(BYBIT_DEMO_MULTI_TP_ENABLED_ENV, "true")
+    monkeypatch.setenv(BYBIT_DEMO_TP_TRAIL_LAST_LEG_ENV, "true")
+    conn = _db()
+    lock = threading.Lock()
+    client = MultiTpTradingClient()
+
+    result = submit_signal(conn, lock, client, **_multi_tp_signal_kwargs())
+
+    assert result["tp_setup"] == "armed"
+    # Legs 1-4 place fixed reduce-only orders exactly as without the flag;
+    # leg 5 (the highest ATR multiplier, largest share) gets none.
+    assert len(client.tp_calls) == 4
+    assert [call["price"] for call in client.tp_calls] == pytest.approx(
+        [102.0, 103.0, 104.0, 105.0]
+    )
+
+    ledger_id = result["ledger_id"]
+    assert conn.execute(
+        "SELECT trail_floor FROM bybit_demo_positions WHERE id=?",
+        (ledger_id,),
+    ).fetchone() == (106.0,)
+
+    legs = conn.execute(
+        "SELECT leg_index, status, order_id FROM bybit_demo_tp_legs "
+        "WHERE ledger_id=? ORDER BY leg_index",
+        (ledger_id,),
+    ).fetchall()
+    assert [leg[0] for leg in legs] == [1, 2, 3, 4, 5]
+    assert legs[-1][1] == "trailing"
+    assert legs[-1][2] is None
+    # reconcile_tp_legs must not chase a leg that was never placed: it
+    # would otherwise query a nonexistent order and mark it errored on every
+    # poll, indefinitely.
+    bybit_demo.reconcile_tp_legs(conn, lock, client, ledger_id=ledger_id)
+    trailing_leg = conn.execute(
+        "SELECT status, last_error FROM bybit_demo_tp_legs "
+        "WHERE ledger_id=? AND leg_index=5",
+        (ledger_id,),
+    ).fetchone()
+    assert trailing_leg == ("trailing", None)
+
+
+def test_multi_tp_trail_last_leg_hands_off_to_maintain_trailing_stops(
+    monkeypatch,
+):
+    monkeypatch.setenv(BYBIT_DEMO_MULTI_TP_ENABLED_ENV, "true")
+    monkeypatch.setenv(BYBIT_DEMO_TP_TRAIL_LAST_LEG_ENV, "true")
+    conn = _db()
+    lock = threading.Lock()
+    client = MultiTpTradingClient()
+
+    result = submit_signal(conn, lock, client, **_multi_tp_signal_kwargs())
+    assert result["tp_setup"] == "armed"
+
+    # Price has run past the last leg's 106.0 target; maintain_trailing_stops
+    # must pick up the floor _ensure_tp_orders_for_ledger set and move the
+    # exchange stop there, exactly as it would for a standalone
+    # BYBIT_DEMO_TRAIL_PAST_TP row.
+    client.positions[0]["markPrice"] = "108"
+
+    outcome = bybit_demo.maintain_trailing_stops(conn, lock, client)
+
+    assert outcome["moved"] == 1
+    assert client.trading_stop_calls == [{"symbol": "BTCUSDT", "stop_loss": 106.0}]
+
+
 def test_multi_tp_deadline_stops_automatic_placement(monkeypatch):
     monkeypatch.setenv(BYBIT_DEMO_MULTI_TP_ENABLED_ENV, "true")
     conn = _db()
