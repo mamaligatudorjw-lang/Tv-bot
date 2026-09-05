@@ -1455,7 +1455,7 @@ def test_multi_tp_entry_uses_native_sl_and_places_five_reduce_only_legs(
     assert len(client.tp_calls) == 5
     assert [call["direction"] for call in client.tp_calls] == ["LONG"] * 5
     assert [call["qty"] for call in client.tp_calls] == pytest.approx(
-        [0.05, 0.075, 0.1, 0.125, 0.15]
+        [0.075, 0.112, 0.15, 0.187, 0.226]
     )
     assert [call["price"] for call in client.tp_calls] == pytest.approx(
         [102.0, 103.0, 104.0, 105.0, 106.0]
@@ -1473,7 +1473,7 @@ def test_multi_tp_entry_uses_native_sl_and_places_five_reduce_only_legs(
     assert conn.execute(
         "SELECT COUNT(*), SUM(planned_qty) FROM bybit_demo_tp_legs WHERE ledger_id=?",
         (result["ledger_id"],),
-    ).fetchone() == (5, pytest.approx(0.5))
+    ).fetchone() == (5, pytest.approx(0.75))
     assert conn.execute(
         "SELECT event_type, reason FROM bybit_demo_tp_events "
         "WHERE ledger_id=? AND event_type='plan_created'",
@@ -2100,7 +2100,7 @@ def test_multi_tp_keeps_whitelist_and_reserve_preflight(
         (result["ledger_id"],),
     ).fetchone()
     assert row[0] == "allow"
-    assert row[1] == pytest.approx(50.0)
+    assert row[1] == pytest.approx(75.0)
     assert row[2] == pytest.approx(4000.0)
     assert row[3] == pytest.approx(100.0)
 
@@ -2971,7 +2971,7 @@ def test_submit_signal_is_idempotent_and_keeps_paper_table_separate():
         "FROM bybit_demo_positions"
     ).fetchone()
     assert row[:4] == ("ema_cross_confirmed", "1/3", "submitted", "order-1")
-    assert row[4] == pytest.approx(0.5)
+    assert row[4] == pytest.approx(0.75)
     assert row[5] == 0
     assert conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='demo_positions'"

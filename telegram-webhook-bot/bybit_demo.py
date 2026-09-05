@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 BYBIT_DEMO_BASE_URL = "https://api-demo.bybit.com"
 BYBIT_DEMO_CATEGORY = "linear"
-BYBIT_DEMO_NOTIONAL_USD = 50.0
+BYBIT_DEMO_NOTIONAL_USD = 75.0
 BYBIT_DEMO_RECV_WINDOW = 5_000
 BYBIT_DEMO_REQUEST_TIMEOUT = 8.0
 BYBIT_DEMO_MAX_POLL_ROWS = 25
@@ -483,7 +483,7 @@ class BybitDemoError(RuntimeError):
 
 
 class BybitDemoSizingError(ValueError):
-    """The $50 notional cannot be represented by the instrument filters."""
+    """The requested notional cannot be represented by the instrument filters."""
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -509,7 +509,7 @@ def calculate_linear_quantity(
     min_order_qty: float | str,
     qty_step: float | str,
 ) -> float:
-    """Return a step-aligned linear-contract quantity without exceeding $50."""
+    """Return a step-aligned linear-contract quantity capped at notional_usd."""
     notional = _decimal(notional_usd, "notional")
     price = _decimal(entry_price, "entry_price")
     minimum = _decimal(min_order_qty, "min_order_qty")
@@ -518,7 +518,8 @@ def calculate_linear_quantity(
     quantity = (raw_qty / step).to_integral_value(rounding=ROUND_DOWN) * step
     if quantity < minimum or quantity <= 0:
         raise BybitDemoSizingError(
-            f"$50 notional is below instrument minimum ({_decimal_text(minimum)})"
+            f"${_decimal_text(notional)} notional is below instrument "
+            f"minimum ({_decimal_text(minimum)})"
         )
     return float(quantity)
 
@@ -1266,7 +1267,7 @@ def initialize_schema(conn: Any) -> None:
             entry_price REAL NOT NULL,
             sl_price REAL NOT NULL,
             tp_price REAL NOT NULL,
-            notional_usd REAL NOT NULL DEFAULT 50,
+            notional_usd REAL NOT NULL DEFAULT 75,
             qty REAL,
             min_order_qty REAL,
             qty_step REAL,
