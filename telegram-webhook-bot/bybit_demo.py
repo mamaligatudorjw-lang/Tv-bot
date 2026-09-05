@@ -2902,6 +2902,35 @@ def _breakeven_error_kind(exc: Exception) -> str:
     return "ambiguous"
 
 
+def _breakeven_candidate_ids_for_symbol(
+    conn: Any,
+    db_lock: threading.Lock,
+    *,
+    symbol: str,
+) -> list[int]:
+    """Return active ledger rows that can manage the symbol's full-position SL."""
+    with db_lock:
+        cursor = conn.execute(
+            """
+            SELECT p.id
+            FROM bybit_demo_positions AS p
+            WHERE UPPER(p.symbol)=?
+              AND p.status NOT IN ('closed', 'rejected')
+              AND p.protection_state IN ('armed', ?)
+              AND EXISTS (
+                  SELECT 1
+                  FROM bybit_demo_tp_legs AS leg
+                  WHERE leg.ledger_id=p.id
+                    AND leg.leg_index=1
+                    AND CAST(COALESCE(leg.executed_qty, 0) AS REAL) > 0
+              )
+            ORDER BY p.id
+            """,
+            (str(symbol).upper(), BYBIT_DEMO_TP_PARTIAL_STATE),
+        )
+        return [int(row[0]) for row in cursor.fetchall()]
+
+
 def ensure_breakeven_sl(
     conn: Any,
     db_lock: threading.Lock,
@@ -2923,6 +2952,31 @@ def ensure_breakeven_sl(
     row = _get_row(conn, db_lock, ledger_id)
     if not row:
         return {"status": "not_found", "ledger_id": ledger_id}
+
+    # One-way accounts net every ledger row of a symbol into a single exchange
+    # position. If more than one row is (or already was) eligible to manage
+    # that shared position's SL, no single row can safely move it — an
+    # already-armed row is deliberately kept as a candidate too, so a second
+    # row processed later in the same pass still sees it and backs off,
+    # instead of racing set_trading_stop against a sibling.
+    candidate_ids = _breakeven_candidate_ids_for_symbol(
+        conn,
+        db_lock,
+        symbol=str(row["symbol"]),
+    )
+    if len(candidate_ids) > 1:
+        logger.warning(
+            "bybit_demo_breakeven_skipped_multi_row symbol=%s ledger_id=%d "
+            "candidate_ledger_ids=%s",
+            str(row["symbol"]).upper(),
+            ledger_id,
+            ",".join(str(candidate_id) for candidate_id in candidate_ids),
+        )
+        return {
+            "status": "skipped_multi_row",
+            "ledger_id": ledger_id,
+            "candidate_ledger_ids": candidate_ids,
+        }
     be_state = str(row.get("be_state") or BYBIT_DEMO_BE_NOT_ARMED_STATE)
     if be_state == BYBIT_DEMO_BE_ARMED_STATE:
         return {"status": BYBIT_DEMO_BE_ARMED_STATE, "ledger_id": ledger_id}

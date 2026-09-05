@@ -3754,8 +3754,16 @@ def _seed_breakeven_ledger(
     stop_loss="95",
     pending_since=None,
     readback_attempts=0,
+    signal_key="tp-parent",
+    symbol="BTCUSDT",
+    order_link_id="bd-tp-parent",
 ):
-    ledger_id = _seed_tp_parent(conn)
+    ledger_id = _seed_tp_parent(
+        conn,
+        signal_key=signal_key,
+        symbol=symbol,
+        order_link_id=order_link_id,
+    )
     side = "Buy" if direction == "LONG" else "Sell"
     conn.execute(
         """
@@ -3805,6 +3813,87 @@ def _seed_breakeven_ledger(
         "stopLoss": str(stop_loss),
     }]
     return ledger_id
+
+
+def test_breakeven_skips_multiple_ledger_rows_for_same_symbol(monkeypatch, caplog):
+    monkeypatch.setenv(BYBIT_DEMO_MULTI_TP_ENABLED_ENV, "true")
+    monkeypatch.setenv(BYBIT_DEMO_BREAKEVEN_ENABLED_ENV, "true")
+    conn = _db()
+    lock = threading.Lock()
+    client = FakeTradingClient()
+
+    first_id = _seed_breakeven_ledger(
+        conn,
+        lock,
+        client,
+        signal_key="tp-parent-a",
+        order_link_id="bd-tp-parent-a",
+    )
+    second_id = _seed_breakeven_ledger(
+        conn,
+        lock,
+        client,
+        signal_key="tp-parent-b",
+        order_link_id="bd-tp-parent-b",
+    )
+
+    with caplog.at_level("WARNING", logger="bybit_demo"):
+        first = ensure_breakeven_sl(
+            conn,
+            lock,
+            client,
+            ledger_id=first_id,
+            position=client.positions[0],
+            now=1_700_000_010,
+        )
+        second = ensure_breakeven_sl(
+            conn,
+            lock,
+            client,
+            ledger_id=second_id,
+            position=client.positions[0],
+            now=1_700_000_011,
+        )
+
+    expected_candidates = sorted([first_id, second_id])
+    assert first["status"] == "skipped_multi_row"
+    assert second["status"] == "skipped_multi_row"
+    assert first["candidate_ledger_ids"] == expected_candidates
+    assert second["candidate_ledger_ids"] == expected_candidates
+    assert client.trading_stop_calls == []
+    assert sum(
+        "bybit_demo_breakeven_skipped_multi_row" in record.message
+        for record in caplog.records
+    ) == 2
+
+    # A distinct symbol is a single-candidate case and must proceed normally.
+    lone_id = _seed_breakeven_ledger(
+        conn,
+        lock,
+        client,
+        signal_key="tp-parent-c",
+        order_link_id="bd-tp-parent-c",
+        symbol="ETHUSDT",
+    )
+    client.positions = [{
+        "symbol": "ETHUSDT",
+        "side": "Buy",
+        "size": "0.8",
+        "positionValue": "80",
+        "unrealisedPnl": "1",
+        "avgPrice": "100",
+        "stopLoss": "95",
+    }]
+    lone = ensure_breakeven_sl(
+        conn,
+        lock,
+        client,
+        ledger_id=lone_id,
+        position=client.positions[0],
+        now=1_700_000_012,
+    )
+    assert lone["status"] == "armed"
+    assert len(client.trading_stop_calls) == 1
 
 
 def test_breakeven_wire_payload_is_full_position_stop_loss():
