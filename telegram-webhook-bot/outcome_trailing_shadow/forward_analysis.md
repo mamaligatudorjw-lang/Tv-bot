@@ -10,8 +10,8 @@ The original `demo_positions` row remains the baseline; shadow rows are independ
 
 | Strategy | Step | Activation | Pairs | Minimum | Bootstrap | Δ avg R | Mean CI 95% |
 |---|---:|---|---:|---:|---|---:|---|
-| overheated_24h | 8.0% | +0.5R | 131 | 20 | ready | -0.01914034 | [-0.18455157, 0.13468449] |
-| ema_cross_confirmed | 6.0% | any_profit | 65 | 20 | ready | -0.00101852 | [-0.21686234, 0.19162496] |
+| overheated_24h | 8.0% | +0.5R | 144 | 20 | ready | -0.09165482 | [-0.25791016, 0.06342747] |
+| ema_cross_confirmed | 6.0% | any_profit | 142 | 20 | ready | 0.06625135 | [-0.09349443, 0.21244341] |
 
 Bootstrap is recomputed as a rolling update after new resolved pairs. No step or activation re-selection is performed.
 
@@ -24,20 +24,20 @@ Before both strategies reach the minimum sample, the report is explicitly insuff
   "bootstrap_seed": 20260826,
   "by_strategy": {
     "ema_cross_confirmed": {
-      "n_pairs": 65,
+      "n_pairs": 142,
       "ready_for_bootstrap": true
     },
     "overheated_24h": {
-      "n_pairs": 131,
+      "n_pairs": 144,
       "ready_for_bootstrap": true
     }
   },
   "freeze_utc": "2026-08-26T11:50:58+00:00",
-  "generated_utc": "2026-09-01T08:30:00.033301+00:00",
+  "generated_utc": "2026-09-05T21:56:28.480806+00:00",
   "historical_candles_used": false,
   "minimum_forward_pairs_per_strategy": 20,
   "rolling_update": true,
   "source": "live_price_snapshots_from_check_demo_positions",
-  "total_resolved_pairs": 196
+  "total_resolved_pairs": 286
 }
 ```

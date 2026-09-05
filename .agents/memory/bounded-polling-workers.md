@@ -68,3 +68,31 @@ remaining deadline budget when this late shadow stage starts.
 incident, not two independent API failures; preserve active-strategy checks
 before this shadow stage and instrument per-symbol/request progress before
 choosing a fix.
+
+At the exact boundary between a timed worker finishing and the caller's
+deadline wait expiring, the wrapper may either return the worker result or
+raise its deadline exception; both are valid lifecycle outcomes.
+
+**Why:** Thread scheduling can make `finished.wait(timeout)` observe the
+worker just before or just after the deadline even when cancellation telemetry
+and side-effect guards behave identically.
+
+**How to apply:** Boundary tests should assert cancellation telemetry,
+worker cleanup, and absence of late side effects rather than requiring one
+specific return-versus-exception branch.
+
+A restart is strongly associated with a scanner hang when the preceding
+session has a worker-enter record with no worker-exit, deadline-abort, or
+subsequent scheduler cycle until the new PID starts. This proves an
+unclosed-worker antecedent, but not the platform's exact restart reason.
+
+**Why:** The runner may expose the PID transition without exposing whether
+its health monitor, a manual workflow action, or another supervisor initiated
+the termination.
+
+**How to apply:** Separate runner-cause evidence from application-cause
+evidence; classify the restart as likely hang-related only when the old
+worker lifecycle and scheduler silence support it. Treat later
+low-budget timeouts in other strategies as a multi-stage deadline cascade,
+not proof that the original long-lived range worker stopped being the
+primary bottleneck.

@@ -34,12 +34,20 @@ from forward_tp_vs_sl import (
 from bybit_demo import (
     BybitDemoError,
     BybitDemoClient,
+    BYBIT_DEMO_REVERSAL_WATCHDOG_INTERVAL_SEC,
     backfill_gate_metadata as backfill_bybit_demo_gate_metadata,
+    bybit_demo_trading_enabled,
+    ensure_pending_tp_orders,
+    manual_breakeven_snapshot,
+    manual_recover_breakeven,
     is_allowed_signal as is_bybit_demo_signal_allowed,
     initialize_schema as initialize_bybit_demo_schema,
+    manual_recover_tp_orders,
+    manual_tp_recovery_snapshot,
     poll_positions as poll_bybit_demo_positions,
     maintain_trailing_stops as maintain_bybit_demo_trailing_stops,
     polling_health_status as bybit_demo_polling_health_status,
+    recover_expired_reversals as recover_bybit_demo_expired_reversals,
     record_successful_poll as record_bybit_demo_poll_success,
     read_reserve_snapshot as read_bybit_reserve_snapshot,
     record_reserve_health,
@@ -222,6 +230,11 @@ class _CycleWorkerCancelled(BaseException):
     """Stop a timed worker at its next cooperative per-symbol checkpoint."""
 
 
+RANGE_BREAKOUT_MAX_INFLIGHT = 8
+RANGE_BREAKOUT_REQUEST_TIMEOUT = 8.0
+CONFIRM_GRACE = 10.0
+
+
 _POLLING_OPTIONAL_ORDER = (
     "new_listings",
     "high_24h",
@@ -377,6 +390,21 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
             context.get("cycle_id", "none"), strategy,
             worker_state["worker_id"], worker.is_alive(),
         )
+        if strategy == "range_breakout_long":
+            if finished.wait(CONFIRM_GRACE):
+                logger.warning(
+                    "polling_worker_cancellation_confirmed cycle_id=%s "
+                    "strategy=%s worker_id=%s grace=%.3fs worker_alive=%s",
+                    context.get("cycle_id", "none"), strategy,
+                    worker_state["worker_id"], CONFIRM_GRACE, worker.is_alive(),
+                )
+            else:
+                logger.error(
+                    "polling_worker_cancellation_failed cycle_id=%s "
+                    "strategy=%s worker_id=%s grace=%.3fs worker_alive=%s",
+                    context.get("cycle_id", "none"), strategy,
+                    worker_state["worker_id"], CONFIRM_GRACE, worker.is_alive(),
+                )
         logger.warning(
             "polling_strategy_timeout cycle_id=%s strategy=%s elapsed=%.3fs "
             "timeout=%.3fs worker_alive=%s",
@@ -386,6 +414,19 @@ def _run_timed_strategy(strategy: str, fn, *args, **kwargs):
         raise _CycleDeadlineExceeded(strategy, timeout)
 
     finished_ts = time.time()
+    cancel_event = context.get("cancel_event")
+    if (
+        strategy == "range_breakout_long"
+        and cancel_event is not None
+        and cancel_event.is_set()
+        and finished_ts >= float(deadline)
+    ):
+        logger.warning(
+            "polling_worker_cancellation_confirmed cycle_id=%s "
+            "strategy=%s worker_id=%s grace=0.000s worker_alive=%s",
+            context.get("cycle_id", "none"), strategy,
+            worker_state["worker_id"], worker.is_alive(),
+        )
     _log_strategy_timing(strategy, started, finished_ts)
     if "error" in result:
         raise result["error"]
@@ -418,6 +459,36 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "890707423")
 STATUS_API_TOKEN_ENV = "STATUS_API_TOKEN"
+BYBIT_DEMO_TP_RECOVERY_TOKEN_ENV = "BYBIT_DEMO_TP_RECOVERY_TOKEN"
+BYBIT_DEMO_TP_RECOVERY_HEADER = "X-Bybit-TP-Recovery-Token"
+BYBIT_DEMO_TP_RECOVERY_MAX_AUTH_FAILURES = 5
+BYBIT_DEMO_TP_RECOVERY_AUTH_WINDOW_SEC = 60.0
+_tp_recovery_auth_lock = threading.Lock()
+_tp_recovery_auth_failures: list[float] = []
+
+# Temporary, fixed-scope production forensic probe.  Keep this allowlist
+# literal and remove the route after the published ledger has been checked.
+BYBIT_DEMO_FORENSIC_WINDOW_SEC = 120
+BYBIT_DEMO_FORENSIC_CASES = (
+    {
+        "case": "EGLDUSDT_20260902T180330Z",
+        "symbol": "EGLDUSDT",
+        "strategy": "overheated_24h",
+        "event_ts": 1_788_372_210,
+    },
+    {
+        "case": "ARBUSDT_20260902T182326Z",
+        "symbol": "ARBUSDT",
+        "strategy": "overheated_24h",
+        "event_ts": 1_788_373_406,
+    },
+    {
+        "case": "KITEUSDT_20260902T182343Z",
+        "symbol": "KITEUSDT",
+        "strategy": "overheated_24h",
+        "event_ts": 1_788_373_423,
+    },
+)
 
 # Global Binance cluster endpoints — tried in order until one succeeds
 BINANCE_HOSTS = [
@@ -442,6 +513,25 @@ BINANCE_FUTURES_BASE = BINANCE_FUTURES_HOSTS[0]
 # accessible from Replit and covers a wider set of USDT perpetuals.
 # ---------------------------------------------------------------------------
 GATEIO_BASE = "https://api.gateio.ws/api/v4/futures/usdt"
+GATEIO_SEMAPHORE_WAIT_TIMEOUT = 8.0
+
+
+class _GateioTimeout(requests.Timeout):
+    """A requests.Timeout-compatible Gate.io failure with a stable reason."""
+
+    reason = "gateio_timeout"
+
+
+class _GateioSemaphoreTimeout(_GateioTimeout):
+    reason = "semaphore_wait_timeout"
+
+
+class _GateioRequestDeadline(_GateioTimeout):
+    reason = "request_deadline"
+
+
+class _GateioRequestCancelled(_GateioTimeout):
+    reason = "cancelled"
 
 def _to_gate(symbol: str) -> str:
     """Convert internal symbol 'AKEUSDT' → Gate.io contract 'AKE_USDT'."""
@@ -455,20 +545,238 @@ def _from_gate(symbol: str) -> str:
         return symbol[:-5] + "USDT"
     return symbol
 
-def _gateio_get(path: str, params: dict | None = None, timeout: int = 10):
+
+def _gateio_timeout(
+    exc_type: type[_GateioTimeout],
+    *,
+    path: str,
+    budget: float,
+    elapsed: float,
+) -> _GateioTimeout:
+    """Build and log a bounded Gate.io timeout without logging request details."""
+    exc = exc_type(
+        f"Gate.io {exc_type.reason} for {path} "
+        f"(budget={budget:.3f}s elapsed={elapsed:.3f}s)"
+    )
+    exc.gateio_reason = exc_type.reason
+    exc.gateio_path = path
+    exc.gateio_budget = budget
+    exc.gateio_elapsed = elapsed
+    logger.warning(
+        "gateio_timeout path=%s reason=%s budget=%.3fs elapsed=%.3fs",
+        path, exc_type.reason, budget, elapsed,
+    )
+    return exc
+
+
+def _gateio_acquire(
+    path: str,
+    cancel_event: threading.Event | None,
+) -> None:
+    """Acquire the shared Gate.io permit without an unbounded wait."""
+    started = time.monotonic()
+    deadline = started + GATEIO_SEMAPHORE_WAIT_TIMEOUT
+    while True:
+        now = time.monotonic()
+        remaining = deadline - now
+        if remaining <= 0:
+            raise _gateio_timeout(
+                _GateioSemaphoreTimeout,
+                path=path,
+                budget=GATEIO_SEMAPHORE_WAIT_TIMEOUT,
+                elapsed=now - started,
+            )
+        if cancel_event is not None and cancel_event.is_set():
+            raise _gateio_timeout(
+                _GateioRequestCancelled,
+                path=path,
+                budget=GATEIO_SEMAPHORE_WAIT_TIMEOUT,
+                elapsed=now - started,
+            )
+
+        wait_for = min(0.1, remaining)
+        if cancel_event is not None:
+            if cancel_event.wait(wait_for):
+                now = time.monotonic()
+                raise _gateio_timeout(
+                    _GateioRequestCancelled,
+                    path=path,
+                    budget=GATEIO_SEMAPHORE_WAIT_TIMEOUT,
+                    elapsed=now - started,
+                )
+        elif _gateio_sem.acquire(timeout=wait_for):
+            return
+
+        if cancel_event is not None:
+            # The event wait above is only a cancellation poll.  Try the
+            # semaphore once after the poll so a permit becoming available at
+            # the boundary is not unnecessarily discarded.
+            if _gateio_sem.acquire(blocking=False):
+                return
+
+
+def _gateio_set_socket_timeout(resp, timeout: float) -> None:
+    """Best-effortly bound the next urllib3 socket read to the remaining budget.
+
+    ``requests`` treats its read timeout as an inactivity timeout.  Once a
+    response has started, the socket timeout must be refreshed before each
+    streamed read so a slow-drip response cannot extend the absolute deadline.
+    Test doubles and alternate response implementations simply skip this.
+    """
+    raw = getattr(resp, "raw", None)
+    sock = None
+    try:
+        sock = raw._fp.fp.raw._sock
+    except AttributeError:
+        pass
+    if sock is not None and hasattr(sock, "settimeout"):
+        sock.settimeout(max(0.001, timeout))
+
+
+def _gateio_drain_response(
+    resp,
+    *,
+    path: str,
+    timeout: float,
+    started: float,
+    cancel_event: threading.Event | None,
+) -> None:
+    """Read a Gate.io response under an absolute deadline.
+
+    The body is materialized back into the requests Response object so all
+    existing callers can continue using ``raise_for_status()`` and ``json()``.
+    """
+    iter_content = getattr(resp, "iter_content", None)
+    if not callable(iter_content):
+        # Small response test doubles may already represent a fully-buffered
+        # response.  Real requests responses always expose iter_content.
+        if cancel_event is not None and cancel_event.is_set():
+            raise _gateio_timeout(
+                _GateioRequestCancelled,
+                path=path,
+                budget=timeout,
+                elapsed=time.monotonic() - started,
+            )
+        if time.monotonic() - started >= timeout:
+            raise _gateio_timeout(
+                _GateioRequestDeadline,
+                path=path,
+                budget=timeout,
+                elapsed=time.monotonic() - started,
+            )
+        return
+
+    chunks = []
+    remaining = timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        raise _gateio_timeout(
+            _GateioRequestDeadline,
+            path=path,
+            budget=timeout,
+            elapsed=time.monotonic() - started,
+        )
+    _gateio_set_socket_timeout(resp, remaining)
+    for chunk in iter_content(chunk_size=64 * 1024):
+        now = time.monotonic()
+        if cancel_event is not None and cancel_event.is_set():
+            raise _gateio_timeout(
+                _GateioRequestCancelled,
+                path=path,
+                budget=timeout,
+                elapsed=now - started,
+            )
+        if now - started >= timeout:
+            raise _gateio_timeout(
+                _GateioRequestDeadline,
+                path=path,
+                budget=timeout,
+                elapsed=now - started,
+            )
+        if chunk:
+            chunks.append(chunk)
+        remaining = timeout - (now - started)
+        if remaining <= 0:
+            raise _gateio_timeout(
+                _GateioRequestDeadline,
+                path=path,
+                budget=timeout,
+                elapsed=now - started,
+            )
+        _gateio_set_socket_timeout(resp, remaining)
+
+    body = b"".join(chunks)
+    if hasattr(resp, "_content"):
+        resp._content = body
+        resp._content_consumed = True
+
+
+def _gateio_get(
+    path: str,
+    params: dict | None = None,
+    timeout: float = 10,
+    cancel_event: threading.Event | None = None,
+):
     """GET request to Gate.io Futures REST API.
 
     A global semaphore (GATEIO_MAX_CONCURRENT) caps the number of in-flight
     requests so we don't trigger Gate.io's 429 rate limit during bulk scans.
+    Semaphore acquisition is bounded for every caller.  The HTTP body is
+    streamed under an absolute wall-clock deadline because requests' regular
+    read timeout only limits socket inactivity.
     """
     url = f"{GATEIO_BASE}{path}"
-    with _gateio_sem:
-        resp = requests.get(url, params=params, timeout=timeout,
-                            headers={"Accept": "application/json"})
-    resp.raise_for_status()
-    return resp
+    timeout = max(0.001, float(timeout))
+    _gateio_acquire(path, cancel_event)
+    resp = None
+    started = time.monotonic()
+    try:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _gateio_timeout(
+                _GateioRequestCancelled,
+                path=path,
+                budget=timeout,
+                elapsed=0.0,
+            )
+        resp = requests.get(
+            url,
+            params=params,
+            timeout=timeout,
+            headers={"Accept": "application/json"},
+            stream=True,
+        )
+        _gateio_drain_response(
+            resp,
+            path=path,
+            timeout=timeout,
+            started=started,
+            cancel_event=cancel_event,
+        )
+        resp.raise_for_status()
+        return resp
+    except requests.Timeout as exc:
+        if not isinstance(exc, _GateioTimeout):
+            logger.warning(
+                "gateio_timeout path=%s reason=requests_timeout budget=%.3fs "
+                "elapsed=%.3fs",
+                path, timeout, time.monotonic() - started,
+            )
+        raise
+    finally:
+        if resp is not None:
+            close = getattr(resp, "close", None)
+            if callable(close):
+                close()
+        _gateio_sem.release()
 
-def _gateio_klines(symbol: str, interval: str, limit: int) -> list:
+
+def _gateio_klines(
+    symbol: str,
+    interval: str,
+    limit: int,
+    *,
+    timeout: float = 10,
+    cancel_event: threading.Event | None = None,
+) -> list:
     """Fetch Gate.io candlesticks and return them in Binance-compatible format.
 
     Binance kline indices used by this bot:
@@ -479,7 +787,8 @@ def _gateio_klines(symbol: str, interval: str, limit: int) -> list:
     resp = _gateio_get(
         "/candlesticks",
         params={"contract": _to_gate(symbol), "interval": interval, "limit": limit},
-        timeout=10,
+        timeout=timeout,
+        cancel_event=cancel_event,
     )
     raw = resp.json()
     # Convert to Binance-compatible list: [ts, o, h, l, c, v, ts, sum, ...]
@@ -533,6 +842,7 @@ state = {
     "last_vol_spike_alerted": {},      # symbol -> timestamp
     "ema200_4h": {},                   # symbol -> float (EMA-200 on 4h, refreshed hourly)
     "atr_4h": {},                      # symbol -> float (ATR-14 on 4h, refreshed hourly)
+    "atr_4h_close_ts": {},             # symbol -> latest 4h candle close timestamp
     "sigma_daily": {},                 # symbol -> float (std of daily % returns over ~30d)
     "last_ema200_refresh": 0,          # unix ts of last 4h-stats refresh
     "last_momentum_alerted": {},       # symbol -> {threshold: ts}
@@ -2372,7 +2682,15 @@ def _demo_open_position(
         _bybit_allowed = _bybit_demo_signal_allowed(
             is_shadow, alert_type, confirmation_level
         )
-        if _bybit_allowed and _cycle_side_effect_allowed(
+        if _bybit_allowed and not bybit_demo_trading_enabled():
+            logger.info(
+                "bybit_demo_signal skipped strategy=%s symbol=%s direction=%s "
+                "reason=trading_disabled",
+                alert_type or "?",
+                symbol,
+                direction,
+            )
+        elif _bybit_allowed and _cycle_side_effect_allowed(
             "bybit_demo_order", symbol=symbol
         ):
             try:
@@ -2393,6 +2711,16 @@ def _demo_open_position(
                     sl_price=float(sl_price),
                     tp_price=float(tp_price),
                     source_is_shadow=bool(is_shadow),
+                    atr_value=(
+                        state["atr_4h"].get(symbol)
+                        if symbol in state["atr_4h"]
+                        else None
+                    ),
+                    atr_candle_close_ts=(
+                        state["atr_4h_close_ts"].get(symbol)
+                        if symbol in state["atr_4h_close_ts"]
+                        else None
+                    ),
                 )
                 logger.info(
                     "bybit_demo_signal strategy=%s symbol=%s direction=%s "
@@ -5153,7 +5481,16 @@ def get_4h_stats(symbol: str) -> dict | None:
             return None
         atr = _calculate_atr(highs, lows, closes, 14)
         sigma = _calculate_daily_sigma(closes)
-        return {"ema200": ema, "atr": atr, "sigma_daily": sigma}
+        try:
+            atr_candle_close_ts = int(float(raw[-1][0]) / 1000)
+        except (TypeError, ValueError, IndexError):
+            atr_candle_close_ts = None
+        return {
+            "ema200": ema,
+            "atr": atr,
+            "atr_candle_close_ts": atr_candle_close_ts,
+            "sigma_daily": sigma,
+        }
     except Exception as e:
         logger.warning("4h stats fetch failed for %s: %s", symbol, e)
         return None
@@ -5206,6 +5543,10 @@ def refresh_ema200_4h(symbols: list[str], deadline: float | None = None) -> int:
                     state["ema200_4h"][symbol] = stats["ema200"]
                     if stats.get("atr") is not None:
                         state["atr_4h"][symbol] = stats["atr"]
+                    if stats.get("atr_candle_close_ts") is not None:
+                        state["atr_4h_close_ts"][symbol] = stats[
+                            "atr_candle_close_ts"
+                        ]
                     if stats.get("sigma_daily") is not None:
                         state["sigma_daily"][symbol] = stats["sigma_daily"]
                 updated += 1
@@ -9253,152 +9594,198 @@ def check_low_rejection_long(tickers: dict[str, dict]) -> int:
     return sent
 
 
+def _range_breakout_candidate(
+    symbol: str,
+    t: dict,
+    candles: list,
+    now: float,
+) -> bool:
+    """Evaluate one already-fetched range candidate and create its shadow row."""
+    if _cycle_cancel_requested() or not candles:
+        return False
+    if len(candles) < RANGE_BREAKOUT_MIN_SEG_LEN + 3:
+        return False
+
+    bars = candles
+    n = len(bars)
+    # bar i = last completed bar (index n-2; n-1 is still forming)
+    i = n - 2
+    # e = last bar of the candidate range = i−1
+    e = i - 1
+    if e < 0:
+        return False
+
+    # ── Step 1: grow range backwards from e ──────────────────────────────────
+    seg_high = float(bars[e][2])
+    seg_low = float(bars[e][3])
+    seg_start = e
+    for k in range(1, RANGE_BREAKOUT_MAX_LOOKBACK):
+        s = e - k
+        if s < 0:
+            break
+        nh = max(seg_high, float(bars[s][2]))
+        nl = min(seg_low, float(bars[s][3]))
+        if nl <= 0:
+            break
+        if (nh - nl) / nl > RANGE_BREAKOUT_MAX_WIDTH:
+            break
+        seg_high = nh
+        seg_low = nl
+        seg_start = s
+
+    seg_len = e - seg_start + 1
+    if seg_len < RANGE_BREAKOUT_MIN_SEG_LEN:
+        return False
+
+    # ── Step 4 (fast reject): breakout bar must close above seg_high ─────────
+    entry = float(bars[i][4])
+    if entry <= seg_high:
+        return False
+
+    # ── Step 5: volume confirmation ──────────────────────────────────────────
+    seg_vols = [float(bars[j][5]) for j in range(seg_start, e + 1)]
+    avg_vol = sum(seg_vols) / len(seg_vols) if seg_vols else 0.0
+    bar_vol = float(bars[i][5])
+    if avg_vol > 0 and bar_vol < RANGE_BREAKOUT_VOL_FACTOR * avg_vol:
+        return False
+
+    # ── Step 3: pre-segment drop ──────────────────────────────────────────────
+    pre_start = max(0, seg_start - RANGE_BREAKOUT_PRE_DROP_WIN)
+    if pre_start >= seg_start:
+        return False
+    pre_high = max(float(bars[j][2]) for j in range(pre_start, seg_start))
+    if pre_high <= 0:
+        return False
+    drop = (pre_high - seg_low) / pre_high
+    if drop < RANGE_BREAKOUT_MIN_DROP:
+        return False
+
+    # ── SL / TP ───────────────────────────────────────────────────────────────
+    sl_raw = seg_low * (1.0 - RANGE_BREAKOUT_SL_BUFFER)
+    sl_dist = (entry - sl_raw) / entry
+    sl_dist = min(sl_dist, RANGE_BREAKOUT_SL_MAX_PCT)  # hard cap
+    sl_price = entry * (1.0 - sl_dist)
+    tp_price = entry + 2.0 * (entry - sl_price)  # R:R 2:1
+
+    if sl_price <= 0 or tp_price <= entry or _cycle_cancel_requested():
+        return False
+
+    vol_ratio = bar_vol / avg_vol if avg_vol > 0 else 0.0
+    width_pct = (seg_high - seg_low) / seg_low * 100.0
+
+    _demo_open_position(
+        symbol, "LONG", entry, sl_price, tp_price,
+        is_shadow=True,
+        alert_type="range_breakout_long",
+        score=70,
+        notify_body=(
+            f"📦 Пробой базы <b>LONG 📈</b>"
+            f" <code>{symbol}</code>\n"
+            f"Цена: <b>${entry:,.6g}</b>  │  "
+            f"База: <b>{seg_len}ч</b>, ширина <b>{width_pct:.1f}%</b>\n"
+            f"Коррекция до базы: <b>−{drop * 100:.1f}%</b>  │  "
+            f"Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
+            f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
+        ),
+    )
+
+    if _cycle_side_effect_allowed("cooldown", symbol=symbol):
+        with state_lock:
+            state["last_range_breakout_alerted"][symbol] = now
+
+    logger.info(
+        "range_breakout LONG shadow %s: seg=%dh width=%.1f%% drop=%.1f%% "
+        "vol=%.1fx entry=%.6g sl=%.6g tp=%.6g",
+        symbol, seg_len, width_pct, drop * 100.0, vol_ratio, entry, sl_price, tp_price,
+    )
+    return True
+
+
 def check_range_breakout_long(tickers: dict[str, dict]) -> int:
-    """Shadow LONG: coin corrected ≥25%, formed a tight base (≥10h, ≤10% wide),
-    then the last completed 1h bar closed above the base on elevated volume.
-
-    Detection (1h candles, slide backwards from bar i-1):
-      1. Longest contiguous segment ending at bar i-1 where
-         (max_high − min_low) / min_low ≤ RANGE_BREAKOUT_MAX_WIDTH.
-      2. Segment length ≥ RANGE_BREAKOUT_MIN_SEG_LEN bars.
-      3. In RANGE_BREAKOUT_PRE_DROP_WIN bars before segment start:
-         (pre_high − seg_low) / pre_high ≥ RANGE_BREAKOUT_MIN_DROP.
-
-    Breakout (bar i = last completed 1h bar):
-      4. close > seg_high.
-      5. bar i volume ≥ RANGE_BREAKOUT_VOL_FACTOR × avg volume over the range.
-
-    SL: seg_low × (1 − RANGE_BREAKOUT_SL_BUFFER), capped at
-        RANGE_BREAKOUT_SL_MAX_PCT below entry.
-    TP: entry + 2 × (entry − sl_price)  (R:R 2:1).
-    Shadow-only until RANGE_BREAKOUT_SHADOW_ONLY = False.
-    Cooldown: RANGE_BREAKOUT_COOLDOWN seconds per symbol.
-    """
+    """Shadow LONG range breakout with bounded concurrent Gate.io prefetch."""
     if not tickers:
         return 0
-    sent = 0
-    now  = time.time()
+    now = time.time()
+    cancel_event = _cycle_context().get("cancel_event")
+    eligible: list[tuple[str, dict]] = []
 
     for symbol, t in tickers.items():
+        if _cycle_cancel_requested():
+            return 0
         try:
             price = float(t["lastPrice"])
             vol24 = float(t["quoteVolume"])
-        except (ValueError, KeyError):
+        except (ValueError, KeyError, TypeError):
             continue
-
         if vol24 < MIN_VOLUME_USDT or price <= 0:
             continue
-
-        # Cooldown check before expensive candle fetch
         with state_lock:
             last_alerted = state["last_range_breakout_alerted"].get(symbol, 0)
-        if now - last_alerted < RANGE_BREAKOUT_COOLDOWN:
-            continue
+        if now - last_alerted >= RANGE_BREAKOUT_COOLDOWN:
+            eligible.append((symbol, t))
 
+    if not eligible:
+        return 0
+
+    candles_by_symbol: dict[str, list] = {}
+    prefetch_ex = ThreadPoolExecutor(max_workers=RANGE_BREAKOUT_MAX_INFLIGHT)
+    prefetch_jobs = {
+        prefetch_ex.submit(
+            _prefetch_job,
+            _gateio_klines,
+            symbol,
+            "1h",
+            200,
+            timeout=RANGE_BREAKOUT_REQUEST_TIMEOUT,
+            cancel_event=cancel_event,
+        ): symbol
+        for symbol, _t in eligible
+    }
+    try:
+        context_deadline = _cycle_context().get("deadline")
+        collection_timeout = (
+            max(0.0, float(context_deadline) - time.time())
+            if context_deadline is not None else None
+        )
         try:
-            candles = _gateio_klines(symbol, "1h", 200)
-        except Exception as _exc:
-            logger.debug("check_range_breakout_long klines %s: %s", symbol, _exc)
-            continue
-        if not candles or len(candles) < RANGE_BREAKOUT_MIN_SEG_LEN + 3:
-            continue
+            completed = as_completed(prefetch_jobs, timeout=collection_timeout)
+            for future in completed:
+                if _cycle_cancel_requested():
+                    return 0
+                symbol = prefetch_jobs[future]
+                payload = future.result()
+                if not _prefetch_result_allowed(
+                    symbol, payload["finished_ts"], "range_breakout_long"
+                ):
+                    continue
+                if payload["error"] is not None:
+                    logger.debug(
+                        "check_range_breakout_long klines %s: %s",
+                        symbol, payload["error"],
+                    )
+                    continue
+                candles_by_symbol[symbol] = payload["value"] or []
+        except FuturesTimeoutError:
+            logger.warning(
+                "Range breakout prefetch budget exhausted; kept %d/%d results",
+                len(candles_by_symbol), len(prefetch_jobs),
+            )
+            if cancel_event is not None:
+                cancel_event.set()
+            return 0
+    finally:
+        for future in prefetch_jobs:
+            future.cancel()
+        prefetch_ex.shutdown(wait=False, cancel_futures=True)
 
-        bars = candles
-        n    = len(bars)
-        # bar i  = last completed bar (index n-2; n-1 is still forming)
-        i    = n - 2
-        # e = last bar of the candidate range = i−1
-        e    = i - 1
-        if e < 0:
-            continue
-
-        # ── Step 1: grow range backwards from e ──────────────────────────────
-        seg_high  = float(bars[e][2])
-        seg_low   = float(bars[e][3])
-        seg_start = e
-        for k in range(1, RANGE_BREAKOUT_MAX_LOOKBACK):
-            s = e - k
-            if s < 0:
-                break
-            nh = max(seg_high, float(bars[s][2]))
-            nl = min(seg_low,  float(bars[s][3]))
-            if nl <= 0:
-                break
-            if (nh - nl) / nl > RANGE_BREAKOUT_MAX_WIDTH:
-                break
-            seg_high  = nh
-            seg_low   = nl
-            seg_start = s
-
-        seg_len = e - seg_start + 1
-
-        # ── Step 2: segment length ────────────────────────────────────────────
-        if seg_len < RANGE_BREAKOUT_MIN_SEG_LEN:
-            continue
-
-        # ── Step 4 (fast reject): breakout bar must close above seg_high ─────
-        entry = float(bars[i][4])
-        if entry <= seg_high:
-            continue
-
-        # ── Step 5: volume confirmation ───────────────────────────────────────
-        seg_vols = [float(bars[j][5]) for j in range(seg_start, e + 1)]
-        avg_vol  = sum(seg_vols) / len(seg_vols) if seg_vols else 0.0
-        bar_vol  = float(bars[i][5])
-        if avg_vol > 0 and bar_vol < RANGE_BREAKOUT_VOL_FACTOR * avg_vol:
-            continue
-
-        # ── Step 3: pre-segment drop ──────────────────────────────────────────
-        pre_start = max(0, seg_start - RANGE_BREAKOUT_PRE_DROP_WIN)
-        if pre_start >= seg_start:
-            continue
-        pre_high = max(float(bars[j][2]) for j in range(pre_start, seg_start))
-        if pre_high <= 0:
-            continue
-        drop = (pre_high - seg_low) / pre_high
-        if drop < RANGE_BREAKOUT_MIN_DROP:
-            continue
-
-        # ── SL / TP ───────────────────────────────────────────────────────────
-        sl_raw   = seg_low * (1.0 - RANGE_BREAKOUT_SL_BUFFER)
-        sl_dist  = (entry - sl_raw) / entry
-        sl_dist  = min(sl_dist, RANGE_BREAKOUT_SL_MAX_PCT)   # hard cap
-        sl_price = entry * (1.0 - sl_dist)
-        tp_price = entry + 2.0 * (entry - sl_price)          # R:R 2:1
-
-        if sl_price <= 0 or tp_price <= entry:
-            continue
-
-        vol_ratio = bar_vol / avg_vol if avg_vol > 0 else 0.0
-        width_pct = (seg_high - seg_low) / seg_low * 100.0
-
-        _demo_open_position(
-            symbol, "LONG", entry, sl_price, tp_price,
-            is_shadow=True,
-            alert_type="range_breakout_long",
-            score=70,
-            notify_body=(
-                f"📦 Пробой базы <b>LONG 📈</b>"
-                f" <code>{symbol}</code>\n"
-                f"Цена: <b>${entry:,.6g}</b>  │  "
-                f"База: <b>{seg_len}ч</b>, ширина <b>{width_pct:.1f}%</b>\n"
-                f"Коррекция до базы: <b>−{drop * 100:.1f}%</b>  │  "
-                f"Объём: <b>{vol_ratio:.1f}×</b> среднего\n"
-                f"🟢 TP: <b>${tp_price:,.6g}</b>  │  🔴 SL: <b>${sl_price:,.6g}</b>"
-            ),
-        )
-
-        if _cycle_side_effect_allowed("cooldown", symbol=symbol):
-            with state_lock:
-                state["last_range_breakout_alerted"][symbol] = now
-
-        logger.info(
-            "range_breakout LONG shadow %s: seg=%dh width=%.1f%% drop=%.1f%% "
-            "vol=%.1fx entry=%.6g sl=%.6g tp=%.6g",
-            symbol, seg_len, width_pct, drop * 100.0, vol_ratio, entry, sl_price, tp_price,
-        )
-        sent += 1
-
+    sent = 0
+    for symbol, t in eligible:
+        if _cycle_cancel_requested():
+            return sent
+        if _range_breakout_candidate(
+            symbol, t, candles_by_symbol.get(symbol, []), now
+        ):
+            sent += 1
     return sent
 
 
@@ -17154,6 +17541,118 @@ def _status_auth_error():
     return None
 
 
+def _tp_recovery_auth_error():
+    """Authenticate the mutating TP-recovery API without logging token values."""
+    # The token is read only from this header and never passed to a logger.
+    # This app has no request-header/body logging middleware; the standard
+    # Flask/Gunicorn access log records method, path, and status only.
+    expected = (os.environ.get(BYBIT_DEMO_TP_RECOVERY_TOKEN_ENV) or "").strip()
+    supplied = (request.headers.get(BYBIT_DEMO_TP_RECOVERY_HEADER) or "").strip()
+    now = time.monotonic()
+    with _tp_recovery_auth_lock:
+        _tp_recovery_auth_failures[:] = [
+            ts for ts in _tp_recovery_auth_failures
+            if now - ts < BYBIT_DEMO_TP_RECOVERY_AUTH_WINDOW_SEC
+        ]
+        if len(_tp_recovery_auth_failures) >= BYBIT_DEMO_TP_RECOVERY_MAX_AUTH_FAILURES:
+            logger.warning("bybit_demo_tp_recovery auth_rate_limited")
+            return jsonify({"error": "too many authorization failures"}), 429
+        if not expected:
+            _tp_recovery_auth_failures.append(now)
+            logger.warning("bybit_demo_tp_recovery auth_failed reason=disabled")
+            return jsonify({"error": "unauthorized"}), 401
+        try:
+            token_matches = hmac.compare_digest(
+                supplied.encode("utf-8"),
+                expected.encode("utf-8"),
+            )
+        except (TypeError, UnicodeError):
+            token_matches = False
+        if not supplied or not token_matches:
+            _tp_recovery_auth_failures.append(now)
+            logger.warning(
+                "bybit_demo_tp_recovery auth_failed reason=%s",
+                "missing" if not supplied else "invalid",
+            )
+            return jsonify({"error": "unauthorized"}), 401
+        _tp_recovery_auth_failures.clear()
+    return None
+
+
+def _tp_recovery_http_status(result: dict) -> int:
+    status = str(result.get("status") or "")
+    if status == "not_found":
+        return 404
+    if status in {
+        "invalid_action",
+        "partial_not_available",
+        "invalid_state",
+        "disabled",
+        "recovery_required_manual",
+        "recovery_required",
+    }:
+        return 409 if status != "invalid_action" else 400
+    return 200
+
+
+@app.route("/bot-api/bybit-demo/tp-recovery", methods=["GET", "POST"])
+def api_bybit_demo_tp_recovery():
+    """GET rows or POST {ledger_id, action, reason?} for manual recovery.
+
+    Actions are retry_all (eligible non-rejected legs only), accept_partial,
+    and abandon. The token is header-only, never part of the URL or body.
+    """
+    auth_error = _tp_recovery_auth_error()
+    if auth_error is not None:
+        return auth_error
+    try:
+        with _db_lock:
+            conn = _get_db()
+        if request.method == "GET":
+            result = manual_tp_recovery_snapshot(conn, _db_lock)
+            result["breakeven"] = manual_breakeven_snapshot(conn, _db_lock)
+            return jsonify(result), _tp_recovery_http_status(result)
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "invalid JSON body"}), 400
+        ledger_id = payload.get("ledger_id")
+        action = payload.get("action")
+        if isinstance(ledger_id, bool) or not isinstance(ledger_id, int):
+            return jsonify({"error": "ledger_id must be an integer"}), 400
+        if not isinstance(action, str):
+            return jsonify({"error": "action is required"}), 400
+        reason = payload.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            return jsonify({"error": "reason must be a string"}), 400
+        client = BybitDemoClient.from_env()
+        if action == "retry_breakeven":
+            result = manual_recover_breakeven(
+                conn,
+                _db_lock,
+                client,
+                ledger_id=ledger_id,
+                action=action,
+                reason=reason,
+            )
+        else:
+            result = manual_recover_tp_orders(
+                conn,
+                _db_lock,
+                client,
+                ledger_id=ledger_id,
+                action=action,
+                reason=reason,
+            )
+        return jsonify(result), _tp_recovery_http_status(result)
+    except Exception as exc:
+        logger.warning(
+            "bybit_demo_tp_recovery request_failed error=%s",
+            type(exc).__name__,
+        )
+        return jsonify({"error": "recovery unavailable"}), 503
+
+
 def _last_signal_at(conn) -> int | None:
     """Read the latest generated alert without exposing its payload."""
     try:
@@ -17237,6 +17736,156 @@ def api_bybit_demo_status():
     except Exception as exc:
         logger.warning("api_bybit_demo_status failed: %s", type(exc).__name__)
         return jsonify({"error": "Bybit Demo status unavailable"}), 503
+
+
+@app.route("/bot-api/bybit-demo-forensic", methods=["GET"])
+def api_bybit_demo_forensic():
+    """Temporary authenticated read-only probe for three published cases."""
+    auth_error = _status_auth_error()
+    if auth_error is not None:
+        return auth_error
+
+    try:
+        with _db_lock:
+            conn = _get_db()
+            cases = []
+            for case in BYBIT_DEMO_FORENSIC_CASES:
+                start_ts = case["event_ts"] - BYBIT_DEMO_FORENSIC_WINDOW_SEC
+                end_ts = case["event_ts"] + BYBIT_DEMO_FORENSIC_WINDOW_SEC
+                ledger_rows = conn.execute(
+                    """
+                    SELECT id, strategy, symbol, direction, status,
+                           signal_ts, ts_created
+                    FROM bybit_demo_positions
+                    WHERE symbol = ?
+                      AND strategy = ?
+                      AND (
+                          signal_ts BETWEEN ? AND ?
+                          OR ts_created BETWEEN ? AND ?
+                      )
+                    ORDER BY id
+                    """,
+                    (
+                        case["symbol"],
+                        case["strategy"],
+                        start_ts,
+                        end_ts,
+                        start_ts,
+                        end_ts,
+                    ),
+                ).fetchall()
+                reversal_rows = conn.execute(
+                    """
+                    SELECT id, symbol, state, source_direction,
+                           target_direction, created_ts
+                    FROM bybit_demo_reversals
+                    WHERE symbol = ?
+                      AND (
+                          created_ts BETWEEN ? AND ?
+                          OR updated_ts BETWEEN ? AND ?
+                      )
+                    ORDER BY id
+                    """,
+                    (
+                        case["symbol"],
+                        start_ts,
+                        end_ts,
+                        start_ts,
+                        end_ts,
+                    ),
+                ).fetchall()
+                demo_rows = conn.execute(
+                    """
+                    SELECT id, symbol, direction, alert_type, status,
+                           is_shadow, is_top, ts_open, ts_close
+                    FROM demo_positions
+                    WHERE symbol = ?
+                      AND alert_type = ?
+                      AND ts_open BETWEEN ? AND ?
+                    ORDER BY id
+                    """,
+                    (
+                        case["symbol"],
+                        case["strategy"],
+                        start_ts,
+                        end_ts,
+                    ),
+                ).fetchall()
+                demo_id_gap_rows = conn.execute(
+                    """
+                    SELECT id, ts_open
+                    FROM demo_positions
+                    WHERE ts_open BETWEEN ? AND ?
+                    ORDER BY id
+                    """,
+                    (start_ts, end_ts),
+                ).fetchall()
+                cases.append(
+                    {
+                        "case": case["case"],
+                        "symbol": case["symbol"],
+                        "strategy": case["strategy"],
+                        "event_ts": case["event_ts"],
+                        "window": {
+                            "start_ts": start_ts,
+                            "end_ts": end_ts,
+                        },
+                        "ledger_rows": [
+                            {
+                                "ledger_id": row[0],
+                                "strategy": row[1],
+                                "symbol": row[2],
+                                "direction": row[3],
+                                "status": row[4],
+                                "signal_ts": row[5],
+                                "created_ts": row[6],
+                            }
+                            for row in ledger_rows
+                        ],
+                        "reversal_rows": [
+                            {
+                                "reversal_id": row[0],
+                                "symbol": row[1],
+                                "state": row[2],
+                                "source_direction": row[3],
+                                "target_direction": row[4],
+                                "created_ts": row[5],
+                            }
+                            for row in reversal_rows
+                        ],
+                        "demo_rows": [
+                            {
+                                "demo_id": row[0],
+                                "symbol": row[1],
+                                "direction": row[2],
+                                "alert_type": row[3],
+                                "status": row[4],
+                                "is_shadow": bool(row[5]),
+                                "is_top": bool(row[6]),
+                                "ts_open": row[7],
+                                "ts_close": row[8],
+                            }
+                            for row in demo_rows
+                        ],
+                        "demo_id_gap_rows": [
+                            {
+                                "id": row[0],
+                                "ts_open": row[1],
+                            }
+                            for row in demo_id_gap_rows
+                        ],
+                    }
+                )
+        return jsonify(
+            {
+                "read_only": True,
+                "window_sec": BYBIT_DEMO_FORENSIC_WINDOW_SEC,
+                "cases": cases,
+            }
+        )
+    except Exception as exc:
+        logger.warning("api_bybit_demo_forensic failed: %s", type(exc).__name__)
+        return jsonify({"error": "Bybit Demo forensic data unavailable"}), 503
 
 
 @app.route("/bot-api/ai-analyze", methods=["POST"])
@@ -17421,10 +18070,11 @@ def _run_bybit_demo_poll() -> None:
     try:
         with _db_lock:
             conn = _get_db()
-        # Installing the TP floor is time-critical — the trailing edge exists
-        # only while the stop is actually on the exchange — so it runs before
-        # reconciliation and in its own guard: a failure here must not stop the
-        # ledger from being reconciled, and vice versa.
+        # Both stages below are time-critical, exchange-facing side effects
+        # that must not block ledger reconciliation on failure, and must not
+        # block each other: trailing installs the TP floor once price gets
+        # there, multi-TP arms pending leg orders for a filled entry. Neither
+        # depends on the other, so each gets its own guard.
         try:
             trail = maintain_bybit_demo_trailing_stops(conn, _db_lock, client)
             if trail.get("moved"):
@@ -17438,6 +18088,19 @@ def _run_bybit_demo_poll() -> None:
             logger.warning(
                 "bybit_demo_trail failed: %s", type(_trail_exc).__name__
             )
+        try:
+            pending_result = ensure_pending_tp_orders(conn, _db_lock, client)
+            if pending_result.get("armed"):
+                logger.info(
+                    "bybit_demo_tp_pending status=%s processed=%s armed=%s",
+                    pending_result.get("status"),
+                    pending_result.get("processed", 0),
+                    pending_result.get("armed", 0),
+                )
+        except Exception as _pending_exc:
+            logger.warning(
+                "bybit_demo_tp_pending failed: %s", type(_pending_exc).__name__
+            )
         result = poll_bybit_demo_positions(conn, _db_lock, client)
         if result.get("status") == "ok" and result.get("successful_requests", 0):
             record_bybit_demo_poll_success()
@@ -17447,8 +18110,33 @@ def _run_bybit_demo_poll() -> None:
             result.get("polled", 0),
             result.get("closed", 0),
         )
+        logger.info(
+            "bybit_demo_tp_setup status=%s processed=%s armed=%s",
+            pending_result.get("status"),
+            pending_result.get("processed", 0),
+            pending_result.get("armed", 0),
+        )
     except Exception as exc:
         logger.warning("bybit_demo_poll failed: %s", type(exc).__name__)
+
+
+def _run_bybit_demo_reversal_watchdog() -> None:
+    """Recover expired reversal lifecycle rows without touching the exchange."""
+    try:
+        with _db_lock:
+            conn = _get_db()
+        result = recover_bybit_demo_expired_reversals(conn, _db_lock)
+        if result["recovered"]:
+            logger.warning(
+                "bybit_demo_reversal_watchdog recovered=%d reversal_ids=%s",
+                result["recovered"],
+                result["reversal_ids"],
+            )
+    except Exception as exc:
+        logger.warning(
+            "bybit_demo_reversal_watchdog failed: %s",
+            type(exc).__name__,
+        )
 
 
 def _run_bybit_demo_reserve_probe() -> None:
@@ -17526,6 +18214,14 @@ scheduler.add_job(
     "interval",
     seconds=20,
     id="bybit_demo_check",
+    max_instances=1,
+    coalesce=True,
+)
+scheduler.add_job(
+    _run_bybit_demo_reversal_watchdog,
+    "interval",
+    seconds=BYBIT_DEMO_REVERSAL_WATCHDOG_INTERVAL_SEC,
+    id="bybit_demo_reversal_watchdog",
     max_instances=1,
     coalesce=True,
 )

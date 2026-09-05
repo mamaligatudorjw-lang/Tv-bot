@@ -1,0 +1,41 @@
+Прошёл весь diff построчно. Начну с процесса, потом код.
+
+## Рестарт workflow
+
+Спасибо за честное признание — это ровно то, что нужно: ты правильно определил, что это был process violation (операционное действие без отдельного "да"), проверил и показал, что именно было сброшено (только in-memory кэши ATR/EMA/sigma, не персистентные), и подтвердил по логам, что никакие сигналы/ордера не обрабатывались во время рестарта. На будущее: любое операционное действие над живым сервисом (restart, redeploy, что угодно, что не является правкой файла) требует отдельного "да" точно так же, как изменение кода — этот принцип действует one for one с самого начала этого расследования, не только для diff'ов.
+
+## Проверка кода
+
+**Taxonomy кодов** (`_TP_CREATE_DEFINITE_REJECT_CODES`, `_TP_CREATE_DUPLICATE_CODES`) — совпадает буква в букву с тем, что я уже верифицировал на этапе плана против официальной таблицы Bybit. `_tp_create_error_kind` корректно дефолтит на `"ambiguous"` для любого нераспознанного кода — это самый безопасный выбор по умолчанию, а не наоборот.
+
+**Wire payload** — `create_limit_tp_order` и обновлённый `create_market_order` (native TP теперь опционален, SL остаётся обязательным) проверены тестами на буквальный JSON body — `test_multi_tp_client_uses_reduce_only_limit_wire_payload` и `test_multi_tp_entry_wire_keeps_sl_only_native_protection` подтверждают именно то, что нужно (`reduceOnly=true`, `side` инвертирован от direction, никакого `takeProfit`/`tpOrderType` в multi-TP payload).
+
+**Retry-to-completion** (`test_multi_tp_ambiguous_leg_retries_to_completion_without_duplicate`) — пересчитал руками: leg1/leg3 создаются успешно с первой попытки, leg2 падает ambiguous → `recovery_required`; на повторном проходе `_ensure_tp_plan_rows` находит все три persisted legs с совпадающими target_price/planned_qty (защита от drift плана сработала бы, если бы не совпало), leg1/leg3 пропускаются (уже есть `order_id`), только leg2 переразмещается через lookup-then-create. Итоговая последовательность `tp_calls` `[leg1, leg2, leg3, leg2]` — ровно то, что тест проверяет. Корректно.
+
+**Математика плана end-to-end** (`test_multi_tp_entry_uses_native_sl_and_places_three_reduce_only_legs`) — пересчитал: entry=100, atr=2, N=3 → цены [102,104,106] ✓; executed_qty=0.5, split [0.2,0.3,0.5] → qty [0.1,0.15,0.25] (остаток на дальней ноге) ✓. Calculator (этап 2) и entry-wiring (этап 5) действительно стыкуются корректно.
+
+**Deadline и plan-failure** тесты — оба воспроизводят ровно заявленное поведение (`tp_setup_deadline_exceeded` без единого `tp_calls`; `atr_value=None` → `calculate_multi_tp_plan` кидает `"invalid atr_value"`, entry остаётся с native SL, никакого молчаливого fallback).
+
+**Арифметика тестов** — пересчитал сам: 11 функций → 16 кейсов (9×1 + 5-параметризация + 2-параметризация), 110+16=126 ✓; `-k multi_tp` подхватывает те же 16 плюс 11 существующих `test_multi_tp_plan_*` из этапа 2 (которые тоже содержат "multi_tp" в имени) = 27 ✓. Всё сходится.
+
+## Главная находка — требует фикса
+
+`_ensure_tp_orders_for_ledger()` при `not row.get("executed_qty")` делает:
+
+```python
+order_items = client.get_order_realtime(...)
+```
+
+**без какого-либо try/except.** Эта функция вызывается напрямую (синхронно) из `_submit_entry_order()` в двух местах — в "recovered"-ветке и в основном пути сразу после успешного `create_market_order(...)`. Ни один из этих двух call site не оборачивает вызов в try/except. Если в этот момент `client.get_order_realtime(...)` бросит `BybitDemoError` (транзиентная ошибка сети/таймаут при проверке статуса fill) — исключение уйдёт вверх и попадёт в **уже существующий** exception-handling `_submit_entry_order()`, который был написан для ошибок **до** размещения entry-ордера (sizing, preflight). Но к этому моменту entry уже реально отправлен и подтверждён (`_record_order` уже вызван) — то есть на бирже уже может быть открыта настоящая позиция.
+
+Если существующий catch там делает что-то вроде "пометить `status="rejected"`, вернуть blocked" — это создаст расхождение "на бирже позиция открыта, у нас в леджере rejected", что либо провоцирует duplicate-entry на повторной попытке вызывающей стороны, либо просто теряет бухгалтерию по реальной позиции. Это ровно тот класс риска, который вся эта работа должна была исключить.
+
+Обратный вызов из `ensure_pending_tp_orders()` эту же функцию **уже** защищён (`except Exception as exc: _tp_plan_error(...)`), поэтому проблема касается именно двух прямых вызовов внутри `_submit_entry_order()`.
+
+**Нужно:** обернуть оба вызова `_ensure_tp_orders_for_ledger(...)` внутри `_submit_entry_order()` (или сам внутренний `client.get_order_realtime(...)` в момент проверки fill) так, чтобы любое исключение здесь переводило setup в `recovery_required`/`awaiting_entry_fill`-подобный исход и **не влияло** на то, что entry уже считается успешно отправленным. Плюс регрессионный тест: мок бросает исключение именно на этом lookup после успешного `create_market_order`, и `result["status"] == "submitted"` (не "rejected"/"blocked"), просто `tp_setup` в degraded-состоянии.
+
+## Второстепенный вопрос, не блокирует
+
+Leg с `status="rejected"` (deterministic reject) навсегда останавливает **весь** проход по остальным legs (`if any(... == "rejected"): return recovery_required` — до цикла размещения) и лидер остаётся в `protection_state="recovery_required"`, который `ensure_pending_tp_orders()` продолжает выбирать **каждый** 20-секундный цикл бесконечно, каждый раз повторяя один и тот же `logger.warning`. Это осознанный дизайн (не пытаться автоматически разрешить deterministic reject) или стоит один раз пометить и убрать из автоматического re-select, оставив только ручное восстановление?
+
+Жду фикс по главной находке (с тестом) — после него готов принять этап 5.

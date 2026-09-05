@@ -1,0 +1,75 @@
+## Срез после 13:40:47 UTC
+
+Проверено до **15:51:34 UTC**.
+
+| Стратегия | Новые `bybit_demo_signal` | Новые `Filled` | Новые `rejected` | Сейчас `open` | `pending` |
+|---|---:|---:|---:|---:|---:|
+| `overheated_24h` | 0 | 0 | 0 | 0 | 0 |
+| `overheated_confirmed` | 0 | 0 | 0 | 0 | 0 |
+| `ema_cross_confirmed` | 2 | 1 | 1 | 1 | 0 |
+| **Итого** | **2** | **1** | **1** | **1** | **0** |
+
+Новые события:
+
+1. **13:45:02 UTC — `DOTUSDT LONG`, `ema_cross_confirmed 1/3`**
+   - Bybit signal: submitted
+   - результат: **Filled**
+   - сейчас: **open**
+   - `preflight_decision=allow`
+   - `shadow_origin=0`
+
+2. **14:15:02 UTC — `4USDT SHORT`, `ema_cross_confirmed 1/3`**
+   - результат: **rejected**
+   - причина: `reserve_preflight:exposure_cap`
+   - `preflight_decision=blocked`
+   - `preflight_reason=exposure_cap`
+   - это локальный лимит экспозиции, не Bybit rejection и не shadow-gate.
+
+После 14:15:02 новых Bybit-попыток до cutoff нет. Но полная тишина отсутствует: за интервал были две реальные попытки.
+
+## Shadow-флаги
+
+В текущем `app.py` значения всё ещё такие:
+
+```text
+ALERT_TYPE_SHADOW_ONLY["overheated_24h"]       = False
+ALERT_TYPE_SHADOW_ONLY["overheated_confirmed"] = False
+ALERT_TYPE_SHADOW_ONLY["ema_cross_confirmed"]  = False
+```
+
+Глобально:
+
+```text
+SHADOW_ONLY_MODE = True
+```
+
+Но для этих трёх стратегий per-strategy `False` обходят глобальный shadow-режим. Новый `DOTUSDT` это подтверждает фактически: он прошёл как `shadow_origin=0`, получил `bybit_demo_signal` и стал Filled.
+
+Следовательно, отсутствие новых `overheated_24h` и `overheated_confirmed` — **не случайный откат shadow-флагов**.
+
+## Workflow и рестарт
+
+Workflow сейчас **работает**:
+
+- текущий gunicorn master: PID **143**;
+- текущий worker: PID **280**;
+- последняя проверка цикла завершилась:
+  ```text
+  errors: []
+  elapsed_seconds: 5.6
+  ```
+- polling продолжается, в логах есть новые циклы и `bybit_demo_poll`.
+
+Но важная поправка: подтвердить «тот же процесс без рестартов» нельзя.
+
+Между проверкой в 13:40:47 и текущим моментом произошёл рестарт:
+
+```text
+новый master стартовал: 15:50:47 UTC, PID 143
+новый worker стартовал: 15:50:48 UTC, PID 280
+gunicorn начал слушать порт: 15:50:49 UTC
+```
+
+До этого в runtime-логах использовался другой PID — **283**. Поэтому корректный ответ:
+
+> Workflow сейчас жив и после старта работает штатно, но с момента предыдущей проверки был как минимум один рестарт gunicorn. По доступным логам причина рестарта не установлена; traceback или явного crash-маркера в проверенном фрагменте нет.

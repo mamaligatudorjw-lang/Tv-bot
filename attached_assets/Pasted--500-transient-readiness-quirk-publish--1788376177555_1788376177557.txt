@@ -1,0 +1,36 @@
+Отличная новость по методологии — 500-ошибка объяснилась (transient readiness quirk после publish), это разумно и не требует дальнейшего расследования. А вот основной вывод — **это уже не "недостаточно данных", это подтверждённая двойная пустота** (ledger и Bybit оба molчат) — важный сдвиг: раньше искали "не залогирован ли terminal outcome", теперь ясно, что **сигнал не дошёл до кода, который вообще пишет в ledger**.
+
+Отмечу нестыковку с первым отчётом, которая теперь резко сузила зону поиска: в самом первом отчёте было "Duplicate guard по Bybit `signal_key`: **0** — Ни одного вызова `bybit_demo_signal` в этом окне" — то есть submit-функция для Bybit вообще не вызывалась ни разу за всё окно, при 20 warning-строках `SHADOW_ONLY_MODE ... sending real signal` для `overheated_24h`. Это значит разрыв не между scoring и Bybit — он **между самим warning-логом внутри `send_alert_with_log` (это Telegram-путь) и вызовом функции, которая реально открывает demo-позицию** (`_demo_open_position` / `bybit_demo_signal`) — это, похоже, вообще разные функции, не последовательные шаги одного потока. Проверю в коде, как `overheated_24h` доходит (или не доходит) от генерации сигнала до `_demo_open_position`.
+
+Нашёл, кажется, реальный корень — и это не место, которое проверял forensic-эндпоинт.
+
+## Ключевая находка: две разные таблицы, а проверяли только одну
+
+`_demo_open_position` (app.py:2191-2495) сначала пишет в **`demo_positions`** (paper-ledger, строки 2257-2269) — и только **потом**, если разрешено, вызывает `submit_bybit_demo_signal`, который пишет в **`bybit_demo_positions`** (2373). Ваш forensic-эндпоинт проверял только `bybit_demo_positions`/`bybit_demo_reversals` — но не `demo_positions`. Пустой результат в `bybit_demo_positions` **не доказывает**, что `_demo_open_position` вообще не вызывалась — он доказывает только, что она не дошла до Bybit-подшага (или дошла, но не туда записалась).
+
+## Нашёл абсолютно немой branch — вот он
+
+```python
+_bybit_allowed = _bybit_demo_signal_allowed(
+    is_shadow, alert_type, confirmation_level
+)
+if _bybit_allowed and _cycle_side_effect_allowed(
+    "bybit_demo_order", symbol=symbol
+):
+    try:
+        ...
+        logger.info("bybit_demo_signal ...")
+    except Exception as _bybit_exc:
+        logger.warning("bybit_demo_signal suppressed error ...")
+```
+
+Если `_bybit_allowed` — `False` (то есть `_bybit_demo_signal_allowed()` вернула `False` — либо `is_shadow=True`, либо `is_bybit_demo_signal_allowed(alert_type, confirmation_level)` из `bybit_demo.py` отклонила), **весь `if`-блок просто не выполняется — ни одной строки лога, ни `else`, ничего**. Ни успех, ни отказ нигде не фиксируются. Это ровно то, что даёт "ни Suppressed, ни Bybit reject, ни ledger row" — молчание не потому, что событие потерялось где-то в тумане, а потому что **в этой конкретной точке кода никогда не было логирования отрицательного исхода**.
+
+## И ещё один непроверенный маркер
+Строка 2494-2495: `except Exception as exc: logger.warning("_demo_open_position failed for %s: %s", symbol, exc)` — ловит абсолютно любое исключение во всей функции (включая `_validate_demo_price_basis`, DB-вставку и т.д.). Этот текст тоже не был в списке искомых маркеров.
+
+## Что нужно проверить дальше (конкретно, не общими словами)
+1. Добавить в forensic-эндпоинт (или прогнать разовый SQL) запрос к **`demo_positions`** по тем же трём (symbol, ts, alert_type='overheated_24h') — если строка там **есть**, значит `_demo_open_position` вызывалась и дошла минимум до INSERT, и разрыв — именно в немом `_bybit_allowed` branch. Если строки **нет** — разрыв ещё раньше (внутри `check_overheated_oversold`, до вызова `_demo_open_position`, либо поймано `_demo_open_position failed`-исключением).
+2. Отдельно grep по логам за это окно: `_demo_open_position failed`, `Demo DUPLICATE BLOCKED`, `Demo UNIQUE constraint blocked INSERT` — три маркера, которые тоже не проверялись.
+
+Если гипотеза с немым `_bybit_allowed` подтвердится — это уже готовый, точечный фикс: добавить `else`-ветку с логом (`bybit_demo_signal_skipped reason=shadow` / `reason=whitelist`), без изменения самой бизнес-логики допуска. Передайте это как следующий шаг трассировки.

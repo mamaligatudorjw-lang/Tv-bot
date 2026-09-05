@@ -143,3 +143,31 @@ mtime_ms = 1788249854189
 storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:46ddd2c0-c68d-4c0e-af35-b8b05c054d7b/be555fde-34e7-4a9f-a616-d8a86b558962/151edaa2-55ab-46c9-af58-8d43ade8c72d"
 storage_version_token = "1788249880883069"
 content_type = "text/csv"
+
+[[outputs]]
+id = "WuVf68r_bkK8PyatnVcYI"
+uri = "file://exports/crypto-signals-project-2026-09-02.zip"
+type = "unspecified"
+title = "Crypto Signals — project ZIP"
+description = "Current project snapshot with source code, tests, artifacts, analysis reports, and attached assets. Excludes dependencies, platform caches, .git history, runtime SQLite databases, logs, and bot state for safety and size."
+logical_id = "2b7bdb0e-4e22-4087-a279-c8de9831ecf7"
+content_hash = "sha256:86ff3f4fb616768ec14509b57b19b6ff371a5bfa56954040318a0100f269e0a9"
+size = 39598135
+mtime_ms = 1788370163055
+storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:46ddd2c0-c68d-4c0e-af35-b8b05c054d7b/2b7bdb0e-4e22-4087-a279-c8de9831ecf7/dc53f0e1-f47f-4ff2-9227-073885e979ea"
+storage_version_token = "1788370171183468"
+content_type = "application/octet-stream"
+
+[[outputs]]
+id = "EDg3SaptMCYPA6lxGXMLB"
+uri = "file://attached_assets/raw-forensic-output-2026-09-02.txt"
+type = "text"
+title = "Raw forensic output — full filtered slice"
+description = "Unmodified main forensic output with shadow rows, all 71 shadow-only warnings, paper duplicate blocks, Bybit/reversal zero-result sections, and 43 suppressions."
+logical_id = "1f9aab52-83ff-488e-a7f0-6a24c2ac6b8c"
+content_hash = "sha256:67b5b494f4ce9d0592c6026779a20472d956e3c6d746c3d1a50f39523c67f8f0"
+size = 21557
+mtime_ms = 1788377834947
+storage_uri = "gcs://replit-rams-assets-worf/rams/assets/repl:46ddd2c0-c68d-4c0e-af35-b8b05c054d7b/1f9aab52-83ff-488e-a7f0-6a24c2ac6b8c/89c9299d-0d78-49cd-b92f-8be4769814fc"
+storage_version_token = "1788377835297454"
+content_type = "text/plain"

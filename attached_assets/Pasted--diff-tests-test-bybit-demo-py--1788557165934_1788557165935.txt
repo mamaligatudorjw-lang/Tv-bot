@@ -1,0 +1,48 @@
+Прежде чем продолжать — не хватает самого существенного: **diff по `tests/test_bybit_demo.py` отсутствует.** Ты заявил "128 passed" и упомянул набор тестов на auth, rate limit, идемпотентность, "token не попадает в логи" — но не показал ни одного из них. Без этого не могу подтвердить, что заявленное поведение действительно протестировано, а не просто описано. Пришли, пожалуйста, полный diff тестового файла.
+
+При этом код `app.py`/`bybit_demo.py` я уже разобрал построчно, и есть два содержательных вопроса, которые нужно решить независимо от теста:
+
+## 1. Несогласованность идемпотентности повторного `accept_partial`
+
+`abandon` обрабатывает повторный вызов явно и корректно:
+
+```python
+if action == "abandon" and protection_state == BYBIT_DEMO_TP_ABANDONED_STATE:
+    return {"status": BYBIT_DEMO_TP_ABANDONED_STATE, "ledger_id": ledger_id}
+```
+
+Но для `accept_partial` такой же special-case перед общей проверкой состояния отсутствует. Если ledger уже `armed_partial_manual` и приходит повторный `accept_partial`, он попадает в общую проверку:
+
+```python
+if protection_state != BYBIT_DEMO_TP_MANUAL_RECOVERY_STATE:
+    return {"status": "invalid_state", ...}
+```
+
+и получает `"invalid_state"` — то есть как ошибку, а не как идемпотентное подтверждение текущего состояния. Это прямо противоречит твоему же пункту плана "повторный `accept_partial` идемпотентен" и ведёт себя иначе, чем симметричный случай с `abandon`. Нужно либо:
+- добавить такой же early-return для `accept_partial` (аналогично `abandon`), возвращающий `{"status": "armed_partial_manual", ...}` на повторный вызов;
+- либо объяснить, почему `"invalid_state"` здесь на самом деле осознанно (тогда нужно менять формулировку в плане/README, а не в коде).
+
+Хочу увидеть, что там реально тестируется — возможно, тест это уже покрывает и решение просто не описано в prose, но без diff теста я не могу это проверить.
+
+## 2. `hmac.compare_digest` может кинуть `TypeError` на non-ASCII заголовке
+
+```python
+if not supplied or not hmac.compare_digest(supplied, expected):
+```
+
+`hmac.compare_digest` для `str`-аргументов требует ASCII-only, иначе кидает `TypeError`. `_tp_recovery_auth_error()` вызывается **до** общего `try/except` в handler'е:
+
+```python
+auth_error = _tp_recovery_auth_error()
+if auth_error is not None:
+    return auth_error
+try:
+    ...
+except Exception as exc:
+    ...
+    return 503
+```
+
+Значит, запрос с non-ASCII байтами в `X-Bybit-TP-Recovery-Token` вызовет необработанное исключение и Flask 500 вместо чистого 401 — не утечка токена, но необработанный путь на публично достижимом (пусть и защищённом токеном) endpoint. Нужно либо сравнивать через `.encode()` в bytes (там ограничения ASCII нет), либо обернуть само сравнение в try/except, трактуя любое исключение как "invalid".
+
+Пришли diff теста + ответы на эти два пункта — после этого закончу review этапа #199.
