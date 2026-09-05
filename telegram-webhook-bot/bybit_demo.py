@@ -1093,14 +1093,6 @@ class BybitDemoClient:
             "reduceOnly": True,
             "orderLinkId": order_link_id,
         }
-        # take_profit is None when the caller trails past TP instead of closing
-        # there; the stop above still ships with the entry.
-        if take_profit is not None:
-            body["takeProfit"] = _decimal_text(
-                _decimal(take_profit, "take_profit")
-            )
-            body["tpOrderType"] = "Market"
-            body["tpTriggerBy"] = "MarkPrice"
         payload = self._request("POST", "/v5/order/create", body=body)
         result = payload.get("result") or {}
         return result if isinstance(result, dict) else {}
