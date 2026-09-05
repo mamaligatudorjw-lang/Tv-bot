@@ -5756,6 +5756,7 @@ def maintain_trailing_stops(
     moved = 0
     skipped_multi_row = 0
     skipped_side_mismatch = 0
+    skipped_reversal_in_progress = 0
     for symbol, symbol_rows in by_symbol.items():
         if len(symbol_rows) > 1:
             skipped_multi_row += len(symbol_rows)
@@ -5852,6 +5853,22 @@ def maintain_trailing_stops(
                 )
                 continue
 
+        # A reversal in progress for this symbol may be closing this same
+        # exchange position (or have just opened a different one this row no
+        # longer describes) via its own set_trading_stop-adjacent path.
+        # Checked immediately before the call, mirroring
+        # _breakeven_reversal_blocked's placement in ensure_breakeven_sl.
+        if _breakeven_reversal_blocked(
+            conn, db_lock, ledger_id=int(row["id"]), symbol=symbol
+        ):
+            skipped_reversal_in_progress += 1
+            logger.warning(
+                "bybit_demo_trail_skipped_reversal_in_progress ledger_id=%s "
+                "symbol=%s",
+                row.get("id"), symbol,
+            )
+            continue
+
         try:
             client.set_trading_stop(symbol=symbol, stop_loss=new_stop)
         except BybitDemoError as exc:
@@ -5881,6 +5898,7 @@ def maintain_trailing_stops(
         "moved": moved,
         "skipped_multi_row": skipped_multi_row,
         "skipped_side_mismatch": skipped_side_mismatch,
+        "skipped_reversal_in_progress": skipped_reversal_in_progress,
     }
 
 

@@ -3896,6 +3896,84 @@ def test_breakeven_skips_multiple_ledger_rows_for_same_symbol(monkeypatch, caplo
     assert len(client.trading_stop_calls) == 1
 
 
+def _seed_trailing_ledger(
+    conn,
+    *,
+    direction="LONG",
+    floor=102.0,
+    signal_key="trail-parent",
+    symbol="BTCUSDT",
+    order_link_id="bd-trail-parent",
+):
+    ledger_id = _seed_tp_parent(
+        conn,
+        signal_key=signal_key,
+        symbol=symbol,
+        order_link_id=order_link_id,
+    )
+    conn.execute(
+        """
+        UPDATE bybit_demo_positions
+        SET direction=?, status='open', tick_size=0.1, trail_floor=?
+        WHERE id=?
+        """,
+        (direction, floor, ledger_id),
+    )
+    conn.commit()
+    return ledger_id
+
+
+def test_maintain_trailing_stops_activates_at_floor():
+    conn = _db()
+    lock = threading.Lock()
+    client = FakeTradingClient()
+    _seed_trailing_ledger(conn, direction="LONG", floor=102.0)
+    client.positions = [{
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "size": "1",
+        "markPrice": "103",
+    }]
+
+    result = bybit_demo.maintain_trailing_stops(conn, lock, client)
+
+    assert result["moved"] == 1
+    assert len(client.trading_stop_calls) == 1
+    assert client.trading_stop_calls[0]["stop_loss"] == 102.0
+
+
+def test_maintain_trailing_stops_skips_when_reversal_in_progress():
+    conn = _db()
+    lock = threading.Lock()
+    client = FakeTradingClient()
+    ledger_id = _seed_trailing_ledger(conn, direction="LONG", floor=102.0)
+    conn.execute(
+        """
+        INSERT INTO bybit_demo_reversals (
+            symbol, source_signal_key, source_direction, target_direction,
+            state, close_deadline_ts, claimed_ts, created_ts, updated_ts
+        ) VALUES ('BTCUSDT', 'trail-reversal-src', 'LONG', 'SHORT',
+                  'CLOSING', 9999999999, 1700000000, 1700000000, 1700000000)
+        """
+    )
+    conn.commit()
+    client.positions = [{
+        "symbol": "BTCUSDT",
+        "side": "Buy",
+        "size": "1",
+        "markPrice": "103",
+    }]
+
+    result = bybit_demo.maintain_trailing_stops(conn, lock, client)
+
+    assert result["skipped_reversal_in_progress"] == 1
+    assert client.trading_stop_calls == []
+    assert conn.execute(
+        "SELECT trail_active FROM bybit_demo_positions WHERE id=?",
+        (ledger_id,),
+    ).fetchone()[0] == 0
+
+
 def test_breakeven_wire_payload_is_full_position_stop_loss():
     session = RecordingSession({"retCode": 0, "result": {}})
     client = BybitDemoClient(
