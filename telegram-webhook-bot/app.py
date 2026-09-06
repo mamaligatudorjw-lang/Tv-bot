@@ -237,6 +237,11 @@ CONFIRM_GRACE = 10.0
 
 _POLLING_OPTIONAL_ORDER = (
     "new_listings",
+    # Whale LSR shift + the personal position tracker run right after the
+    # liquid-pairs snapshot now, ahead of the Gate.io-heavy discovery
+    # strategies below — see the comment at their call site for why.
+    "whale_lsr_shift",
+    "user_position_reversals",
     "high_24h",
     "rsi_and_spikes",
     "momentum",
@@ -254,8 +259,6 @@ _POLLING_OPTIONAL_ORDER = (
     "high_rejection_short",
     "low_rejection_long",
     "range_breakout_long",
-    "whale_lsr_shift",
-    "user_position_reversals",
 )
 
 
@@ -13395,6 +13398,29 @@ def run_checks():
                 logger.warning("Cycle deadline exceeded after tickers fetch — aborting early")
                 return
 
+            # 4c. Whale LSR shift + personal position tracker run right after the
+            # liquid-pairs snapshot, ahead of the Gate.io-heavy strategies below
+            # (rsi_and_spikes alone issues ~2 requests/symbol against a global
+            # 10-concurrent semaphore, and reliably burns most of the cycle's
+            # 240s budget). Both used to sit at the end of _POLLING_OPTIONAL_ORDER
+            # and shared one BaseException-driven cascade abort with
+            # range_breakout_long — whichever stage blew the deadline took every
+            # later stage down with it, so check_user_position_reversals() (the
+            # only path that evaluates reversal signals for real open positions)
+            # could go entire cycles without running. Managing existing positions
+            # matters more than discovering new shadow signals, so these run
+            # first and are no longer hostage to how much budget upstream
+            # discovery strategies happen to leave.
+            summary["whale_lsr_shift_alerts"] = _run_timed_strategy(
+                "whale_lsr_shift", check_whale_lsr_shift, liquid_pairs
+            ) if WHALE_LSR_ENABLED else 0
+            if _abort_if_deadline("whale_lsr_shift"):
+                return
+
+            check_user_position_reversals()
+            if _abort_if_deadline("user_position_reversals"):
+                return
+
             # 5. Detect 24h high breaks (cooldown not yet marked)
             high_24h: list[tuple[str, float, float, float]] = []
             if tickers:
@@ -13575,17 +13601,9 @@ def run_checks():
                 if _abort_if_deadline("range_breakout_long"):
                     return
 
-                # 6j. Whale LSR shift — top traders flip L/S ratio significantly in one cycle
-                summary["whale_lsr_shift_alerts"] = _run_timed_strategy(
-                    "whale_lsr_shift", check_whale_lsr_shift, liquid_pairs
-                ) if WHALE_LSR_ENABLED else 0
-                if _abort_if_deadline("whale_lsr_shift"):
-                    return
-
-                # 6k. Personal position tracker — check user's own open positions
-                check_user_position_reversals()
-                if _abort_if_deadline("user_position_reversals"):
-                    return
+                # 6j/6k. Whale LSR shift + personal position tracker now run much
+                # earlier (right after the liquid-pairs snapshot) — see the
+                # comment there for why.
 
                 # 7. Refresh stored 7d/30d highs + EMA-200 (4h) once per hour
                 # Skip heavy refresh passes if we're already close to the deadline
