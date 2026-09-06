@@ -1,3 +1,3 @@
 strategy,step_pct,activation,n_pairs,minimum_pairs,ready_for_bootstrap,baseline_total_r,shadow_total_r,delta_total_r,baseline_avg_r,shadow_avg_r,delta_avg_r,baseline_tp_n,baseline_sl_n,shadow_tp_n,shadow_trail_stop_n,shadow_sl_n,ci_status,mean_ci95
 overheated_24h,8.0,+0.5R,144,20,True,24.07702851,10.87873499,-13.19829351,0.16720159,0.07554677,-0.09165482,56,88,41,50,53,ready,"[-0.25791016, 0.06342747]"
-ema_cross_confirmed,6.0,any_profit,155,20,True,-61.00899194,-47.61392631,13.3950656,-0.3936064,-0.30718662,0.08641978,35,120,22,120,13,ready,"[-0.06539962, 0.22953493]"
+ema_cross_confirmed,6.0,any_profit,158,20,True,-64.28196742,-49.57158061,14.71038678,-0.4068479,-0.31374418,0.09310371,35,123,22,122,14,ready,"[-0.05836868, 0.23084332]"
