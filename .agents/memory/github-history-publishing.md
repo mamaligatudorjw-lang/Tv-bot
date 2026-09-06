@@ -8,3 +8,9 @@ When CLI GitHub authentication is unavailable but the connected GitHub integrati
 **Why:** A contents/API commit of only the requested source files can move the remote branch to an incomplete repository. Per-object SHA checks make the final ref update atomic from the application's perspective and preserve the local history when the common ancestor is shared.
 
 **How to apply:** Reuse the parent tree for commits whose tree is unchanged; otherwise GitHub rejects an empty tree payload. Increase the local child-process buffer when reading large Git blobs, and update the branch ref only after the full chain and the expected remote base ref have both been revalidated.
+
+The GitHub connector's `proxyFetch` can return 404 for a valid `PATCH` ref update even after blob, tree, and commit creation succeeds.
+
+**Why:** The connector's initialized GitHub SDK exposed `rest.git.updateRef` and successfully performed the same fast-forward when the proxy route rejected it.
+
+**How to apply:** Prefer `getClient().rest.git.updateRef({ owner, repo, ref, sha, force: false })` for the final ref move, then read the ref back and verify the target SHA.
