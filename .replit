@@ -97,4 +97,5 @@ BYBIT_RELAY_URL = "https://sinekdemo.duckdns.org"
 
 [userenv.production]
 BYBIT_DEMO_TRADING_ENABLED = "true"
-BYBIT_DEMO_MULTI_TP_ENABLED = "false"
+BYBIT_DEMO_MULTI_TP_ENABLED = "true"
+BYBIT_DEMO_TP_TRAIL_LAST_LEG = "true"
