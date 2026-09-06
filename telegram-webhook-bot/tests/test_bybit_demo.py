@@ -1872,7 +1872,15 @@ def test_multi_tp_create_error_taxonomy(ret_code, expected):
     assert bybit_demo._tp_create_error_kind(error) == expected
 
 
-def test_multi_tp_plan_failure_keeps_entry_with_sl_and_no_tp(monkeypatch):
+def test_multi_tp_plan_failure_falls_back_to_native_tp_when_atr_unavailable(
+    monkeypatch,
+):
+    # Previously this scenario (no live ATR) let the entry through with SL
+    # only and no take-profit at all, dead-ended in tp_plan_failed — a state
+    # no automatic or manual-recovery query watched. That silently stranded
+    # a real position (SKRUSDT, ledger_id=43) with no exit above entry until
+    # a human intervened. The plan is now never attempted without an ATR;
+    # the entry keeps its own native take-profit instead.
     monkeypatch.setenv(BYBIT_DEMO_MULTI_TP_ENABLED_ENV, "true")
     conn = _db()
     lock = threading.Lock()
@@ -1884,18 +1892,23 @@ def test_multi_tp_plan_failure_keeps_entry_with_sl_and_no_tp(monkeypatch):
     result = submit_signal(conn, lock, client, **args)
 
     assert result["status"] == "submitted"
-    assert result["tp_setup"] == "tp_plan_failed"
+    assert "tp_setup" not in result
     assert len(client.tp_calls) == 0
-    assert client.create_calls[0]["take_profit"] is None
+    assert client.create_calls[0]["take_profit"] == pytest.approx(110.0)
+    assert client.create_calls[0]["stop_loss"] == pytest.approx(95.0)
     assert conn.execute(
         "SELECT status, protection_state, last_error "
         "FROM bybit_demo_positions WHERE id=?",
         (result["ledger_id"],),
     ).fetchone() == (
         "submitted",
-        "tp_plan_failed",
-        "tp_plan_failed:invalid atr_value",
+        "legacy_full",
+        None,
     )
+    # A row already in legacy_full must not be picked up by the multi-TP
+    # pending-placement scan on a later poll.
+    pending = ensure_pending_tp_orders(conn, lock, client)
+    assert pending == {"status": "ok", "processed": 0, "armed": 0}
 
 
 def test_multi_tp_pending_entry_is_placed_on_next_hook(monkeypatch):
@@ -2035,6 +2048,25 @@ def test_multi_tp_trail_last_leg_hands_off_to_maintain_trailing_stops(
 
     assert outcome["moved"] == 1
     assert client.trading_stop_calls == [{"symbol": "BTCUSDT", "stop_loss": 106.0}]
+
+
+def test_manual_tp_recovery_snapshot_includes_tp_plan_failed_rows(monkeypatch):
+    monkeypatch.setenv(BYBIT_DEMO_MULTI_TP_ENABLED_ENV, "true")
+    conn = _db()
+    lock = threading.Lock()
+    ledger_id = _seed_tp_parent(conn)
+    conn.execute(
+        "UPDATE bybit_demo_positions SET protection_state='tp_plan_failed', "
+        "last_error='tp_plan_failed:invalid atr_value' WHERE id=?",
+        (ledger_id,),
+    )
+    conn.commit()
+
+    snapshot = bybit_demo.manual_tp_recovery_snapshot(conn, lock)
+
+    assert snapshot["status"] == "ok"
+    assert [row["ledger_id"] for row in snapshot["rows"]] == [ledger_id]
+    assert snapshot["rows"][0]["protection_state"] == "tp_plan_failed"
 
 
 def test_multi_tp_deadline_stops_automatic_placement(monkeypatch):

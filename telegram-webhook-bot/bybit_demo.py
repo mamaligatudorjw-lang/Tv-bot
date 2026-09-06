@@ -2202,7 +2202,14 @@ def manual_tp_recovery_snapshot(
     *,
     max_rows: int = 50,
 ) -> dict[str, Any]:
-    """Return non-mutating details for operator review of manual recovery rows."""
+    """Return non-mutating details for operator review of manual recovery rows.
+
+    Includes tp_plan_failed alongside the explicit manual-recovery state: a
+    plan that failed to compute (bad ATR, instrument filters) leaves the
+    entry order live with only its native SL and no automatic path back —
+    the same operator attention a placement failure gets, just from an
+    earlier stage.
+    """
     if not bybit_demo_multi_tp_enabled():
         return {"status": "disabled", "rows": []}
     with db_lock:
@@ -2212,7 +2219,7 @@ def manual_tp_recovery_snapshot(
                    last_error, requested_tp_count, effective_tp_count,
                    ts_submitted
             FROM bybit_demo_positions
-            WHERE protection_state=?
+            WHERE protection_state IN (?, 'tp_plan_failed')
             ORDER BY id
             LIMIT ?
             """,
@@ -5135,13 +5142,33 @@ def _submit_entry_order(
 ) -> dict[str, Any]:
     """Run the existing reserve-gated entry POST for a persisted intent."""
     multi_tp = bybit_demo_multi_tp_enabled()
+    # calculate_multi_tp_plan requires a positive ATR and has no fallback of
+    # its own (atr_provenance's "fixed_fallback" tag only records that one
+    # was never resolved to a number — it does not invent one). Attempting
+    # multi-TP anyway would either dead-end the row in tp_plan_failed (a
+    # state no automatic or manual-recovery query watches) or, if a proxy
+    # value were derived from the SL distance instead, silently misscale the
+    # whole leg ladder, since that distance already carries its own
+    # direction-dependent multiplier (see _compute_demo_sl_tp). Falling back
+    # to the single native exchange TP is the only option that is both
+    # observable and correctly scaled.
+    row_for_atr = _get_row(conn, db_lock, ledger_id)
+    atr_value = row_for_atr.get("atr_value") if row_for_atr else None
+    effective_multi_tp = multi_tp and atr_value is not None
+    if multi_tp and not effective_multi_tp:
+        logger.warning(
+            "bybit_demo_multi_tp_atr_unavailable ledger_id=%d symbol=%s "
+            "falling back to single native take-profit",
+            ledger_id, symbol,
+        )
+        _update_row(conn, db_lock, ledger_id, protection_state="legacy_full")
     # Trailing past TP needs the position to survive its own target, so the
     # exchange-side take-profit is withheld and `maintain_trailing_stops`
     # installs a stop at TP once price gets there.  Mutually exclusive with
     # multi_tp for now: each already omits the entry take-profit its own way,
     # and combining them is a separate, not-yet-built design (the last TP
     # leg trailing instead of closing at a fixed price).
-    trail_enabled = trail_past_tp_enabled() and not multi_tp
+    trail_enabled = trail_past_tp_enabled() and not effective_multi_tp
     try:
         instrument = client.get_instrument_info(symbol)
         qty = calculate_linear_quantity(
@@ -5177,7 +5204,7 @@ def _submit_entry_order(
         if remote:
             _record_order(conn, db_lock, ledger_id, remote[0], int(time.time()))
             tp_setup = None
-            if multi_tp:
+            if effective_multi_tp:
                 tp_setup = _safe_post_entry_tp_setup(
                     conn,
                     db_lock,
@@ -5215,13 +5242,13 @@ def _submit_entry_order(
             symbol=symbol,
             direction=direction,
             qty=qty,
-            take_profit=None if (multi_tp or trail_enabled) else aligned_tp,
+            take_profit=None if (effective_multi_tp or trail_enabled) else aligned_tp,
             stop_loss=aligned_sl,
             order_link_id=order_link_id,
         )
         _record_order(conn, db_lock, ledger_id, result, int(time.time()))
         tp_setup = None
-        if multi_tp:
+        if effective_multi_tp:
             tp_setup = _safe_post_entry_tp_setup(
                 conn,
                 db_lock,
